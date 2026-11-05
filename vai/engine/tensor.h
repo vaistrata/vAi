@@ -224,7 +224,7 @@ public:
     /**
      * Concatenate along the leading axis, the inverse of split(). Every tensor
      * must match this one's dtype and trailing dimensions; the result owns its
-     * bytes.
+     * bytes. Not for Q4: concatenate wider tensors and convert the result.
      *
      *   Tensor gu = gate.concat(up);   // two [H, K] -> one [2H, K]
      */
@@ -446,7 +446,7 @@ inline Tensor Tensor::concat(const Ts&... others) const
 {
     static_assert((std::conjunction_v<std::is_same<Ts, Tensor>...>), "All arguments must be Tensors");
     VAI_ASSERT(data_ && !data_->hostData_.empty());
-    VAI_ASSERT(!shape_.empty());
+    VAI_ASSERT(!shape_.empty() && data_->dtype_ != Dtype::Q4);   // Q4's scales follow all its words
 
     const Tensor* parts[] = { this, &others... };
 
