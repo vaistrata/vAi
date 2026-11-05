@@ -38,13 +38,13 @@ Seeded Gaussian caption features (`--cap-tokens`), t = 0.5. Relative L2 error ag
 
 | resolution | tokens (image + caption, padded) | vAi coopmat | vAi scalar | PyTorch bf16 | vAi latency (coopmat / scalar) |
 |---|---|---:|---:|---:|---:|
-| 768x1344 | 4032 + 96 (77 caption) | 1.23e-3 | 1.18e-3 | 2.13e-2 | 918 / 1932 ms |
-| 1008x1008 | 4000 + 32 (1 caption, 3969 image) | 1.21e-3 | 1.20e-3 | 2.30e-2 | 890 / 1839 ms |
-| 512x512 | 1024 + 32 (32 caption) | 1.30e-3 | 1.26e-3 | 2.17e-2 | 268 / 333 ms |
-| 1280x720 | 3616 + 320 (300 caption) | 1.61e-3 | 1.60e-3 | 2.82e-2 | 880 / 1770 ms |
-| 1024x1024 | 4096 + 32 (28 caption) | 1.26e-3 | 1.26e-3 | 2.24e-2 | 922 / 1956 ms |
+| 768x1344 | 4032 + 96 (77 caption) | 1.23e-3 | 1.23e-3 | 2.13e-2 | 914 / 1913 ms |
+| 1008x1008 | 4000 + 32 (1 caption, 3969 image) | 1.21e-3 | 1.19e-3 | 2.30e-2 | 892 / 1823 ms |
+| 512x512 | 1024 + 32 (32 caption) | 1.30e-3 | 1.27e-3 | 2.17e-2 | 267 / 327 ms |
+| 1280x720 | 3616 + 320 (300 caption) | 1.61e-3 | 1.60e-3 | 2.82e-2 | 878 / 1756 ms |
+| 1024x1024 | 4096 + 32 (28 caption) | 1.26e-3 | 1.26e-3 | 2.24e-2 | 920 / 1917 ms |
 
-The scalar column is the attention kernel for devices without cooperative matrices, forced on the A40 with `--scalar-attention`.
+The scalar column is the attention kernel for devices without cooperative matrices, forced on the A40 with `--scalar-attention`. Its 16-key tile (`scalarKeysPerTile`) comes from an Adreno 830 (Galaxy S25 Ultra): with 32 keys the kernel spills registers there and runs ~140x slower, past the driver's submit timeout at these lengths. Run alone on that GPU, the 16-key kernel matches a CPU reference to 2e-4.
 
 ## Building and running
 

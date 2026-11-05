@@ -25,6 +25,9 @@ namespace zimage {
              subgroup spilled and ran 3x slower.
     scalar   32 rows per 128 threads on plain FMAs, for devices without
              (trusted) cooperative matrices (zimage-attention-scalar.comp).
+             Its tile is scalarKeysPerTile: with 32 keys the per-thread
+             scores and prefetch spill registers on an Adreno 830 and run
+             ~140x slower (past the driver's submit timeout at DiT lengths).
   coopmatSupported() picks; allowCoopmat = false forces the scalar kernel.
 =============================================================================*/
 class FullAttentionNode : public vai::Node
@@ -35,6 +38,7 @@ class FullAttentionNode : public vai::Node
 public:
     struct PipeParams {
         bool coopmat = false;
+        uint32_t keysPerTile = 0;
         vai::Dtype vDtype = vai::Dtype::None;
 
         bool operator==(const PipeParams&) const = default;
@@ -44,7 +48,8 @@ public:
         uint32_t numHeads;
         uint32_t headDim;                       // multiple of 16
         uint32_t numSubgroups = 8;              // coopmat: query rows per workgroup = 16 * numSubgroups
-        uint32_t keysPerTile = 32;              // multiple of 16; N must be a multiple of it
+        uint32_t keysPerTile = 32;              // coopmat; multiple of 16, N must be a multiple of it
+        uint32_t scalarKeysPerTile = 16;        // scalar; N must be a multiple of it
         bool allowCoopmat = true;
         vai::Dtype oDtype = vai::Dtype::None;   // None: oDefaultDtype
     } config_;
@@ -113,12 +118,13 @@ inline void FullAttentionNode::prepare()
     const uint32_t N = q.shape()[1];
     VAI_ASSERT(k.isShapeOf(H, N, Dh));
     VAI_ASSERT(v.isShapeOf(N, H * Dh));
-    VAI_ASSERT(N % 16 == 0 && N % config_.keysPerTile == 0);
-
+    const bool coopmat = config_.allowCoopmat && coopmatSupported(config_, device());
     const PipeParams p = {
-        .coopmat = config_.allowCoopmat && coopmatSupported(config_, device()),
+        .coopmat = coopmat,
+        .keysPerTile = coopmat ? config_.keysPerTile : config_.scalarKeysPerTile,
         .vDtype = v.dtype(),
     };
+    VAI_ASSERT(N % 16 == 0 && N % p.keysPerTile == 0);
     if (!pipe || p != pipeParams)
     {
         pipeParams = p;
@@ -131,7 +137,7 @@ inline void FullAttentionNode::prepare()
                 eva::constant_id<0>(wgSize),
                 eva::constant_id<1>(sg),                               // sgSize (coopmat; scalar ignores)
                 eva::constant_id<2>(Dh),
-                eva::constant_id<3>(config_.keysPerTile),              // Bc
+                eva::constant_id<3>(p.keysPerTile),                    // Bc
                 eva::constant_id<4>(p.vDtype),                         // typeV
                 eva::constant_id<SPEC_ID_TYPE_O>(config_.oDtype)       // typeO
             },

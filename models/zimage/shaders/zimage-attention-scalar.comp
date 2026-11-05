@@ -30,7 +30,7 @@ layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;
 
 layout(constant_id = 0) const uint wgSize = 128;   // = Br * LPR
 layout(constant_id = 2) const uint Dh     = 128;   // head dim
-layout(constant_id = 3) const uint Bc     = 32;    // keys per tile
+layout(constant_id = 3) const uint Bc     = 16;    // keys per tile
 layout(constant_id = 4) const uint typeV  = 0;     // V dtype
 layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0;
 
