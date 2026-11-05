@@ -35,6 +35,7 @@ public:
         vai::Dtype oDtype = vai::Dtype::None;   // None: oDefaultDtype
     } config_;
 
+    GatedMul();
     GatedMul(Config config);
     void prepare() override;
     void run(eva::CommandBuffer cmdBuff) override;
@@ -44,7 +45,9 @@ private:
 };
 
 
-inline GatedMul::GatedMul(Config config = Config())
+inline GatedMul::GatedMul() : GatedMul(Config()) {}
+
+inline GatedMul::GatedMul(Config config)
 : config_(config)
 {
     addSlot("out0", NodeSlot::output);

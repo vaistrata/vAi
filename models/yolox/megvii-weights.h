@@ -50,8 +50,8 @@ inline void loadWeights(Model& model, const vai::Checkpoint& ckpt)
             scale[c] = gammaData[c] / std::sqrt(varianceData[c] + eps);
             bias[c] = betaData[c] - meanData[c] * scale[c];
         }
-        conv["scale"] = vai::Tensor({channels}, wt).setFloats(std::move(scale));
-        conv["bias"] = vai::Tensor({channels}, wt).setFloats(std::move(bias));
+        conv["scale"] = vai::Tensor(std::vector<uint32_t>{channels}, wt).setFloats(std::move(scale));
+        conv["bias"] = vai::Tensor(std::vector<uint32_t>{channels}, wt).setFloats(std::move(bias));
     };
 
     auto loadBaseConv = [&](auto& conv, const std::string& path)

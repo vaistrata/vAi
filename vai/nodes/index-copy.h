@@ -37,6 +37,7 @@ public:
         uint32_t axis = 0;
     } config_;
 
+    IndexCopy();
     IndexCopy(Config config);
     void setIndex(eva::Buffer buffer) { index = buffer; }
     void prepare() override;
@@ -44,7 +45,9 @@ public:
 };
 
 
-inline IndexCopy::IndexCopy(Config config = Config())
+inline IndexCopy::IndexCopy() : IndexCopy(Config()) {}
+
+inline IndexCopy::IndexCopy(Config config)
 : config_(config)
 {
     addSlot("out0", NodeSlot::output);

@@ -56,6 +56,7 @@ public:
         vai::Dtype oDtype = vai::Dtype::None;   // None: oDefaultDtype
     } config_;
 
+    EleAffine();
     EleAffine(Config config);
     void prepare() override;
     void run(eva::CommandBuffer cmdBuff) override;
@@ -105,7 +106,9 @@ inline EleAffine::Broadcast eleAffineBroadcast(const std::vector<uint32_t>& o, c
 }
 
 
-inline EleAffine::EleAffine(Config config = Config())
+inline EleAffine::EleAffine() : EleAffine(Config()) {}
+
+inline EleAffine::EleAffine(Config config)
 : config_(config)
 {
     addSlot("out0", NodeSlot::output);

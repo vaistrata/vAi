@@ -53,6 +53,7 @@ public:
         vai::Dtype oDtype = vai::Dtype::None;   // None: oDefaultDtype
     } config_;
 
+    Concat();
     Concat(Config config);
     void prepare() override;
     void run(eva::CommandBuffer cmdBuff) override;
@@ -62,7 +63,9 @@ private:
 };
 
 
-inline Concat::Concat(Config config = Config())
+inline Concat::Concat() : Concat(Config()) {}
+
+inline Concat::Concat(Config config)
 : config_(config)
 {
     VAI_ASSERT(config_.inputCount >= 2);
