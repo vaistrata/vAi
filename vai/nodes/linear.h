@@ -52,6 +52,10 @@ namespace vai::node {
   "bias" (wDtype) is a parameter and "residual" R (oDtype) an input. Each is
   [M, N] or rows that repeat over M: [N], or one image's position table under
   a batch.
+
+  Q4 weights (vai::Dtype::Q4, K a multiple of 32) are dequantized as the tile
+  kernels load them, so a Q4 Linear always takes the tile path; its bias is
+  fp16.
 =============================================================================*/
 class Linear : public vai::Node
 {
@@ -173,7 +177,7 @@ public:
         vai::ResidualOrder residualOrder = vai::ResidualOrder::AfterEpilogue;
         vai::Epilogue epilogue = vai::Epilogue::None;
         float scalarScale = 1.0f;     // s, right after the epilogue
-        vai::Dtype wDtype = vai::Dtype::None;
+        vai::Dtype wDtype = vai::Dtype::None;   // None: wDefaultDtype; Q4 allowed here
         vai::Dtype oDtype = vai::Dtype::None;   // None: oDefaultDtype
 
         uint32_t splitSize = 0;   // split-K: K length per split (0: ggml auto heuristic)
@@ -194,10 +198,15 @@ private:
     }
 
     // Small batches run the slab kernel instead of the tile one;
-    // 8 = ggml mul_mat_vec_max_cols.
+    // 8 = ggml mul_mat_vec_max_cols. The slab kernel reads no Q4.
     bool useSlabPath(uint32_t M) const
     {
-        return M <= 8u;
+        return M <= 8u && config_.wDtype != Dtype::Q4;
+    }
+
+    Dtype biasDtype() const
+    {
+        return (config_.wDtype == Dtype::Q4) ? Dtype::Fp16 : config_.wDtype;
     }
 
     PipeParamsTile pipeParamsTile;
@@ -734,6 +743,7 @@ inline void Linear::prepare()
     const Dtype iDtype = inTen.dtype();
     VAI_ASSERT(wTen.dtype() == config_.wDtype);
     VAI_ASSERT(wTen.isShapeOf(N, K));
+    VAI_ASSERT(config_.wDtype != Dtype::Q4 || K % 32 == 0);
 
     const auto& inShape = inTen.shape();
     uint32_t M = outerSize(inShape);
@@ -751,7 +761,7 @@ inline void Linear::prepare()
     if (config_.hasBias)
     {
         const Tensor& bTen = (*this)["bias"];
-        VAI_ASSERT(bTen.dtype() == config_.wDtype);
+        VAI_ASSERT(bTen.dtype() == biasDtype());
         biasElems = repeatOf(bTen);
     }
 
@@ -933,7 +943,7 @@ inline void Linear::prepare()
                 eva::constant_id<3>(residualElems),                      // residual repeat (0: covers O)
                 eva::constant_id<4>((uint32_t) config_.residualOrder),   // residualOrder
                 eva::constant_id<SPEC_ID_TYPE_O>(config_.oDtype),        // typeO (O, P & residual)
-                eva::constant_id<SPEC_ID_TYPE_W>(config_.wDtype),        // typeW (bias)
+                eva::constant_id<SPEC_ID_TYPE_W>(biasDtype()),           // typeW (bias)
                 eva::constant_id<SPEC_ID_EPILOGUE>((uint32_t) config_.epilogue)   // epilogue
             });
 
