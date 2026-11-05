@@ -66,7 +66,9 @@ const uint WGK_STEP     = 4;              // k elements consumed per inner step
 const uint SHMEM_STRIDE = wgK / 2 + 1;    // 2-element slots per shmem row; +1 avoids bank conflicts
 
 // fp32 staging when both operands are fp32 (the host then passes accType fp32).
-const uint stageF32 = (1u - typeI) * (1u - typeW);
+// Kept arithmetic: written as (typeI == DTYPE_F32 && typeW == DTYPE_F32) ? 1 : 0
+// it made every result wrong on an Adreno 830.
+const uint stageF32 = (1u / (typeI + 1u)) * (1u / (typeW + 1u));   // DTYPE_F32 is 0
 
 const float16_t FP16_MAX = 65504.0hf;     // largest finite fp16 value
 
@@ -82,6 +84,7 @@ layout(set = 0, binding = 2) readonly buffer W_BUF_F32  { float bufferW_f32[]; }
 layout(set = 0, binding = 2) readonly buffer W_BUF_F16  { float16_t bufferW_f16[]; };
 layout(set = 0, binding = 2) readonly buffer W_BUF_8F32 { mat2x4 bufferW_8f32[]; };
 layout(set = 0, binding = 2) readonly buffer W_BUF_8F16 { f16mat2x4 bufferW_8f16[]; };
+layout(set = 0, binding = 2) readonly buffer W_BUF_U32  { uint bufferW_u32[]; };   // Q4 words
 
 layout(push_constant) uniform PushConstants {
     uint M;
@@ -91,9 +94,33 @@ layout(push_constant) uniform PushConstants {
 };
 
 f16mat2x4 readI8(uint i8) { return (typeI == DTYPE_F32) ? f16mat2x4(bufferI_8f32[i8]) : bufferI_8f16[i8]; }
-f16mat2x4 readW8(uint i8) { return (typeW == DTYPE_F32) ? f16mat2x4(bufferW_8f32[i8]) : bufferW_8f16[i8]; }
+// Q4 (layout at vai::Dtype::Q4): a word holds 8 consecutive elements, and the
+// fp16 scales start after the N * K / 2 bytes of words.
+float16_t q4Scale(uint i) { return bufferW_f16[N * K / 4u + i / 32u]; }
+f16mat2x4 readW8Q4(uint i8)
+{
+    const uint q = bufferW_u32[i8];
+    const float16_t s = q4Scale(i8 * 8u);
+    const f16vec4 lo = f16vec4((uvec4(q, q >> 4, q >> 8, q >> 12) & 0xFu)) - 8.0hf;
+    const f16vec4 hi = f16vec4((uvec4(q >> 16, q >> 20, q >> 24, q >> 28) & 0xFu)) - 8.0hf;
+    return f16mat2x4(lo * s, hi * s);
+}
+float16_t readWQ4(uint i)
+{
+    return (float16_t((bufferW_u32[i / 8u] >> (4u * (i % 8u))) & 0xFu) - 8.0hf) * q4Scale(i);
+}
+
+f16mat2x4 readW8(uint i8)
+{
+    if (typeW == DTYPE_Q4) return readW8Q4(i8);
+    return (typeW == DTYPE_F32) ? f16mat2x4(bufferW_8f32[i8]) : bufferW_8f16[i8];
+}
 float16_t readI(uint i)   { return (typeI == DTYPE_F32) ? float16_t(bufferI_f32[i]) : bufferI_f16[i]; }
-float16_t readW(uint i)   { return (typeW == DTYPE_F32) ? float16_t(bufferW_f32[i]) : bufferW_f16[i]; }
+float16_t readW(uint i)
+{
+    if (typeW == DTYPE_Q4) return readWQ4(i);
+    return (typeW == DTYPE_F32) ? float16_t(bufferW_f32[i]) : bufferW_f16[i];
+}
 void writeO(uint i, float v) { if (typeO == DTYPE_F32) bufferO_f32[i] = v; else bufferO_f16[i] = float16_t(v); }
 void writeO(uint i, float16_t v) { if (typeO == DTYPE_F32) bufferO_f32[i] = float(v); else bufferO_f16[i] = v; }
 

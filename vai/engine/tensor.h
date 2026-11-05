@@ -16,7 +16,12 @@ namespace vai {
 
 class NeuralNet;
 
-enum class Dtype { Fp32, Fp16, None };
+// Q4 is a weight format: symmetric 4-bit values in groups of 32 consecutive
+// elements (the last axis a multiple of 32), each group with an fp16 scale.
+// The packed words come first, a uint32 per 8 elements with element i in bits
+// 4i..4i+3 holding q for the value (q - 8) * scale; the scales follow, one per
+// group. Linear reads it; on the host it is only converted to and from.
+enum class Dtype { Fp32, Fp16, None, Q4 };
 
 constexpr size_t bytesPerElement(Dtype dt) noexcept
 {
@@ -24,8 +29,15 @@ constexpr size_t bytesPerElement(Dtype dt) noexcept
         case Dtype::Fp16:  return 2;
         case Dtype::Fp32:  return 4;
         case Dtype::None:  return 0;
+        case Dtype::Q4:    return 0;   // packed; see byteSize()
     }
     return 4;
+}
+
+// Bytes that `count` elements of dt take, Q4's scales included.
+constexpr size_t byteSize(Dtype dt, size_t count) noexcept
+{
+    return (dt == Dtype::Q4) ? count / 2 + count / 32 * 2 : count * bytesPerElement(dt);
 }
 
 // Tensor dtype a safetensors dtype string loads as. BF16 is a file format
@@ -42,7 +54,8 @@ inline Dtype dtypeFromString(const std::string& s)
 
 
 // Element-wise dtype conversion of `count` elements (host-side).
-// Handles all fp32 / fp16 combinations; same-dtype is a memcpy.
+// Handles all fp32 / fp16 combinations, and to and from Q4 (count a multiple
+// of 32, each group within one row); same-dtype is a memcpy.
 void convertDtype(const void* src, Dtype srcDtype, void* dst, Dtype dstDtype, size_t count);
 
 
@@ -275,7 +288,7 @@ public:
 
     size_t numBytes() const
     {
-        return numElements() * bytesPerElement(dtype());
+        return byteSize(dtype(), numElements());
     }
 
     bool validShape() const
@@ -362,6 +375,7 @@ inline Tensor Tensor::permute(Ts... Perms) const
     for (int i = rank - 2; i >= 0; --i)
         dstStrides[i] = dstStrides[i + 1] * dstShape[i + 1];
 
+    VAI_ASSERT(data_->dtype_ != Dtype::Q4);
     const size_t n = numElements();
     const size_t elemSize = bytesPerElement(data_->dtype_);
     const char* srcData = data_->hostData_.data();
@@ -401,7 +415,7 @@ inline auto Tensor::split(Ts... offsets) const
 {
     static_assert((std::conjunction_v<std::is_integral<Ts>...>), "All offsets must be integral types");
     VAI_ASSERT(data_ && !data_->hostData_.empty());
-    VAI_ASSERT(!shape_.empty());
+    VAI_ASSERT(!shape_.empty() && data_->dtype_ != Dtype::Q4);
 
     constexpr size_t count = sizeof...(Ts) + 1;
     const uint32_t bounds[count] = { static_cast<uint32_t>(offsets)..., shape_[0] };
