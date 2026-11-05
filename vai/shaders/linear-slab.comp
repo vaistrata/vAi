@@ -202,9 +202,24 @@ void computeOutputs(const uint n0, const uint nCount)
     // Reduce: subgroupAdd within each subgroup; multi-subgroup workgroups
     // (wgSize > sgSize — spec-folded, so each pipeline compiles to exactly
     // one mode) fold the per-subgroup partials through tmpsh.
-    [[unroll]] for (uint j = 0; j < M; j++)
-        [[unroll]] for (uint n = 0; n < nCount; n++)
-            sums[j][n] = subgroupAdd(sums[j][n]);
+    // The partials go through subgroupAdd four at a time: one call per
+    // output failed to link on an Adreno 830 past 4 outputs (M > 2 with
+    // fp16 W). Outputs past nCount are zero and reduce harmlessly.
+    [[unroll]] for (uint c = 0; c < (M * wgN + 3) / 4; c++)
+    {
+        vec4 v;
+        [[unroll]] for (uint e = 0; e < 4; e++)
+        {
+            const uint f = 4 * c + e;
+            v[e] = (f < M * wgN) ? sums[f / wgN][f % wgN] : 0.0;
+        }
+        v = subgroupAdd(v);
+        [[unroll]] for (uint e = 0; e < 4; e++)
+        {
+            const uint f = 4 * c + e;
+            if (f < M * wgN) sums[f / wgN][f % wgN] = v[e];
+        }
+    }
 
     if (wgSize > sgSize)
     {
