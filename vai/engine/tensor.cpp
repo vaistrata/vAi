@@ -165,9 +165,14 @@ static void quantizeQ4(const float* src, void* dst, size_t count)
         for (size_t g = begin; g < end; ++g)
         {
             const float* x = src + g * 32;
-            float peak = 0.0f;
+            // |peak| has its own variable: testing fabs(x[i]) > fabs(peak) makes
+            // NDK r30's clang 21 at -O3 skip a negative peak at x[0].
+            float peak = 0.0f, mag = 0.0f;
             for (int i = 0; i < 32; ++i)
-                if (std::fabs(x[i]) > std::fabs(peak)) peak = x[i];
+            {
+                const float a = std::fabs(x[i]);
+                if (a > mag) { mag = a; peak = x[i]; }
+            }
 
             const uint16_t scale = floatToHalf(peak / -8.0f);
             const float d = halfToFloat(scale);
@@ -178,7 +183,9 @@ static void quantizeQ4(const float* src, void* dst, size_t count)
                 uint32_t word = 0;
                 for (int i = 0; i < 8; ++i)
                 {
-                    const int q = std::clamp(int(std::floor(x[w * 8 + i] * inv + 8.5f)), 0, 15);
+                    // In double the product is exact, so q is the same whether or
+                    // not the compiler fuses this into an FMA (clang does on ARM).
+                    const int q = std::clamp(int(std::floor(double(x[w * 8 + i]) * inv + 8.5)), 0, 15);
                     word |= uint32_t(q) << (4 * i);
                 }
                 words[g * 4 + w] = word;
