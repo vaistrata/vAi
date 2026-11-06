@@ -55,17 +55,17 @@ struct Attention : public vai::NodeGroup {
     FullAttentionNode attn;                     // Q, K head-major + V token-major -> (N, D)
     vai::node::Linear toOut;                      // (N, D) -> (N, D)
 
-    Attention(uint32_t embedDim, uint32_t numHeads, float eps, bool allowCoopmat)
+    Attention(uint32_t embedDim, uint32_t numHeads, float eps, bool allowCoopmat, vai::Dtype wDtype)
     : D(embedDim), H(numHeads)
-    , toQ({.inDim = D, .outDim = D, .accDtype = acc})
-    , toK({.inDim = D, .outDim = D, .accDtype = acc})
-    , toV({.inDim = D, .outDim = D, .accDtype = acc})
+    , toQ({.inDim = D, .outDim = D, .wDtype = wDtype, .accDtype = acc})
+    , toK({.inDim = D, .outDim = D, .wDtype = wDtype, .accDtype = acc})
+    , toV({.inDim = D, .outDim = D, .wDtype = wDtype, .accDtype = acc})
     , normRopeQ({.numHeads = H, .headDim = D/H, .eps = eps,
                  .wDtype = vai::Dtype::Fp32, .oDtype = vai::Dtype::Fp16})
     , normRopeK({.numHeads = H, .headDim = D/H, .eps = eps,
                  .wDtype = vai::Dtype::Fp32, .oDtype = vai::Dtype::Fp16})
     , attn({.numHeads = H, .headDim = D/H, .allowCoopmat = allowCoopmat})
-    , toOut({.inDim = D, .outDim = D, .accDtype = acc})
+    , toOut({.inDim = D, .outDim = D, .wDtype = wDtype, .accDtype = acc})
     {
         input - toQ - normRopeQ - "Q"/attn - toOut;
         input - toK - normRopeK - "K"/attn;
@@ -91,20 +91,37 @@ struct Attention : public vai::NodeGroup {
 // layer) and the down projection reads its input as fp16, so the loader runs
 // the FFN on hidden * ffnHiddenScale: w3 scaled by s, w2 by 1/s. Both are
 // powers of two, so the product is exact wherever fp16 stays normal.
+//
+// splitUp runs w1 and w3 as two Linears joined by a Concat instead: the same
+// math, but the longest node is half as long. Mobile drivers reset the GPU
+// when one submission runs past a couple of seconds (Adreno 830: ~1.7 s), and
+// the fused projection is the DiT's longest node.
 /////////////////////////////////////////////////////////////////////////////////////////
 struct FeedForward : public vai::NodeGroup {
-    vai::node::Linear gateValue;           // (N, D) -> (N, 2F)
+    vai::node::Identity input;
+    vai::node::Linear gateValue;           // (N, D) -> (N, 2F); w1 alone (N, F) when split
+    vai::node::Linear value;               // (N, D) -> (N, F), w3; only when split
+    vai::node::Concat join;                // [w1 | w3] -> (N, 2F); only when split
     vai::node::GatedMul gatedMul;          // (N, 2F) -> (N, F)
     vai::node::Linear out;                 // (N, F) -> (N, D)
 
-    FeedForward(uint32_t dim, uint32_t hiddenDim)
-    : gateValue({.inDim = dim, .outDim = 2 * hiddenDim, .accDtype = acc})
+    FeedForward(uint32_t dim, uint32_t hiddenDim, vai::Dtype wDtype, bool splitUp)
+    : gateValue({.inDim = dim, .outDim = (splitUp ? 1 : 2) * hiddenDim, .wDtype = wDtype, .accDtype = acc})
+    , value({.inDim = dim, .outDim = hiddenDim, .wDtype = wDtype, .accDtype = acc})
+    , join({.axis = -1})
     , gatedMul({vai::Epilogue::Silu})
-    , out({.inDim = hiddenDim, .outDim = dim, .accDtype = acc})
+    , out({.inDim = hiddenDim, .outDim = dim, .wDtype = wDtype, .accDtype = acc})
     {
-        gateValue - gatedMul - out;
+        if (splitUp)
+        {
+            input - gateValue - "in0"/join - gatedMul;
+            input - value     - "in1"/join;
+        }
+        else
+            input - gateValue - gatedMul;
+        gatedMul - out;
 
-        defineSlot("in0", gateValue.slot("in0"));
+        defineSlot("in0", input.slot("in0"));
         defineSlot("out0", out.slot("out0"));
     }
 };
@@ -119,6 +136,8 @@ struct FeedForward : public vai::NodeGroup {
 //   plain (context refiner): the same with every scale / gate dropped.
 //
 // Each norm site, its modulation and its residual are one AdaNormNode.
+// wDtype is the attention and FFN projections' weight dtype; the adaLN
+// projection keeps the default.
 /////////////////////////////////////////////////////////////////////////////////////////
 struct TransformerBlock : public vai::NodeGroup {
     bool modulated;
@@ -133,15 +152,15 @@ struct TransformerBlock : public vai::NodeGroup {
     AdaNormNode ffnNorm2;                // x + tanh(gateF) * ffn_norm2(ffn)
 
     TransformerBlock(uint32_t D, uint32_t numHeads, uint32_t ffnHiddenDim, uint32_t adaLNDim,
-                     float eps, bool modulated, bool allowCoopmat)
+                     float eps, bool modulated, bool allowCoopmat, vai::Dtype wDtype, bool splitFfnUp)
     : modulated(modulated)
     , adaLN({.inDim = adaLNDim, .outDim = 4 * D, .hasBias = true, .accDtype = acc})
     , norm1({.eps = eps, .hasScale = modulated, .scaleOffset = 0, .wDtype = vai::Dtype::Fp32})
-    , attn(D, numHeads, eps, allowCoopmat)
+    , attn(D, numHeads, eps, allowCoopmat, wDtype)
     , norm2({.eps = eps, .hasGate = modulated, .hasResidual = true, .gateOffset = D,
              .wDtype = vai::Dtype::Fp32})
     , ffnNorm1({.eps = eps, .hasScale = modulated, .scaleOffset = 2 * D, .wDtype = vai::Dtype::Fp32})
-    , ffn(D, ffnHiddenDim)
+    , ffn(D, ffnHiddenDim, wDtype, splitFfnUp)
     , ffnNorm2({.eps = eps, .hasGate = modulated, .hasResidual = true, .gateOffset = 3 * D,
                 .wDtype = vai::Dtype::Fp32})
     {
@@ -204,6 +223,15 @@ struct ModelConfig
 /////////////////////////////////////////////////////////////////////////////////////////
 struct RuntimeConfig {
     bool coopmatAttention = true;   // false: scalar attention kernel even where coopmat runs
+
+    // Weight dtype of every block's attention and FFN projections, 97% of
+    // the weights. None: Linear's default (fp16). Q4 brings the DiT from
+    // ~12 GB to ~3.7 GB, so it fits a phone's memory.
+    vai::Dtype blockWeightDtype = vai::Dtype::None;
+
+    // Run each FFN's up projection as two Linears (see FeedForward), for
+    // GPUs that reset after a short submission. Pair with nodesPerSubmit.
+    bool splitFfnUp = false;
 };
 
 
@@ -276,17 +304,19 @@ struct Model : public vai::NeuralNet
         const uint32_t A = modelCfg.adaLNDim;
         const float eps = modelCfg.normEps;
         const bool cm = runtimeCfg.coopmatAttention;
+        const vai::Dtype bw = runtimeCfg.blockWeightDtype;
+        const bool su = runtimeCfg.splitFfnUp;
 
         noiseRefiner.reserve(modelCfg.numRefinerLayers);
         contextRefiner.reserve(modelCfg.numRefinerLayers);
         for (uint32_t i = 0; i < modelCfg.numRefinerLayers; ++i)
         {
-            noiseRefiner.emplace_back(D, H, F, A, eps, true, cm);
-            contextRefiner.emplace_back(D, H, F, A, eps, false, cm);
+            noiseRefiner.emplace_back(D, H, F, A, eps, true, cm, bw, su);
+            contextRefiner.emplace_back(D, H, F, A, eps, false, cm, bw, su);
         }
         layers.reserve(modelCfg.numLayers);
         for (uint32_t i = 0; i < modelCfg.numLayers; ++i)
-            layers.emplace_back(D, H, F, A, eps, true, cm);
+            layers.emplace_back(D, H, F, A, eps, true, cm, bw, su);
 
         // Timestep -> temb, fanned out to every modulated block and the final layer.
         input("inTimestep") - tMlp1 - tMlp2 - temb;

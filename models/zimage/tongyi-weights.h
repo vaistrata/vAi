@@ -44,7 +44,9 @@ inline void loadWeights(Model& model, const vai::Checkpoint& ckpt)
     };
 
     // The FFN runs on hidden * ffnHiddenScale (see FeedForward): w3 carries
-    // the scale, w2 its inverse. w1 and w3 stack into one projection, w1 first.
+    // the scale, w2 its inverse. w1 and w3 stack into one projection, w1
+    // first (in fp32, since Q4 tensors cannot be concatenated), or stay two
+    // when the model splits the up projection.
     const float s = model.modelCfg.ffnHiddenScale;
     auto loadBlock = [&](TransformerBlock& b, const std::string& prefix)
     {
@@ -61,8 +63,18 @@ inline void loadWeights(Model& model, const vai::Checkpoint& ckpt)
         loadNorm(b.attn.normRopeK, prefix + "attention.norm_k.weight");
 
         const vai::Dtype up = b.ffn.gateValue.config_.wDtype;
-        b.ffn.gateValue["weight"] = vai::Tensor(ckpt[prefix + "feed_forward.w1.weight"], up)
-            .concat(scaledTensor(ckpt[prefix + "feed_forward.w3.weight"], up, s));
+        if (model.runtimeCfg.splitFfnUp)
+        {
+            b.ffn.gateValue["weight"] = vai::Tensor(ckpt[prefix + "feed_forward.w1.weight"], up);
+            b.ffn.value["weight"] = scaledTensor(ckpt[prefix + "feed_forward.w3.weight"], up, s);
+        }
+        else
+        {
+            const vai::Tensor w13 = vai::Tensor(ckpt[prefix + "feed_forward.w1.weight"], vai::Dtype::Fp32)
+                .concat(scaledTensor(ckpt[prefix + "feed_forward.w3.weight"], vai::Dtype::Fp32, s));
+            b.ffn.gateValue["weight"] = vai::Tensor(w13.shape(), up)
+                .setFloats(static_cast<const float*>(w13.hostData()));
+        }
         b.ffn.out["weight"] = scaledTensor(ckpt[prefix + "feed_forward.w2.weight"],
                                            b.ffn.out.config_.wDtype, 1.0f / s);
 

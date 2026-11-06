@@ -7,6 +7,10 @@
                        one prompt via the Qwen3 encoder, plus the noise latent)
                data/zimage/demo-latent.bin  (written here; fp32 [16, H, W])
                  to    examples/zimage/tools.py decode    (VAE -> PNG)
+  Options      --q4                  block projections as Q4 (~3.7 GB of weights)
+               --nodes-per-submit N  split each forward into submissions of N
+                                     nodes (mobile GPU watchdogs)
+               --split-ffn-up        halve the longest node, for the same reason
 =============================================================================*/
 
 #include "models/zimage/model.h"
@@ -14,6 +18,7 @@
 #include "vai/engine/safetensors-parser.h"
 #include "vai/utils/time-checker.h"
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <vector>
@@ -31,8 +36,22 @@ static std::vector<float> readF32(const SafetensorsParser& parser, const char* k
 }
 
 
-int main()
+int main(int argc, char** argv)
 {
+    bool q4 = false, splitFfnUp = false;
+    uint32_t nodesPerSubmit = 0;
+    for (int i = 1; i < argc; ++i)
+    {
+        if (!strcmp(argv[i], "--q4"))                                  q4 = true;
+        else if (!strcmp(argv[i], "--split-ffn-up"))                     splitFfnUp = true;
+        else if (!strcmp(argv[i], "--nodes-per-submit") && i + 1 < argc) nodesPerSubmit = (uint32_t)atoi(argv[++i]);
+        else
+        {
+            fprintf(stderr, "usage: %s [--q4] [--nodes-per-submit N] [--split-ffn-up]\n", argv[0]);
+            return 1;
+        }
+    }
+
     eva::Device device = getVaiDevice();
 
     // Inputs: caption features [Nc0, 2560] and noise [16, H, W]
@@ -48,12 +67,16 @@ int main()
     const uint32_t Nx = zimage::padTo((H / modelCfg.patchSize) * (W / modelCfg.patchSize), modelCfg.seqMultiple);
     const uint32_t Nc = zimage::padTo(capShape[0], modelCfg.seqMultiple);
 
-    printf("Loading %s DiT...\n", modelCfg.name);
+    printf("Loading %s DiT%s...\n", modelCfg.name, q4 ? " (Q4 block weights)" : "");
     zimage::Model model({
         .device = device,
         .wDefaultDtype = Dtype::Fp16,
         .oDefaultDtype = Dtype::Fp32,
-    }, modelCfg);
+        .nodesPerSubmit = nodesPerSubmit,
+    }, modelCfg, {
+        .blockWeightDtype = q4 ? Dtype::Q4 : Dtype::None,
+        .splitFfnUp = splitFfnUp,
+    });
 
     {
         TimeChecker timer("Weights loaded in {}ms");

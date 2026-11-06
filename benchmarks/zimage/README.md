@@ -46,6 +46,28 @@ Seeded Gaussian caption features (`--cap-tokens`), t = 0.5. Relative L2 error ag
 
 The scalar column is the attention kernel for devices without cooperative matrices, forced on the A40 with `--scalar-attention`. Its 16-key tile (`scalarKeysPerTile`) comes from an Adreno 830 (Galaxy S25 Ultra): with 32 keys the kernel spills registers there and runs ~140x slower, past the driver's submit timeout at these lengths. Run alone on that GPU, the 16-key kernel matches a CPU reference to 2e-4.
 
+### Q4 block weights
+
+`RuntimeConfig::blockWeightDtype = Dtype::Q4` (`--q4` in the bench and the demo) stores every block's attention and FFN projections as Q4: 4-bit values in groups of 32 with an fp16 scale, quantized like ggml's Q4_0. Those projections hold 97% of the weights, so the DiT drops from ~12 GB to ~3.7 GB. The other weights stay fp16.
+
+A40, same inputs and reference as above (28 random caption tokens), coopmat attention:
+
+| resolution | fp16: rel L2 / latency | Q4: rel L2 / cosine / latency |
+|---|---:|---:|
+| 512x512 | 1.31e-3 / 267 ms | 2.25e-1 / 0.9747 / 266 ms |
+| 1024x1024 | 1.26e-3 / 921 ms | 2.39e-1 / 0.9713 / 909 ms |
+
+- The error is the quantization's own. The fp32 diffusers forward with its block weights put through the same Q4 rounding scores 2.253e-1 at 512x512, as vAi does.
+- Other 4-bit roundings change it little: groups of 16 give 2.05e-1, scale and minimum per group (Q4_1-style) give 2.12e-1, and both together 1.64e-1.
+- Despite the per-step error, the 9-step demo gives an image of the same quality, with the same scene and small changes in detail.
+- Latency is unchanged on the A40: these GEMMs are not memory-bound at these lengths.
+
+Galaxy S25 Ultra (Adreno 830), 512x512, `--q4 --nodes-per-submit 1 --split-ffn-up`, scalar attention and scalar GEMM tiles:
+
+- The Q4 DiT fits in the phone's memory and runs end to end. A forward takes 120-135 s, depending on how hot the phone is. The first, which also uploads the weights and records the graph, takes 110-140 s.
+- Against the fp32 diffusers forward with the same Q4 rounding, rel L2 is 3.1e-2 (cosine 0.9995). Stage by stage through `layers.6`, the error matches the A40's to three digits.
+- `--split-ffn-up` runs the FFN's w1 and w3 as two Linears joined by a Concat. That halves the DiT's longest node, from ~1.1 s to ~0.55 s at this size. Without it, a hot phone runs that node past the driver's ~1.7 s submit timeout.
+
 ## Building and running
 
 Checkpoint: the full `Tongyi-MAI/Z-Image-Turbo` snapshot in `data/zimage/Z-Image-Turbo/`. The DiT loader reads only `transformer/`; `tools.py` reads the text encoder and the VAE from the same folder.
@@ -61,3 +83,4 @@ build/bin/bench-zimage-vai --profile                    # accuracy, vAi latency,
 - `torch/bench.py --stages` with `bench-zimage-vai --stages` compares the activations stage by stage, to find where an error comes in.
 - Another resolution: pass the same `--height` / `--width` to both benches. Another caption length: `torch/bench.py --cap-tokens N`.
 - `bench-zimage-vai --scalar-attention` runs the scalar attention kernel even on a coopmat device.
+- `--q4` stores the block projections as Q4; `--nodes-per-submit N` splits each forward into submissions of N nodes, for GPUs whose driver resets after a few seconds per submission (Adreno). `--split-ffn-up` splits the FFN up projection in two, for the same drivers. `demo-zimage` takes all three.

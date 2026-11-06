@@ -7,7 +7,10 @@
                --stages compares the stage.* activations that bench.py
                --stages stored, to localize a mismatch; --profile prints the
                GPU time per node kind; --scalar-attention runs the
-               non-coopmat attention kernel.
+               non-coopmat attention kernel; --q4 stores the block
+               projections as Q4; --nodes-per-submit N splits each forward
+               into submissions of N nodes and --split-ffn-up halves the
+               longest node, for Adreno's submission watchdog.
 =============================================================================*/
 
 #include "models/zimage/model.h"
@@ -58,8 +61,8 @@ static void report(const char* label, const std::vector<float>& got, const std::
 
 int main(int argc, char** argv)
 {
-    uint32_t height = 1024, width = 1024, iters = 10;
-    bool stages = false, profile = false, scalarAttention = false;
+    uint32_t height = 1024, width = 1024, iters = 10, nodesPerSubmit = 0;
+    bool stages = false, profile = false, scalarAttention = false, q4 = false, splitFfnUp = false;
     for (int i = 1; i < argc; ++i)
     {
         std::string a = argv[i];
@@ -70,9 +73,12 @@ int main(int argc, char** argv)
         else if (a == "--stages")                 { stages = true; }
         else if (a == "--profile")                { profile = true; }
         else if (a == "--scalar-attention")       { scalarAttention = true; }
+        else if (a == "--q4")                     { q4 = true; }
+        else if (a == "--split-ffn-up")           { splitFfnUp = true; }
+        else if (a == "--nodes-per-submit" && i + 1 < argc) { nodesPerSubmit = (uint32_t)atoi(argv[++i]); }
         else
         {
-            fprintf(stderr, "usage: %s [--height H] [--width W] [--iters N] [--stages] [--profile] [--scalar-attention]\n", argv[0]);
+            fprintf(stderr, "usage: %s [--height H] [--width W] [--iters N] [--stages] [--profile] [--scalar-attention] [--q4] [--nodes-per-submit N] [--split-ffn-up]\n", argv[0]);
             return 1;
         }
     }
@@ -96,8 +102,11 @@ int main(int argc, char** argv)
         .device = device,
         .wDefaultDtype = Dtype::Fp16,
         .oDefaultDtype = Dtype::Fp32,
+        .nodesPerSubmit = nodesPerSubmit,
     }, modelCfg, {
         .coopmatAttention = !scalarAttention,
+        .blockWeightDtype = q4 ? Dtype::Q4 : Dtype::None,
+        .splitFfnUp = splitFfnUp,
     });
 
     // Stage taps: every stage.<name> in the reference gets an extra output
@@ -166,7 +175,7 @@ int main(int argc, char** argv)
         times.push_back(nowSec() - t0);
     }
     std::sort(times.begin(), times.end());
-    printf("vai fp16: median %.1f ms, min %.1f ms (%u iters)\n",
+    printf("vai %s: median %.1f ms, min %.1f ms (%u iters)\n", q4 ? "q4" : "fp16",
            times[times.size() / 2] * 1e3, times.front() * 1e3, iters);
 
     // GPU time per node kind (timestamps re-record the graph, so this runs
@@ -187,6 +196,8 @@ int main(int argc, char** argv)
             b.attn.attn.setProfileTag(seq + ".attention");
             b.attn.toOut.setProfileTag(seq + ".linear.out");
             b.ffn.gateValue.setProfileTag(seq + ".linear.ffnUp");
+            b.ffn.value.setProfileTag(seq + ".linear.ffnUp");
+            b.ffn.join.setProfileTag(seq + ".gatedMul");
             b.ffn.gatedMul.setProfileTag(seq + ".gatedMul");
             b.ffn.out.setProfileTag(seq + ".linear.ffnDown");
         };
