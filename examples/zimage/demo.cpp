@@ -1,15 +1,17 @@
 /*=============================================================================
   Written by   ippx123@gmail.com
-  Task         Z-Image DiT — runs the Turbo flow-matching sampler on the GPU
-               from caption features and noise, writes the final latent.
+  Task         Z-Image — runs the Turbo flow-matching sampler on the GPU from
+               caption features and noise, then decodes the final latent with
+               the VAE on the GPU and writes it as a PNG.
   Assets       data/zimage/<name>[-q4][-split].safetensors, the prepared
                weights: written from the checkpoint on the first run (see
                tongyi-weights.h), read on every later one
                data/zimage/demo-input.safetensors
                  from  examples/zimage/tools.py prepare   (caption features of
                        one prompt via the Qwen3 encoder, plus the noise latent)
+               data/zimage/Z-Image-Turbo/vae/  (the VAE decoder)
                data/zimage/demo-latent.bin  (written here; fp32 [16, H, W])
-                 to    examples/zimage/tools.py decode    (VAE -> PNG)
+               data/zimage/demo.png         (written here; the VAE decode)
   Options      --q4                  block projections as Q4 (~3.7 GB of weights)
                --nodes-per-submit N  split each forward into submissions of N
                                      nodes (mobile GPU watchdogs)
@@ -18,6 +20,7 @@
 
 #include "models/zimage/model.h"
 #include "models/zimage/tongyi-weights.h"
+#include "models/zimage/tongyi-vae-weights.h"
 #include "vai/engine/safetensors-parser.h"
 #include "vai/utils/time-checker.h"
 #include <cstdio>
@@ -25,6 +28,9 @@
 #include <cstring>
 #include <fstream>
 #include <vector>
+
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "vai/utils/stb_image_write.h"
 
 using namespace vai;
 
@@ -123,9 +129,36 @@ int main(int argc, char** argv)
         }
     }
 
-    const char* outPath = VAI_DATA_DIR "/zimage/demo-latent.bin";
-    std::ofstream(outPath, std::ios::binary).write(
+    const char* latentPath = VAI_DATA_DIR "/zimage/demo-latent.bin";
+    std::ofstream(latentPath, std::ios::binary).write(
         reinterpret_cast<const char*>(latent.data()), latent.size() * sizeof(float));
-    printf("Latent written to %s (decode: examples/zimage/tools.py decode)\n", outPath);
+    printf("Latent written to %s\n", latentPath);
+
+    // VAE decode on the GPU: latent -> RGB.
+    zimage::VaeDecoder vae({
+        .device = device,
+        .wDefaultDtype = Dtype::Fp16,
+        .oDefaultDtype = Dtype::Fp32,
+        .nodesPerSubmit = nodesPerSubmit,
+    });
+    {
+        TimeChecker timer("VAE weights loaded in {}ms");
+        loadWeights<"tongyi">(vae);
+    }
+    Tensor image;
+    {
+        TimeChecker timer("VAE decode (first, uploads the weights) in {}ms");
+        vae({{"inLatent", zimage::decoderInput(vae.vaeCfg, latent.data(), H, W)}}, {{"outImage", &image}});
+        image.downloadToHost();
+    }
+    const uint32_t imgH = image.shape()[1], imgW = image.shape()[2];
+    const std::vector<uint8_t> rgb = zimage::toRgb8(image.getData<float>(), imgH, imgW);
+    const char* pngPath = VAI_DATA_DIR "/zimage/demo.png";
+    if (!stbi_write_png(pngPath, int(imgW), int(imgH), 3, rgb.data(), int(imgW) * 3))
+    {
+        fprintf(stderr, "Could not write %s\n", pngPath);
+        return 1;
+    }
+    printf("Image written to %s (%ux%u)\n", pngPath, imgW, imgH);
     return 0;
 }

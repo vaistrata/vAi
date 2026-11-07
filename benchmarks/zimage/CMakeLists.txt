@@ -19,3 +19,14 @@ add_dependencies(bench-zimage-vai zimage-shaders)
 target_link_libraries(bench-zimage-vai PRIVATE
     vAi
 )
+
+# The VAE decoder against torch/vae.py's reference.
+add_executable(bench-zimage-vae-vai
+    vai/vae-bench.cpp
+)
+
+add_dependencies(bench-zimage-vae-vai zimage-shaders)
+
+target_link_libraries(bench-zimage-vae-vai PRIVATE
+    vAi
+)

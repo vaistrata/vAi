@@ -1,0 +1,42 @@
+// =============================================================================
+// zimage-vae-attn-softmax.comp: in-place softmax down each column of the
+//     VAE mid-block attention's scores
+//
+//     S[r, c] <- exp(S[r, c] - max_r S[:, c]) / Σ_r exp(S[r, c] - max_r S[:, c])
+//
+// S is [rows = keys, cols = queries] (zimage-vae-attn-scores' output, already
+// scaled by 1 / sqrt(D)). One invocation per column, so a subgroup's loads of
+// a row coalesce; one pass for the running max and sum (online softmax),
+// one to write the probabilities.
+//
+// - Dispatch (host): .dispatch(ceil(cols / wgSize)).
+// =============================================================================
+#version 450
+
+const uint wgSize = 64u;
+layout(local_size_x = wgSize, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) buffer S_BUF { float bufferS[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint rows;
+    uint cols;
+};
+
+void main()
+{
+    const uint c = gl_GlobalInvocationID.x;
+    if (c >= cols) return;
+
+    float m = -3.402823466e38, s = 0.0;
+    for (uint r = 0; r < rows; ++r)
+    {
+        const float x = bufferS[r * cols + c];
+        const float mNew = max(m, x);
+        s = s * exp(m - mNew) + exp(x - mNew);
+        m = mNew;
+    }
+    const float inv = 1.0 / s;
+    for (uint r = 0; r < rows; ++r)
+        bufferS[r * cols + c] = exp(bufferS[r * cols + c] - m) * inv;
+}

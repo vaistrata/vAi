@@ -1,0 +1,7 @@
+// zimage-vae-conv1x1.comp: the 1x1 instance of zimage-vae-conv.glsl.
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_control_flow_attributes : enable
+#define KS 1u
+#include "zimage-vae-conv.glsl"

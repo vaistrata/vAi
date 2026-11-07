@@ -75,6 +75,13 @@ With the Adreno kernels that came after (`linear-q4-direct`, its int8 variant `l
 - `bench-zimage-vai` gives rel L2 3.9e-2 against the fp32 forward (cosine 0.9992).
 - The DiT loads from a prepared weights file, `data/zimage/<name>-q4-split.safetensors` for these settings (3.66 GB): each tensor already in the dtype the model runs, Q4 included. The first run converts the 23 GB fp32 checkpoint as before (36.5 s) and writes the file; later runs read it in 2.6 s. `bench-zimage-vai --prepared` loads the same way; the result is unchanged (rel L2 3.905e-2 either way).
 
+The VAE decoder runs on the GPU too (`models/zimage/vae.h`), so `demo-zimage` goes from caption features to `data/zimage/demo.png` on the phone. On the same phone, 512x512 from a 64x64 latent, against the fp32 diffusers decode of the same latent (`bench-zimage-vae-vai --nodes-per-submit 1`):
+
+- rel L2 6.2e-5 (cosine 1.000000); the 8-bit images agree to 73.5 dB PSNR. Each stage (`conv_in`, mid block, up blocks) stays within 1.3e-4.
+- A decode takes 2.25 s while the phone is cool (fp32 diffusers on an M-series CPU: 4.1 s). The 3x3 convs are 92% of it and run at about 1.1 TFLOPS; the mid-block attention over 4096 positions takes 36 ms.
+- The decoder has its own conv node, `VaeConvNode`: on this GPU `vai::node::Convolution` returns wrong values for these shapes, through both its fallback and its Winograd plans.
+- In one submission a decode outlasts the driver's submit timeout; with `--nodes-per-submit 1` its longest node takes 0.28 s.
+
 ## Building and running
 
 Checkpoint: the full `Tongyi-MAI/Z-Image-Turbo` snapshot in `data/zimage/Z-Image-Turbo/`. The DiT loader reads only `transformer/`; `tools.py` reads the text encoder and the VAE from the same folder.
@@ -90,4 +97,5 @@ build/bin/bench-zimage-vai --profile                    # accuracy, vAi latency,
 - `torch/bench.py --stages` with `bench-zimage-vai --stages` compares the activations stage by stage, to find where an error comes in.
 - Another resolution: pass the same `--height` / `--width` to both benches. Another caption length: `torch/bench.py --cap-tokens N`.
 - `bench-zimage-vai --scalar-attention` runs the scalar attention kernel even on a coopmat device, and `--no-int8-attention` keeps it in fp32 where the int8 kernel would run.
+- The VAE: `python3 benchmarks/zimage/torch/vae.py --stages` stores the fp32 decode of `data/zimage/demo-latent.bin` (or of a seeded latent), and `bench-zimage-vae-vai --stages --profile` compares against it and times the decode. Both take `--height` / `--width`.
 - `--q4` stores the block projections as Q4; `--nodes-per-submit N` splits each forward into submissions of N nodes, for GPUs whose driver resets after a few seconds per submission (Adreno). `--split-ffn-up` splits the FFN up projection in two, for the same drivers. `demo-zimage` takes all three.
