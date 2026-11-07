@@ -28,7 +28,14 @@ namespace zimage {
              Its tile is scalarKeysPerTile: with 32 keys the per-thread
              scores and prefetch spill registers on an Adreno 830 and run
              ~140x slower (past the driver's submit timeout at DiT lengths).
-  coopmatSupported() picks; allowCoopmat = false forces the scalar kernel.
+    int8     the scalar frame with the Q·K dots on packed int8 dot products
+             (K quantized per key while staged, the query per row) and V
+             staged as fp16 (zimage-attention-i8.comp), where
+             int8Supported(). On a cool Galaxy S25 Ultra (N = 1056, 30
+             heads) 34 ms vs. 83 ms scalar; the 512x512 forward's rel L2
+             against fp32 goes 3.70e-2 -> 3.91e-2.
+  coopmatSupported() picks first; allowCoopmat = false and int8QK = false
+  turn the kernels off.
 =============================================================================*/
 class FullAttentionNode : public vai::Node
 {
@@ -38,6 +45,7 @@ class FullAttentionNode : public vai::Node
 public:
     struct PipeParams {
         bool coopmat = false;
+        bool int8 = false;
         uint32_t keysPerTile = 0;
         vai::Dtype vDtype = vai::Dtype::None;
 
@@ -51,6 +59,7 @@ public:
         uint32_t keysPerTile = 32;              // coopmat; multiple of 16, N must be a multiple of it
         uint32_t scalarKeysPerTile = 16;        // scalar; N must be a multiple of it
         bool allowCoopmat = true;
+        bool int8QK = true;                     // scalar devices: zimage-attention-i8 where supported
         vai::Dtype oDtype = vai::Dtype::None;   // None: oDefaultDtype
     } config_;
 
@@ -60,7 +69,10 @@ public:
 
     // Whether the coopmat kernel can run with this config on `device`.
     static bool coopmatSupported(const Config& config, eva::Device device);
+    // Whether the int8 kernel can run with this config on `device`.
+    static bool int8Supported(const Config& config, eva::Device device);
     bool usingCoopmat() const { return pipeParams.coopmat; }
+    bool usingInt8() const { return pipeParams.int8; }
 
 private:
     PipeParams pipeParams;
@@ -94,6 +106,14 @@ inline bool FullAttentionNode::coopmatSupported(const Config& c, eva::Device dev
     return shared <= device.maxComputeSharedMemorySize();
 }
 
+inline bool FullAttentionNode::int8Supported(const Config& c, eva::Device device)
+{
+    // zimage-attention-i8.comp: compile-time head dim and tile, one subgroup
+    // butterfly over the 32 invocations that stage a key.
+    return device.isDot4x8PackedMixedAccelerated()
+        && c.headDim == 128 && c.scalarKeysPerTile == 16 && device.subgroupSize() >= 32;
+}
+
 inline FullAttentionNode::FullAttentionNode(Config config)
 : config_(config)
 {
@@ -121,6 +141,7 @@ inline void FullAttentionNode::prepare()
     const bool coopmat = config_.allowCoopmat && coopmatSupported(config_, device());
     const PipeParams p = {
         .coopmat = coopmat,
+        .int8 = !coopmat && config_.int8QK && int8Supported(config_, device()),
         .keysPerTile = coopmat ? config_.keysPerTile : config_.scalarKeysPerTile,
         .vDtype = v.dtype(),
     };
@@ -133,7 +154,7 @@ inline void FullAttentionNode::prepare()
         rowsPerWg = p.coopmat ? 16 * config_.numSubgroups : wgSize / 4;
 
         pipe = pipelinePool().request(ZIMAGE_SHADER_OUTPUT_DIR,
-            p.coopmat ? "zimage-attention" : "zimage-attention-scalar", {
+            p.coopmat ? "zimage-attention" : p.int8 ? "zimage-attention-i8" : "zimage-attention-scalar", {
                 eva::constant_id<0>(wgSize),
                 eva::constant_id<1>(sg),                               // sgSize (coopmat; scalar ignores)
                 eva::constant_id<2>(Dh),

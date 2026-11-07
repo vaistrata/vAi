@@ -55,7 +55,8 @@ struct Attention : public vai::NodeGroup {
     FullAttentionNode attn;                     // Q, K head-major + V token-major -> (N, D)
     vai::node::Linear toOut;                      // (N, D) -> (N, D)
 
-    Attention(uint32_t embedDim, uint32_t numHeads, float eps, bool allowCoopmat, vai::Dtype wDtype)
+    Attention(uint32_t embedDim, uint32_t numHeads, float eps, bool allowCoopmat, bool int8QK,
+              vai::Dtype wDtype)
     : D(embedDim), H(numHeads)
     , toQ({.inDim = D, .outDim = D, .wDtype = wDtype, .accDtype = acc})
     , toK({.inDim = D, .outDim = D, .wDtype = wDtype, .accDtype = acc})
@@ -64,7 +65,7 @@ struct Attention : public vai::NodeGroup {
                  .wDtype = vai::Dtype::Fp32, .oDtype = vai::Dtype::Fp16})
     , normRopeK({.numHeads = H, .headDim = D/H, .eps = eps,
                  .wDtype = vai::Dtype::Fp32, .oDtype = vai::Dtype::Fp16})
-    , attn({.numHeads = H, .headDim = D/H, .allowCoopmat = allowCoopmat})
+    , attn({.numHeads = H, .headDim = D/H, .allowCoopmat = allowCoopmat, .int8QK = int8QK})
     , toOut({.inDim = D, .outDim = D, .wDtype = wDtype, .accDtype = acc})
     {
         input - toQ - normRopeQ - "Q"/attn - toOut;
@@ -152,11 +153,12 @@ struct TransformerBlock : public vai::NodeGroup {
     AdaNormNode ffnNorm2;                // x + tanh(gateF) * ffn_norm2(ffn)
 
     TransformerBlock(uint32_t D, uint32_t numHeads, uint32_t ffnHiddenDim, uint32_t adaLNDim,
-                     float eps, bool modulated, bool allowCoopmat, vai::Dtype wDtype, bool splitFfnUp)
+                     float eps, bool modulated, bool allowCoopmat, bool int8QK, vai::Dtype wDtype,
+                     bool splitFfnUp)
     : modulated(modulated)
     , adaLN({.inDim = adaLNDim, .outDim = 4 * D, .hasBias = true, .accDtype = acc})
     , norm1({.eps = eps, .hasScale = modulated, .scaleOffset = 0, .wDtype = vai::Dtype::Fp32})
-    , attn(D, numHeads, eps, allowCoopmat, wDtype)
+    , attn(D, numHeads, eps, allowCoopmat, int8QK, wDtype)
     , norm2({.eps = eps, .hasGate = modulated, .hasResidual = true, .gateOffset = D,
              .wDtype = vai::Dtype::Fp32})
     , ffnNorm1({.eps = eps, .hasScale = modulated, .scaleOffset = 2 * D, .wDtype = vai::Dtype::Fp32})
@@ -223,6 +225,10 @@ struct ModelConfig
 /////////////////////////////////////////////////////////////////////////////////////////
 struct RuntimeConfig {
     bool coopmatAttention = true;   // false: scalar attention kernel even where coopmat runs
+
+    // Without coopmat, the int8 Q·K attention kernel where packed int8 dot
+    // products are accelerated (FullAttentionNode::int8Supported).
+    bool int8Attention = true;
 
     // Weight dtype of every block's attention and FFN projections, 97% of
     // the weights. None: Linear's default (fp16). Q4 brings the DiT from
@@ -304,6 +310,7 @@ struct Model : public vai::NeuralNet
         const uint32_t A = modelCfg.adaLNDim;
         const float eps = modelCfg.normEps;
         const bool cm = runtimeCfg.coopmatAttention;
+        const bool i8 = runtimeCfg.int8Attention;
         const vai::Dtype bw = runtimeCfg.blockWeightDtype;
         const bool su = runtimeCfg.splitFfnUp;
 
@@ -311,12 +318,12 @@ struct Model : public vai::NeuralNet
         contextRefiner.reserve(modelCfg.numRefinerLayers);
         for (uint32_t i = 0; i < modelCfg.numRefinerLayers; ++i)
         {
-            noiseRefiner.emplace_back(D, H, F, A, eps, true, cm, bw, su);
-            contextRefiner.emplace_back(D, H, F, A, eps, false, cm, bw, su);
+            noiseRefiner.emplace_back(D, H, F, A, eps, true, cm, i8, bw, su);
+            contextRefiner.emplace_back(D, H, F, A, eps, false, cm, i8, bw, su);
         }
         layers.reserve(modelCfg.numLayers);
         for (uint32_t i = 0; i < modelCfg.numLayers; ++i)
-            layers.emplace_back(D, H, F, A, eps, true, cm, bw, su);
+            layers.emplace_back(D, H, F, A, eps, true, cm, i8, bw, su);
 
         // Timestep -> temb, fanned out to every modulated block and the final layer.
         input("inTimestep") - tMlp1 - tMlp2 - temb;

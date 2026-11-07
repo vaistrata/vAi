@@ -7,7 +7,8 @@
                --stages compares the stage.* activations that bench.py
                --stages stored, to localize a mismatch; --profile prints the
                GPU time per node kind; --scalar-attention runs the
-               non-coopmat attention kernel; --q4 stores the block
+               non-coopmat attention kernel and --no-int8-attention
+               keeps its Q·K in fp32; --q4 stores the block
                projections as Q4; --nodes-per-submit N splits each forward
                into submissions of N nodes and --split-ffn-up halves the
                longest node, for Adreno's submission watchdog.
@@ -62,7 +63,8 @@ static void report(const char* label, const std::vector<float>& got, const std::
 int main(int argc, char** argv)
 {
     uint32_t height = 1024, width = 1024, iters = 10, nodesPerSubmit = 0;
-    bool stages = false, profile = false, scalarAttention = false, q4 = false, splitFfnUp = false;
+    bool stages = false, profile = false, scalarAttention = false, int8Attention = true, q4 = false;
+    bool splitFfnUp = false;
     for (int i = 1; i < argc; ++i)
     {
         std::string a = argv[i];
@@ -73,12 +75,13 @@ int main(int argc, char** argv)
         else if (a == "--stages")                 { stages = true; }
         else if (a == "--profile")                { profile = true; }
         else if (a == "--scalar-attention")       { scalarAttention = true; }
+        else if (a == "--no-int8-attention")      { int8Attention = false; }
         else if (a == "--q4")                     { q4 = true; }
         else if (a == "--split-ffn-up")           { splitFfnUp = true; }
         else if (a == "--nodes-per-submit" && i + 1 < argc) { nodesPerSubmit = (uint32_t)atoi(argv[++i]); }
         else
         {
-            fprintf(stderr, "usage: %s [--height H] [--width W] [--iters N] [--stages] [--profile] [--scalar-attention] [--q4] [--nodes-per-submit N] [--split-ffn-up]\n", argv[0]);
+            fprintf(stderr, "usage: %s [--height H] [--width W] [--iters N] [--stages] [--profile] [--scalar-attention] [--no-int8-attention] [--q4] [--nodes-per-submit N] [--split-ffn-up]\n", argv[0]);
             return 1;
         }
     }
@@ -105,6 +108,7 @@ int main(int argc, char** argv)
         .nodesPerSubmit = nodesPerSubmit,
     }, modelCfg, {
         .coopmatAttention = !scalarAttention,
+        .int8Attention = int8Attention,
         .blockWeightDtype = q4 ? Dtype::Q4 : Dtype::None,
         .splitFfnUp = splitFfnUp,
     });
@@ -161,7 +165,8 @@ int main(int argc, char** argv)
     std::vector<float> got = forward();
     printf("first forward (upload + record) %.1f s\n", nowSec() - t0);
     printf("%ux%u, %u image + %u caption tokens (padded), t = %.3f, %s attention\n", width, height, Nx, Nc, t,
-           model.layers[0].attn.attn.usingCoopmat() ? "coopmat" : "scalar");
+           model.layers[0].attn.attn.usingCoopmat() ? "coopmat" :
+           model.layers[0].attn.attn.usingInt8() ? "int8 Q·K" : "scalar");
     report("vai vs fp32", got, expect);
     report("bf16 vs fp32", bf16, expect);
 

@@ -67,6 +67,7 @@ Galaxy S25 Ultra (Adreno 830), 512x512, `--q4 --nodes-per-submit 1 --split-ffn-u
 - The Q4 DiT fits in the phone's memory and runs end to end. A forward takes 120-135 s, depending on how hot the phone is. The first, which also uploads the weights and records the graph, takes 110-140 s.
 - Against the fp32 diffusers forward with the same Q4 rounding, rel L2 is 3.1e-2 (cosine 0.9995). Stage by stage through `layers.6`, the error matches the A40's to three digits.
 - `--split-ffn-up` runs the FFN's w1 and w3 as two Linears joined by a Concat. That halves the DiT's longest node, from ~1.1 s to ~0.55 s at this size. Without it, a hot phone runs that node past the driver's ~1.7 s submit timeout.
+- Where packed int8 dot products are accelerated, as on this GPU, the attention runs `zimage-attention-i8`: Q·K on int8 (K quantized per key, the query per row) and V staged as fp16. On a cool phone it takes 34 ms per layer instead of the scalar kernel's 83 ms (N = 1056, 30 heads), and the first 4 layers plus one refiner pair take 1.65 s instead of 1.87 s. rel L2 against fp32 goes from 3.70e-2 to 3.91e-2. `--no-int8-attention` keeps the scalar kernel.
 
 ## Building and running
 
@@ -82,5 +83,5 @@ build/bin/bench-zimage-vai --profile                    # accuracy, vAi latency,
 
 - `torch/bench.py --stages` with `bench-zimage-vai --stages` compares the activations stage by stage, to find where an error comes in.
 - Another resolution: pass the same `--height` / `--width` to both benches. Another caption length: `torch/bench.py --cap-tokens N`.
-- `bench-zimage-vai --scalar-attention` runs the scalar attention kernel even on a coopmat device.
+- `bench-zimage-vai --scalar-attention` runs the scalar attention kernel even on a coopmat device, and `--no-int8-attention` keeps it in fp32 where the int8 kernel would run.
 - `--q4` stores the block projections as Q4; `--nodes-per-submit N` splits each forward into submissions of N nodes, for GPUs whose driver resets after a few seconds per submission (Adreno). `--split-ffn-up` splits the FFN up projection in two, for the same drivers. `demo-zimage` takes all three.
