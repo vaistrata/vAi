@@ -32,8 +32,12 @@ namespace vai::node {
   - tile (M > 8): a workgroup owns a wgM x wgN tile. Two kernels share the
     frame, chosen per device in ggmlMulmmTileParams(): scalar
     (linear-tile, each thread accumulates its own outputs) and
-    cooperative-matrix (linear-cm, subgroup MMA tiles). Everything
-    below applies to both:
+    cooperative-matrix (linear-cm, subgroup MMA tiles). On Adreno, Q4
+    weights take a third, linear-q4-direct, which skips
+    shared memory and never splits K (useQ4Direct()); where the device has
+    packed int8 dot products, its int8 variant linear-q4-q8 runs over an
+    input quantized by linear-q8-input (useQ4Q8()). Everything below
+    applies to all of them:
 
   The tile params are selected per output shape in prepare(); when a shape
   change selects a different tile, the pipeline is re-requested from the pool.
@@ -65,6 +69,8 @@ class Linear : public vai::Node
     eva::DescriptorSet descSetTile;
     eva::DescriptorSet descSetSlab;
     eva::DescriptorSet descSetReduce;
+    eva::ComputePipeline pipeQ8;      // linear-q8-input, before linear-q4-q8
+    eva::DescriptorSet descSetQ8;
 
 public:
     // The device's coopmat GEMM capability. The reported (M, N, K) maps to
@@ -102,6 +108,8 @@ public:
         uint32_t tK = 0;    // coopmat k tile: k depth per coopMatMulAdd (= device coopmat K);
                             // 0 on the scalar path — doubles as the coopmat-tile marker
         vai::Dtype iDtype = vai::Dtype::None;
+        bool direct = false;   // linear-q4-direct: only wgSize, wgM, wgN, tM, tN apply (q4DirectTile)
+        bool q8 = false;       // with direct: linear-q4-q8 over the int8-quantized input
 
         PipeParamsTile() = default;
 
@@ -182,6 +190,11 @@ public:
 
         uint32_t splitSize = 0;   // split-K: K length per split (0: ggml auto heuristic)
         vai::Dtype accDtype = vai::Dtype::None;
+        // Q4 weights on Adreno: quantize the input to int8 per 32 elements and
+        // multiply in integers (linear-q4-q8), where the device allows. About
+        // 4.8x faster there and adds ~4e-3 relative error; false keeps the
+        // input as is (linear-q4-direct).
+        bool int8Input = true;
     } config_;
 
     Linear(Config config);
@@ -464,7 +477,7 @@ inline Linear::PipeParamsTile ggmlMulmmWarptile(uint32_t M, uint32_t N, uint32_t
     // Per-shape refinement of the ggml pick (= upstream's vendor l_warptile
     // overrides, made shape-aware). Wherever no rule applies, ggml's pick
     // stands; the paired split rules live in ggmlGuessSplitCount.
-    const uint32_t cores = device.coreClusterCount();
+    const uint32_t cores = device.computeBlockCount();
     // Every rule below wants a core count and was measured on whole k-blocks
     // (the picks step k32 / k64; the lone k128 pick checks K % 128 itself).
     if (cores == 0 || K % 64 != 0) return t;
@@ -631,11 +644,63 @@ inline Linear::PipeParamsTile ggmlMulmmTileParams(uint32_t M, uint32_t N, uint32
 }
 
 
+// Q4 weights on Adreno run linear-q4-direct, which reads W
+// and I straight from memory instead of staging them in shared memory. On an
+// Adreno 830 (Galaxy S25 Ultra) it runs 3840- and 10240-wide Linears at
+// M = 1056 about 1.8x faster than the scalar tile kernel, and no tile shape
+// of that kernel measured faster than its default. It always accumulates in
+// fp32. Other GPUs keep the tile kernels: it is unmeasured there.
+inline bool useQ4Direct(Dtype iDtype, Dtype wDtype, eva::Device device)
+{
+    return wDtype == Dtype::Q4 && (iDtype == Dtype::Fp16 || iDtype == Dtype::Fp32)
+        && device.vendorID() == eva::VENDOR_ID::QUALCOMM;
+}
+
+// Its int8 variant, linear-q4-q8, quantizes I to int8 per 32 elements
+// (linear-q8-input) and computes each group's sum with packed 4x8 integer dot
+// products. Where the device runs those natively, it replaces the direct
+// kernel's dequantize-and-fma work: on the Adreno 830 at M = 1056, 3840-wide
+// Linears run 4.9x faster than linear-q4-direct and the FFN shapes 4.8x
+// (quantization included), at ~4e-3 relative error against the fp product,
+// small next to Q4's own.
+inline bool useQ4Q8(eva::Device device)
+{
+    return device.isDot4x8PackedMixedAccelerated();
+}
+
+// Their tiles (wgM = wgSize / (wgN / tN) * tM):
+// - linear-q4-direct: 128 threads, each owning a 4 x 4 block of O; 32 threads
+//   along N cover 128 columns and 4 along M cover 16 rows. On the Adreno 830,
+//   the other blocks tried (1-8 rows by 1-8 columns, 64-256 threads, 256
+//   columns) ran 1-140% slower.
+// - linear-q4-q8: 64 threads (one Adreno subgroup), each owning a 2 x 4 block;
+//   8 threads along N cover 32 columns and 8 along M cover 16 rows. Its inner
+//   loop is cheap enough that the W loads dominate once W outgrows the cache,
+//   and a subgroup's W load touches one cache line per thread along N: 32 with
+//   the direct tile, 8 here. On the Adreno 830 that runs a 10240 x 10240
+//   Linear 3.3x faster than the direct tile and the FFN 2.0x; the other
+//   blocks tried (1-8 rows by 1-4 columns, 64-256 threads, 8-128 columns)
+//   were slower on 3840- or 10240-wide Linears or on the FFN.
+inline Linear::PipeParamsTile q4DirectTile(Dtype iDtype, bool q8)
+{
+    Linear::PipeParamsTile t{};
+    t.direct = true;
+    t.q8 = q8;
+    t.wgSize = q8 ? 64 : 128;
+    t.tM = q8 ? 2 : 4;
+    t.tN = 4;
+    t.wgN = q8 ? 32 : 128;
+    t.wgM = t.wgSize / (t.wgN / t.tN) * t.tM;
+    t.iDtype = iDtype;
+    return t;
+}
+
+
 // Split-count selection; a refined pick carries its own split rule.
 inline uint32_t ggmlGuessSplitCount(uint32_t M, uint32_t N, uint32_t K,
                                     const Linear::PipeParamsTile& t, eva::Device device)
 {
-    const uint32_t cores = device.coreClusterCount();
+    const uint32_t cores = device.computeBlockCount();
     const uint32_t tiles = Linear::TileGrid(M, N, t.wgM, t.wgN).tiles();
 
     if (cmRefinedTile(t))
@@ -722,6 +787,7 @@ inline Linear::Linear(Config config)
     addSlot("in0", NodeSlot::input);
     addSlot("weight", NodeSlot::persistent);
     addSlot("partial", NodeSlot::temporary);   // assigned only when the reduce pass runs
+    addSlot("inQ8", NodeSlot::temporary);      // assigned only on the linear-q4-q8 path
 
     if (config_.hasBias)        addSlot("bias", NodeSlot::persistent);
     if (config_.acceptResidual) addSlot("residual", NodeSlot::input);
@@ -815,11 +881,20 @@ inline void Linear::prepare()
         // fp32 x fp32 on the scalar tile kernel stages and accumulates fp32;
         // coopmat (like llama.cpp) and any fp16 operand keep fp16 staging.
         const bool stageF32 = iDtype == Dtype::Fp32 && config_.wDtype == Dtype::Fp32;
-        const PipeParamsTile t = ggmlMulmmTileParams(M, N, K, iDtype, config_.wDtype, device());
+        // An explicit splitSize keeps the tile kernels, which split K.
+        const bool direct = config_.splitSize == 0 && useQ4Direct(iDtype, config_.wDtype, device());
+        const bool q8 = direct && config_.int8Input && useQ4Q8(device());
+        const PipeParamsTile t = direct ? q4DirectTile(iDtype, q8)
+                                        : ggmlMulmmTileParams(M, N, K, iDtype, config_.wDtype, device());
 
-        // Resolve split-K for this shape: explicit splitSize, or the ggml
-        // heuristic when 0.
-        if (config_.splitSize > 0)
+        // Resolve split-K for this shape: none for the direct kernel, an
+        // explicit splitSize, or the ggml heuristic when 0.
+        if (direct)
+        {
+            splitSize  = K;
+            splitCount = 1;
+        }
+        else if (config_.splitSize > 0)
         {
             VAI_ASSERT(config_.splitSize >= 32);
             splitSize  = config_.splitSize;
@@ -831,7 +906,33 @@ inline void Linear::prepare()
             splitSize  = (splitCount > 1) ? ggmlSplitSize(K, splitCount) : K;
         }
 
-        if (!pipeTile || t != pipeParamsTile)
+        if (direct && (!pipeTile || t != pipeParamsTile))
+        {
+            pipeParamsTile = t;
+
+            if (t.q8)
+            {
+                pipeQ8 = pipelinePool().request("linear-q8-input", {
+                    eva::constant_id<SPEC_ID_TYPE_I>(iDtype)             // typeI
+                });
+                if (!descSetQ8)
+                    descSetQ8 = gVaiDestSetPool(pipeQ8.descSetLayout(0));
+            }
+
+            // Same constants for both kernels; linear-q4-q8 reads no I dtype.
+            pipeTile = pipelinePool().request(t.q8 ? "linear-q4-q8" : "linear-q4-direct", {
+                eva::constant_id<0>(t.wgSize),                       // wgSize (= local_size_x)
+                eva::constant_id<1>(t.wgN),                          // wgN
+                eva::constant_id<2>(t.tM),                           // tM
+                eva::constant_id<3>(t.tN),                           // tN
+                eva::constant_id<SPEC_ID_TYPE_O>(config_.oDtype),    // typeO
+                eva::constant_id<SPEC_ID_TYPE_I>(iDtype)             // typeI
+            });
+
+            if (!descSetTile)
+                descSetTile = gVaiDestSetPool(pipeTile.descSetLayout(0));
+        }
+        else if (!direct && (!pipeTile || t != pipeParamsTile))
         {
             pipeParamsTile = t;
 
@@ -955,6 +1056,11 @@ inline void Linear::prepare()
         // splitCount keeps the previous shape's value and must not be read.
         if (needReducePass())
             (*this)["partial"] = Tensor({splitCount, M, N}, config_.oDtype);
+
+        // The int8 input: M * K bytes, then 8 bytes of (d, sum q) per 32
+        // elements, 5/4 * M * K bytes in all (held as fp32 words).
+        if (t.q8)
+            (*this)["inQ8"] = Tensor({M * K / 16u * 5u}, Dtype::Fp32);
     }
 
     auto outShape = inShape;
@@ -1009,6 +1115,23 @@ inline void Linear::run(eva::CommandBuffer cmdBuff)
 
     uint32_t constants[] = { M, N, K, splitSize };
     const TileGrid grid(M, N, pipeParamsTile.wgM, pipeParamsTile.wgN);
+
+    // linear-q4-q8: quantize I first, then the tile kernel reads that instead.
+    if (pipeParamsTile.q8)
+    {
+        auto qBuf = (*this)["inQ8"].buffer();
+        struct { uint32_t M, K; } q8Constants = { M, K };
+        constexpr uint32_t q8WgSize = 64;   // = local_size_x of linear-q8-input
+
+        descSetQ8.write({ qBuf, inBuf });   // 0 = Q, 1 = I
+        cmdBuff
+            .bindPipeline(pipeQ8)
+            .bindDescSets({descSetQ8})
+            .setPushConstants(0, sizeof(q8Constants), &q8Constants)
+            .dispatch(CEIL_DIV(M * (K / 32u), q8WgSize), 1, 1)
+            .barrier(eva::SYNC_SCOPE::COMPUTE_WRITE / qBuf / eva::SYNC_SCOPE::COMPUTE_READ);
+        inBuf = qBuf;
+    }
 
     if (!needReducePass())
     {

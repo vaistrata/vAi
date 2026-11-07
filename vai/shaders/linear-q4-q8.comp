@@ -1,0 +1,128 @@
+/*=============================================================================
+ linear-q4-q8.comp: Q4-weight GEMM over an int8-quantized input, with packed
+     4x8 integer dot products
+
+     O[m, n] = sum_k I[m, k] * W[n, k]
+
+     M = flattened batch, N = outDim, K = inDim
+     I int8 + per-32 scales (from linear-q8-input), W Q4 [N, K] (layout at
+     vai::Dtype::Q4), O fp32 or fp16
+
+ linear-q4-direct's frame (each thread owns a tM x tN block of O; columns
+ n0 + j * TX so a subgroup's lanes read neighbouring W rows; no shared memory)
+ with the arithmetic moved to integers. Over one 32-element group, with W's
+ nibbles n = q_W + 8 and scale s, and I ~= d * q_I:
+
+     sum_k I W  ~=  s * d * (sum n q_I  -  8 * sum q_I)
+
+ sum n q_I is eight dotPacked4x8EXT calls: a Q4 word masked with 0x0F0F0F0F
+ gives elements 0, 2, 4, 6 as unsigned bytes, shifted right by 4 elements
+ 1, 3, 5, 7, which linear-q8-input packs I to match. sum q_I comes with d.
+ Each group's integer sum is scaled into an fp32 accumulator.
+
+ Requirements: K % 32 == 0, M * K < 2^32 bytes, and the device's
+ shaderIntegerDotProduct feature. No split-K: the host passes splitSize = K
+ and folds bias / epilogue / residual in the reduce pass.
+
+ Dispatch (host): (ceil(N / wgN), ceil(M / wgM), 1), wgM = (wgSize / TX) * tM
+=============================================================================*/
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_control_flow_attributes : enable
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_integer_dot_product : require
+#include "common/spec_constants.h"
+
+layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;   // = wgSize (same SpecId)
+
+layout(constant_id = 0) const uint wgSize = 128;   // threads per workgroup (= local_size_x)
+layout(constant_id = 1) const uint wgN    = 128;   // workgroup tile along N
+layout(constant_id = 2) const uint tM     = 4;     // thread tile along M
+layout(constant_id = 3) const uint tN     = 4;     // thread tile along N
+
+layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0;  // O (output) dtype
+
+const uint TX  = wgN / tN;              // threads along N
+const uint wgM = (wgSize / TX) * tM;    // workgroup tile along M
+
+layout(set = 0, binding = 0) writeonly buffer O_BUF_F32 { float bufferO_f32[]; };
+layout(set = 0, binding = 0) writeonly buffer O_BUF_F16 { float16_t bufferO_f16[]; };
+layout(set = 0, binding = 1) readonly buffer Q_BUF_U4   { uvec4 bufferQ_u4[]; };       // int8 I: a group per two elements
+layout(set = 0, binding = 1) readonly buffer Q_BUF_V2   { vec2 bufferQ_v2[]; };        // (d, sum q) per group, after the bytes
+layout(set = 0, binding = 2) readonly buffer W_BUF_U4   { uvec4 bufferW_u4[]; };       // one Q4 group per element
+layout(set = 0, binding = 2) readonly buffer W_BUF_F16  { float16_t bufferW_f16[]; };  // the scales, after the words
+
+layout(push_constant) uniform PushConstants {
+    uint M;
+    uint N;
+    uint K;
+    uint splitSize;   // = K (no split-K)
+};
+
+void main()
+{
+    const uint tx = gl_LocalInvocationID.x % TX;
+    const uint ty = gl_LocalInvocationID.x / TX;
+    const uint n0 = gl_WorkGroupID.x * wgN + tx;
+    const uint m0 = gl_WorkGroupID.y * wgM + ty * tM;
+    const uint groups = K / 32u;   // groups per row (I and W alike)
+
+    // Tail rows / columns read the last valid one; their results are not stored.
+    uint rowI[tM];   // first group of each I row
+    uint rowW[tN];   // first group of each W row
+    [[unroll]] for (uint i = 0; i < tM; i++) rowI[i] = min(m0 + i, M - 1u) * groups;
+    [[unroll]] for (uint j = 0; j < tN; j++) rowW[j] = min(n0 + j * TX, N - 1u) * groups;
+    const uint scaleW = N * K / 4u;   // first W scale, in fp16 elements (the words take N * K / 2 bytes)
+    const uint scaleI = M * K / 8u;   // first (d, sum q), in vec2 elements (the bytes take M * K)
+
+    float acc[tM * tN];
+    [[unroll]] for (uint i = 0; i < tM * tN; i++) acc[i] = 0.0;
+
+    for (uint g = 0; g < groups; g++)
+    {
+        uvec4 qa[tM], qb[tM];   // the group's 32 int8 values: words 0-3, 4-7
+        vec2 ds[tM];            // (d, sum q)
+        [[unroll]] for (uint i = 0; i < tM; i++)
+        {
+            qa[i] = bufferQ_u4[2u * (rowI[i] + g)];
+            qb[i] = bufferQ_u4[2u * (rowI[i] + g) + 1u];
+            ds[i] = bufferQ_v2[scaleI + rowI[i] + g];
+        }
+
+        [[unroll]] for (uint j = 0; j < tN; j++)
+        {
+            const uvec4 words = bufferW_u4[rowW[j] + g];
+            const float s = float(bufferW_f16[scaleW + rowW[j] + g]);
+            const uvec4 even = words & 0x0F0F0F0Fu;          // per word: nibbles 0, 2, 4, 6
+            const uvec4 odd  = (words >> 4) & 0x0F0F0F0Fu;   // nibbles 1, 3, 5, 7
+
+            [[unroll]] for (uint i = 0; i < tM; i++)
+            {
+                int dotNQ = dotPacked4x8EXT(int(qa[i].x), even.x);
+                dotNQ    += dotPacked4x8EXT(int(qa[i].y), odd.x);
+                dotNQ    += dotPacked4x8EXT(int(qa[i].z), even.y);
+                dotNQ    += dotPacked4x8EXT(int(qa[i].w), odd.y);
+                dotNQ    += dotPacked4x8EXT(int(qb[i].x), even.z);
+                dotNQ    += dotPacked4x8EXT(int(qb[i].y), odd.z);
+                dotNQ    += dotPacked4x8EXT(int(qb[i].z), even.w);
+                dotNQ    += dotPacked4x8EXT(int(qb[i].w), odd.w);
+                // sum (n - 8) q_I = sum n q_I - 8 sum q_I
+                acc[i * tN + j] = fma(s * ds[i].x, float(dotNQ) - 8.0 * ds[i].y, acc[i * tN + j]);
+            }
+        }
+    }
+
+    [[unroll]] for (uint i = 0; i < tM; i++)
+    {
+        [[unroll]] for (uint j = 0; j < tN; j++)
+        {
+            const uint m = m0 + i, n = n0 + j * TX;
+            if (m < M && n < N)
+            {
+                if (typeO == DTYPE_F32) bufferO_f32[m * N + n] = acc[i * tN + j];
+                else                    bufferO_f16[m * N + n] = float16_t(clamp(acc[i * tN + j], -65504.0, 65504.0));
+            }
+        }
+    }
+}
