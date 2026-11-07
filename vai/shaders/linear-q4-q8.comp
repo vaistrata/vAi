@@ -34,12 +34,15 @@
 #extension GL_EXT_integer_dot_product : require
 #include "common/spec_constants.h"
 
-layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;   // = wgSize (same SpecId)
+// The tile is compile-time (q4DirectTile() on the host must match it): as
+// specialization constants the Adreno 830 compiler keeps the loops over it
+// rolled, and a 3840-wide Linear takes 23.6 ms instead of 12.9 ms.
+const uint wgSize = 64;    // threads per workgroup
+const uint wgN    = 32;    // workgroup tile along N
+const uint tM     = 2;     // thread tile along M
+const uint tN     = 4;     // thread tile along N
 
-layout(constant_id = 0) const uint wgSize = 128;   // threads per workgroup (= local_size_x)
-layout(constant_id = 1) const uint wgN    = 128;   // workgroup tile along N
-layout(constant_id = 2) const uint tM     = 4;     // thread tile along M
-layout(constant_id = 3) const uint tN     = 4;     // thread tile along N
+layout(local_size_x = wgSize, local_size_y = 1, local_size_z = 1) in;
 
 layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0;  // O (output) dtype
 

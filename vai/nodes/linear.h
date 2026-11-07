@@ -192,7 +192,7 @@ public:
         vai::Dtype accDtype = vai::Dtype::None;
         // Q4 weights on Adreno: quantize the input to int8 per 32 elements and
         // multiply in integers (linear-q4-q8), where the device allows. About
-        // 4.8x faster there and adds ~4e-3 relative error; false keeps the
+        // 7-9x faster there and adds ~4e-3 relative error; false keeps the
         // input as is (linear-q4-direct).
         bool int8Input = true;
     } config_;
@@ -660,7 +660,7 @@ inline bool useQ4Direct(Dtype iDtype, Dtype wDtype, eva::Device device)
 // (linear-q8-input) and computes each group's sum with packed 4x8 integer dot
 // products. Where the device runs those natively, it replaces the direct
 // kernel's dequantize-and-fma work: on the Adreno 830 at M = 1056, 3840-wide
-// Linears run 4.9x faster than linear-q4-direct and the FFN shapes 4.8x
+// Linears run 9.0x faster than linear-q4-direct and the FFN shapes 6.7x
 // (quantization included), at ~4e-3 relative error against the fp product,
 // small next to Q4's own.
 inline bool useQ4Q8(eva::Device device)
@@ -680,7 +680,8 @@ inline bool useQ4Q8(eva::Device device)
 //   the direct tile, 8 here. On the Adreno 830 that runs a 10240 x 10240
 //   Linear 3.3x faster than the direct tile and the FFN 2.0x; the other
 //   blocks tried (1-8 rows by 1-4 columns, 64-256 threads, 8-128 columns)
-//   were slower on 3840- or 10240-wide Linears or on the FFN.
+//   were slower on 3840- or 10240-wide Linears or on the FFN. The shader
+//   fixes this tile at compile time.
 inline Linear::PipeParamsTile q4DirectTile(Dtype iDtype, bool q8)
 {
     Linear::PipeParamsTile t{};
