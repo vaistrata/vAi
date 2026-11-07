@@ -268,7 +268,7 @@ inline Attention::PipeParamsFA ggmlFACmTuningParams(uint32_t Dh, uint32_t nRows,
 // than kCount * wgKv, and both are exact.
 inline uint32_t ggmlFASplitKCount(uint32_t totalWgs, eva::Device device)
 {
-    uint32_t cores = device.coreClusterCount();
+    uint32_t cores = device.computeBlockCount();
     if (cores != 0 && device.vendorID() == eva::VENDOR_ID::INTEL
         && device.architectureID() != eva::Architecture::INTEL_XE2)
         cores *= 2;               // ggml's Alchemist multiplier (not applied to the placeholder)
