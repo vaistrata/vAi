@@ -191,9 +191,9 @@ public:
         uint32_t splitSize = 0;   // split-K: K length per split (0: ggml auto heuristic)
         vai::Dtype accDtype = vai::Dtype::None;
         // Q4 weights on Adreno: quantize the input to int8 per 32 elements and
-        // multiply in integers (linear-q4-q8), where the device allows. 2.5-4.4x
-        // faster there and adds ~4e-3 relative error; false keeps the input as
-        // is (linear-q4-direct).
+        // multiply in integers (linear-q4-q8), where the device allows. About
+        // 4.8x faster there and adds ~4e-3 relative error; false keeps the
+        // input as is (linear-q4-direct).
         bool int8Input = true;
     } config_;
 
@@ -660,7 +660,7 @@ inline bool useQ4Direct(Dtype iDtype, Dtype wDtype, eva::Device device)
 // (linear-q8-input) and computes each group's sum with packed 4x8 integer dot
 // products. Where the device runs those natively, it replaces the direct
 // kernel's dequantize-and-fma work: on the Adreno 830 at M = 1056, 3840-wide
-// Linears run 4.4x faster than linear-q4-direct and the FFN shapes 2.5x
+// Linears run 4.9x faster than linear-q4-direct and the FFN shapes 4.8x
 // (quantization included), at ~4e-3 relative error against the fp product,
 // small next to Q4's own.
 inline bool useQ4Q8(eva::Device device)
@@ -668,18 +668,28 @@ inline bool useQ4Q8(eva::Device device)
     return device.isDot4x8PackedMixedAccelerated();
 }
 
-// Its tile (both kernels): 128 threads, each owning a 4 x 4 block of O; 32 threads along N
-// cover 128 columns and 4 along M cover 16 rows. On the Adreno 830, the other
-// blocks tried (1-8 rows by 1-8 columns, 64-256 threads, 256 columns) ran
-// 1-140% slower.
-inline Linear::PipeParamsTile q4DirectTile(Dtype iDtype)
+// Their tiles (wgM = wgSize / (wgN / tN) * tM):
+// - linear-q4-direct: 128 threads, each owning a 4 x 4 block of O; 32 threads
+//   along N cover 128 columns and 4 along M cover 16 rows. On the Adreno 830,
+//   the other blocks tried (1-8 rows by 1-8 columns, 64-256 threads, 256
+//   columns) ran 1-140% slower.
+// - linear-q4-q8: 64 threads (one Adreno subgroup), each owning a 2 x 4 block;
+//   8 threads along N cover 32 columns and 8 along M cover 16 rows. Its inner
+//   loop is cheap enough that the W loads dominate once W outgrows the cache,
+//   and a subgroup's W load touches one cache line per thread along N: 32 with
+//   the direct tile, 8 here. On the Adreno 830 that runs a 10240 x 10240
+//   Linear 3.3x faster than the direct tile and the FFN 2.0x; the other
+//   blocks tried (1-8 rows by 1-4 columns, 64-256 threads, 8-128 columns)
+//   were slower on 3840- or 10240-wide Linears or on the FFN.
+inline Linear::PipeParamsTile q4DirectTile(Dtype iDtype, bool q8)
 {
     Linear::PipeParamsTile t{};
     t.direct = true;
-    t.wgSize = 128;
-    t.tM = 4;
+    t.q8 = q8;
+    t.wgSize = q8 ? 64 : 128;
+    t.tM = q8 ? 2 : 4;
     t.tN = 4;
-    t.wgN = 128;
+    t.wgN = q8 ? 32 : 128;
     t.wgM = t.wgSize / (t.wgN / t.tN) * t.tM;
     t.iDtype = iDtype;
     return t;
@@ -873,9 +883,9 @@ inline void Linear::prepare()
         const bool stageF32 = iDtype == Dtype::Fp32 && config_.wDtype == Dtype::Fp32;
         // An explicit splitSize keeps the tile kernels, which split K.
         const bool direct = config_.splitSize == 0 && useQ4Direct(iDtype, config_.wDtype, device());
-        PipeParamsTile t = direct ? q4DirectTile(iDtype)
-                                  : ggmlMulmmTileParams(M, N, K, iDtype, config_.wDtype, device());
-        t.q8 = direct && config_.int8Input && useQ4Q8(device());
+        const bool q8 = direct && config_.int8Input && useQ4Q8(device());
+        const PipeParamsTile t = direct ? q4DirectTile(iDtype, q8)
+                                        : ggmlMulmmTileParams(M, N, K, iDtype, config_.wDtype, device());
 
         // Resolve split-K for this shape: none for the direct kernel, an
         // explicit splitSize, or the ggml heuristic when 0.
