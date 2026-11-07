@@ -4,6 +4,10 @@
 #include <bit>
 #include <cmath>
 #include <algorithm>
+#include <cstdio>
+#include <filesystem>
+#include <stdexcept>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -327,13 +331,22 @@ Tensor::Tensor(const SafetensorRef& ref, Dtype targetDtype)
 {
     shape_ = ref.getShape();
 
+    const std::string storedType = ref.getDataType();
+
+    // A Q4 file tensor is read as stored; anything else quantizes from fp32.
+    if (storedType == "Q4")
+    {
+        VAI_ASSERT(dtype() == Dtype::Q4 && "a Q4 file tensor loads only as Q4");
+        data_->hostData_.resize(numBytes());
+        loadInto(ref, 0, ref.byteSize(), storedType, data_->hostData_.data(), Dtype::Q4);
+        return;
+    }
     if (dtype() == Dtype::Q4)
     {
         setFloats(static_cast<const float*>(Tensor(ref, Dtype::Fp32).hostData()));
         return;
     }
 
-    const std::string storedType = ref.getDataType();
     const size_t count    = numElements();
     const size_t srcBytes = ref.byteSize();
     const size_t dstBytes = count * bytesPerElement(dtype());
@@ -580,6 +593,60 @@ Tensor& Tensor::downloadToHost()
         data_->hostSyncedAt_ = data_->lastSubmission_;
     }
     return *this;
+}
+
+
+void saveSafetensors(const std::string& path,
+                     const std::vector<std::pair<std::string, const Tensor*>>& tensors)
+{
+    auto dtypeString = [](Dtype dt) -> const char*
+    {
+        switch (dt) {
+            case Dtype::Fp32: return "F32";
+            case Dtype::Fp16: return "F16";
+            case Dtype::Q4:   return "Q4";
+            case Dtype::None: break;
+        }
+        VAI_ASSERT(false && "saveSafetensors: tensor without a dtype");
+        return "";
+    };
+
+    // Header: {"name": {"dtype", "shape", "data_offsets"}, ...}, offsets from
+    // the end of the header, padded with spaces to 8 bytes as the format asks.
+    std::string header = "{";
+    size_t offset = 0;
+    for (const auto& [name, t] : tensors)
+    {
+        VAI_ASSERT(t && t->hasHostData() && t->baseOffset() == 0);
+        const size_t bytes = t->numBytes();
+        header += (header.size() > 1 ? ",\"" : "\"") + name + "\":{\"dtype\":\"" + dtypeString(t->dtype())
+                + "\",\"shape\":[";
+        for (size_t d = 0; d < t->shape().size(); ++d)
+            header += (d ? "," : "") + std::to_string(t->shape()[d]);
+        header += "],\"data_offsets\":[" + std::to_string(offset) + "," + std::to_string(offset + bytes) + "]}";
+        offset += bytes;
+    }
+    header += "}";
+    header.append((8 - header.size() % 8) % 8, ' ');
+
+    const std::string partial = path + ".partial";
+    std::FILE* f = std::fopen(partial.c_str(), "wb");
+    if (!f)
+        throw std::runtime_error("saveSafetensors: cannot create " + partial);
+
+    const uint64_t headerLength = header.size();
+    bool ok = std::fwrite(&headerLength, sizeof(headerLength), 1, f) == 1
+           && std::fwrite(header.data(), 1, header.size(), f) == header.size();
+    for (const auto& [name, t] : tensors)
+        ok = ok && std::fwrite(t->hostData(), 1, t->numBytes(), f) == t->numBytes();
+    ok = (std::fclose(f) == 0) && ok;
+
+    if (!ok)
+    {
+        std::filesystem::remove(partial);
+        throw std::runtime_error("saveSafetensors: failed writing " + partial);
+    }
+    std::filesystem::rename(partial, path);
 }
 
 

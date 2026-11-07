@@ -42,12 +42,14 @@ constexpr size_t byteSize(Dtype dt, size_t count) noexcept
 
 // Tensor dtype a safetensors dtype string loads as. BF16 is a file format
 // only, not a tensor dtype - it loads as fp32 (lossless) unless the caller
-// requests a target dtype (see Tensor(SafetensorRef, Dtype)).
+// requests a target dtype (see Tensor(SafetensorRef, Dtype)). Q4 is not a
+// safetensors dtype: only files saveSafetensors() wrote carry it.
 inline Dtype dtypeFromString(const std::string& s)
 {
     if (s == "F32")  return Dtype::Fp32;
     if (s == "F16")  return Dtype::Fp16;
     if (s == "BF16") return Dtype::Fp32;
+    if (s == "Q4")   return Dtype::Q4;
     VAI_ASSERT(false && "Unsupported dtype string");
     return Dtype::Fp32;
 }
@@ -75,6 +77,15 @@ Tensor slice(const SafetensorRef& ref, uint32_t begin, uint32_t end, Dtype targe
 // a + b under numpy broadcasting (e.g. a position table [N, D] plus a bias
 // [D]). Summed in fp32 and rounded to targetDtype once.
 Tensor sum(const SafetensorRef& a, const SafetensorRef& b, Dtype targetDtype);
+
+
+// Writes `tensors` (each with host data, as loaded and not yet uploaded) to one
+// safetensors file at `path`, in the given order and at their own dtypes. A Q4
+// tensor is stored as packed, under the dtype string "Q4", so reading it back
+// costs one read and no conversion; only vai reads such a file. The file is
+// written beside `path` and renamed into place, so `path` is never partial.
+void saveSafetensors(const std::string& path,
+                     const std::vector<std::pair<std::string, const Tensor*>>& tensors);
 
 
 // Smallest power of two >= n (with nextPow2(0) == 1). Used to bucket grow-only

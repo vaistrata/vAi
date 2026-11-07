@@ -73,6 +73,7 @@ With the Adreno kernels that came after (`linear-q4-direct`, its int8 variant `l
 
 - `demo-zimage` samples 9 steps in 84 s. A step takes 5.6 s while the phone is cool and 9-13 s once it heats up. Before that, the weights load in 30 s and a warm-up forward takes 9 s.
 - `bench-zimage-vai` gives rel L2 3.9e-2 against the fp32 forward (cosine 0.9992).
+- The DiT loads from a prepared weights file, `data/zimage/<name>-q4-split.safetensors` for these settings (3.66 GB): each tensor already in the dtype the model runs, Q4 included. The first run converts the 23 GB fp32 checkpoint as before (36.5 s) and writes the file; later runs read it in 2.6 s. `bench-zimage-vai --prepared` loads the same way; the result is unchanged (rel L2 3.905e-2 either way).
 
 ## Building and running
 

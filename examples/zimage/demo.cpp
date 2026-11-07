@@ -2,7 +2,10 @@
   Written by   ippx123@gmail.com
   Task         Z-Image DiT — runs the Turbo flow-matching sampler on the GPU
                from caption features and noise, writes the final latent.
-  Assets       data/zimage/demo-input.safetensors
+  Assets       data/zimage/<name>[-q4][-split].safetensors, the prepared
+               weights: written from the checkpoint on the first run (see
+               tongyi-weights.h), read on every later one
+               data/zimage/demo-input.safetensors
                  from  examples/zimage/tools.py prepare   (caption features of
                        one prompt via the Qwen3 encoder, plus the noise latent)
                data/zimage/demo-latent.bin  (written here; fp32 [16, H, W])
@@ -80,7 +83,9 @@ int main(int argc, char** argv)
 
     {
         TimeChecker timer("Weights loaded in {}ms");
-        loadWeights<"tongyi">(model);
+        if (!zimage::tongyi::loadWeightsPrepared(model))
+            printf("Wrote %s; later runs load it instead of the checkpoint\n",
+                   zimage::tongyi::preparedPath(model).c_str());
     }
 
     // FlowMatchEulerDiscreteScheduler, Turbo settings: sigmas linspace(1, 1/n)

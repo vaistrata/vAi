@@ -11,7 +11,9 @@
                keeps its Q·K in fp32; --q4 stores the block
                projections as Q4; --nodes-per-submit N splits each forward
                into submissions of N nodes and --split-ffn-up halves the
-               longest node, for Adreno's submission watchdog.
+               longest node, for Adreno's submission watchdog; --prepared
+               loads through the prepared weights file (tongyi-weights.h),
+               writing it first if it is missing.
 =============================================================================*/
 
 #include "models/zimage/model.h"
@@ -64,7 +66,7 @@ int main(int argc, char** argv)
 {
     uint32_t height = 1024, width = 1024, iters = 10, nodesPerSubmit = 0;
     bool stages = false, profile = false, scalarAttention = false, int8Attention = true, q4 = false;
-    bool splitFfnUp = false;
+    bool splitFfnUp = false, prepared = false;
     for (int i = 1; i < argc; ++i)
     {
         std::string a = argv[i];
@@ -78,10 +80,11 @@ int main(int argc, char** argv)
         else if (a == "--no-int8-attention")      { int8Attention = false; }
         else if (a == "--q4")                     { q4 = true; }
         else if (a == "--split-ffn-up")           { splitFfnUp = true; }
+        else if (a == "--prepared")               { prepared = true; }
         else if (a == "--nodes-per-submit" && i + 1 < argc) { nodesPerSubmit = (uint32_t)atoi(argv[++i]); }
         else
         {
-            fprintf(stderr, "usage: %s [--height H] [--width W] [--iters N] [--stages] [--profile] [--scalar-attention] [--no-int8-attention] [--q4] [--nodes-per-submit N] [--split-ffn-up]\n", argv[0]);
+            fprintf(stderr, "usage: %s [--height H] [--width W] [--iters N] [--stages] [--profile] [--scalar-attention] [--no-int8-attention] [--q4] [--nodes-per-submit N] [--split-ffn-up] [--prepared]\n", argv[0]);
             return 1;
         }
     }
@@ -132,7 +135,10 @@ int main(int argc, char** argv)
     }
 
     double t0 = nowSec();
-    loadWeights<"tongyi">(model);
+    if (prepared)
+        zimage::tongyi::loadWeightsPrepared(model);
+    else
+        loadWeights<"tongyi">(model);
     printf("weights read in %.1f s\n", nowSec() - t0);
 
     Tensor out;
