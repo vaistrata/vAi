@@ -32,8 +32,10 @@ namespace vai::node {
   - tile (M > 8): a workgroup owns a wgM x wgN tile. Two kernels share the
     frame, chosen per device in ggmlMulmmTileParams(): scalar
     (linear-tile, each thread accumulates its own outputs) and
-    cooperative-matrix (linear-cm, subgroup MMA tiles). Everything
-    below applies to both:
+    cooperative-matrix (linear-cm, subgroup MMA tiles). On Adreno, Q4
+    weights take a third, linear-q4-direct, which skips
+    shared memory and never splits K (useQ4Direct()). Everything below
+    applies to all three:
 
   The tile params are selected per output shape in prepare(); when a shape
   change selects a different tile, the pipeline is re-requested from the pool.
@@ -102,6 +104,7 @@ public:
         uint32_t tK = 0;    // coopmat k tile: k depth per coopMatMulAdd (= device coopmat K);
                             // 0 on the scalar path — doubles as the coopmat-tile marker
         vai::Dtype iDtype = vai::Dtype::None;
+        bool direct = false;   // linear-q4-direct: only wgSize, wgM, wgN, tM, tN apply (q4DirectTile)
 
         PipeParamsTile() = default;
 
@@ -631,6 +634,36 @@ inline Linear::PipeParamsTile ggmlMulmmTileParams(uint32_t M, uint32_t N, uint32
 }
 
 
+// Q4 weights on Adreno run linear-q4-direct, which reads W
+// and I straight from memory instead of staging them in shared memory. On an
+// Adreno 830 (Galaxy S25 Ultra) it runs 3840- and 10240-wide Linears at
+// M = 1056 about 1.8x faster than the scalar tile kernel, and no tile shape
+// of that kernel measured faster than its default. It always accumulates in
+// fp32. Other GPUs keep the tile kernels: it is unmeasured there.
+inline bool useQ4Direct(Dtype iDtype, Dtype wDtype, eva::Device device)
+{
+    return wDtype == Dtype::Q4 && (iDtype == Dtype::Fp16 || iDtype == Dtype::Fp32)
+        && device.vendorID() == eva::VENDOR_ID::QUALCOMM;
+}
+
+// Its tile: 128 threads, each owning a 4 x 4 block of O; 32 threads along N
+// cover 128 columns and 4 along M cover 16 rows. On the Adreno 830, the other
+// blocks tried (1-8 rows by 1-8 columns, 64-256 threads, 256 columns) ran
+// 1-140% slower.
+inline Linear::PipeParamsTile q4DirectTile(Dtype iDtype)
+{
+    Linear::PipeParamsTile t{};
+    t.direct = true;
+    t.wgSize = 128;
+    t.tM = 4;
+    t.tN = 4;
+    t.wgN = 128;
+    t.wgM = t.wgSize / (t.wgN / t.tN) * t.tM;
+    t.iDtype = iDtype;
+    return t;
+}
+
+
 // Split-count selection; a refined pick carries its own split rule.
 inline uint32_t ggmlGuessSplitCount(uint32_t M, uint32_t N, uint32_t K,
                                     const Linear::PipeParamsTile& t, eva::Device device)
@@ -815,11 +848,19 @@ inline void Linear::prepare()
         // fp32 x fp32 on the scalar tile kernel stages and accumulates fp32;
         // coopmat (like llama.cpp) and any fp16 operand keep fp16 staging.
         const bool stageF32 = iDtype == Dtype::Fp32 && config_.wDtype == Dtype::Fp32;
-        const PipeParamsTile t = ggmlMulmmTileParams(M, N, K, iDtype, config_.wDtype, device());
+        // An explicit splitSize keeps the tile kernels, which split K.
+        const bool direct = config_.splitSize == 0 && useQ4Direct(iDtype, config_.wDtype, device());
+        const PipeParamsTile t = direct ? q4DirectTile(iDtype)
+                                        : ggmlMulmmTileParams(M, N, K, iDtype, config_.wDtype, device());
 
-        // Resolve split-K for this shape: explicit splitSize, or the ggml
-        // heuristic when 0.
-        if (config_.splitSize > 0)
+        // Resolve split-K for this shape: none for the direct kernel, an
+        // explicit splitSize, or the ggml heuristic when 0.
+        if (direct)
+        {
+            splitSize  = K;
+            splitCount = 1;
+        }
+        else if (config_.splitSize > 0)
         {
             VAI_ASSERT(config_.splitSize >= 32);
             splitSize  = config_.splitSize;
@@ -831,7 +872,23 @@ inline void Linear::prepare()
             splitSize  = (splitCount > 1) ? ggmlSplitSize(K, splitCount) : K;
         }
 
-        if (!pipeTile || t != pipeParamsTile)
+        if (direct && (!pipeTile || t != pipeParamsTile))
+        {
+            pipeParamsTile = t;
+
+            pipeTile = pipelinePool().request("linear-q4-direct", {
+                eva::constant_id<0>(t.wgSize),                       // wgSize (= local_size_x)
+                eva::constant_id<1>(t.wgN),                          // wgN
+                eva::constant_id<2>(t.tM),                           // tM
+                eva::constant_id<3>(t.tN),                           // tN
+                eva::constant_id<SPEC_ID_TYPE_O>(config_.oDtype),    // typeO
+                eva::constant_id<SPEC_ID_TYPE_I>(iDtype)             // typeI
+            });
+
+            if (!descSetTile)
+                descSetTile = gVaiDestSetPool(pipeTile.descSetLayout(0));
+        }
+        else if (!direct && (!pipeTile || t != pipeParamsTile))
         {
             pipeParamsTile = t;
 
