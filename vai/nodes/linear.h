@@ -636,28 +636,32 @@ inline Linear::PipeParamsTile ggmlMulmmTileParams(uint32_t M, uint32_t N, uint32
 
 // Q4 weights on Adreno run linear-q4-direct, which reads W
 // and I straight from memory instead of staging them in shared memory. On an
-// Adreno 830 (Galaxy S25 Ultra) it runs 3840- and 10240-wide Linears at
-// M = 1056 about 1.8x faster than the scalar tile kernel, and no tile shape
-// of that kernel measured faster than its default. It always accumulates in
-// fp32. Other GPUs keep the tile kernels: it is unmeasured there.
+// Adreno 830 (Galaxy S25 Ultra) it ran 3840- and 10240-wide Linears at
+// M = 1056 about 1.8x faster than the scalar tile kernel with its tile as
+// specialization constants, and 3.6-3.7x faster again with the compile-time
+// tile below; no tile shape of the scalar tile kernel measured faster than
+// its default. It always accumulates in fp32. Other GPUs keep the tile
+// kernels: it is unmeasured there.
 inline bool useQ4Direct(Dtype iDtype, Dtype wDtype, eva::Device device)
 {
     return wDtype == Dtype::Q4 && (iDtype == Dtype::Fp16 || iDtype == Dtype::Fp32)
         && device.vendorID() == eva::VENDOR_ID::QUALCOMM;
 }
 
-// Its tile: 128 threads, each owning a 4 x 4 block of O; 32 threads along N
-// cover 128 columns and 4 along M cover 16 rows. On the Adreno 830, the other
-// blocks tried (1-8 rows by 1-8 columns, 64-256 threads, 256 columns) ran
-// 1-140% slower.
+// Its tile: 64 threads (one Adreno subgroup), each owning a 4 x 4 block of O;
+// 8 threads along N cover 32 columns and 8 along M cover 32 rows. The shader
+// fixes it at compile time. Swept that way on the Adreno 830 (1-8 rows by 2-8
+// columns, 64-128 threads, 16-128 columns), it ran the 3840-wide Linears
+// 1.15x faster than the earlier 128-thread, 128-column tile and the FFN
+// 1.64x; 64 threads over 64 columns matched it, the others were slower.
 inline Linear::PipeParamsTile q4DirectTile(Dtype iDtype)
 {
     Linear::PipeParamsTile t{};
     t.direct = true;
-    t.wgSize = 128;
+    t.wgSize = 64;
     t.tM = 4;
     t.tN = 4;
-    t.wgN = 128;
+    t.wgN = 32;
     t.wgM = t.wgSize / (t.wgN / t.tN) * t.tM;
     t.iDtype = iDtype;
     return t;

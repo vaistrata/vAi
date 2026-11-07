@@ -31,12 +31,15 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 #include "common/spec_constants.h"
 
-layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;   // = wgSize (same SpecId)
+// The tile is compile-time (q4DirectTile() on the host must match it): as
+// specialization constants the Adreno 830 compiler keeps the loops over it
+// rolled, and the same tile runs 3.2x slower.
+const uint wgSize = 64;    // threads per workgroup
+const uint wgN    = 32;    // workgroup tile along N
+const uint tM     = 4;     // thread tile along M
+const uint tN     = 4;     // thread tile along N
 
-layout(constant_id = 0) const uint wgSize = 128;   // threads per workgroup (= local_size_x)
-layout(constant_id = 1) const uint wgN    = 128;   // workgroup tile along N
-layout(constant_id = 2) const uint tM     = 4;     // thread tile along M
-layout(constant_id = 3) const uint tN     = 4;     // thread tile along N
+layout(local_size_x = wgSize, local_size_y = 1, local_size_z = 1) in;
 
 layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0;  // O (output) dtype
 layout(constant_id = SPEC_ID_TYPE_I) const uint typeI = 1;  // I (input) dtype: fp32 or fp16
