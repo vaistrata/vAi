@@ -69,6 +69,11 @@ Galaxy S25 Ultra (Adreno 830), 512x512, `--q4 --nodes-per-submit 1 --split-ffn-u
 - `--split-ffn-up` runs the FFN's w1 and w3 as two Linears joined by a Concat. That halves the DiT's longest node, from ~1.1 s to ~0.55 s at this size. Without it, a hot phone runs that node past the driver's ~1.7 s submit timeout.
 - Where packed int8 dot products are accelerated, as on this GPU, the attention runs `zimage-attention-i8`: Q·K on int8 (K quantized per key, the query per row) and V staged as fp16. On a cool phone it takes 34 ms per layer instead of the scalar kernel's 83 ms (N = 1056, 30 heads), and the first 4 layers plus one refiner pair take 1.65 s instead of 1.87 s. rel L2 against fp32 goes from 3.70e-2 to 3.91e-2. `--no-int8-attention` keeps the scalar kernel.
 
+With the Adreno kernels that came after (`linear-q4-direct`, its int8 variant `linear-q4-q8`, and `zimage-attention-i8`), on the same phone and settings:
+
+- `demo-zimage` samples 9 steps in 84 s. A step takes 5.6 s while the phone is cool and 9-13 s once it heats up. Before that, the weights load in 30 s and a warm-up forward takes 9 s.
+- `bench-zimage-vai` gives rel L2 3.9e-2 against the fp32 forward (cosine 0.9992).
+
 ## Building and running
 
 Checkpoint: the full `Tongyi-MAI/Z-Image-Turbo` snapshot in `data/zimage/Z-Image-Turbo/`. The DiT loader reads only `transformer/`; `tools.py` reads the text encoder and the VAE from the same folder.
