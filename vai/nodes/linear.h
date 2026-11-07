@@ -192,7 +192,7 @@ public:
         vai::Dtype accDtype = vai::Dtype::None;
         // Q4 weights on Adreno: quantize the input to int8 per 32 elements and
         // multiply in integers (linear-q4-q8), where the device allows. About
-        // 11-12x faster there and adds ~4e-3 relative error; false keeps the
+        // ~3x faster there and adds ~4e-3 relative error; false keeps the
         // input as is (linear-q4-direct).
         bool int8Input = true;
     } config_;
@@ -646,10 +646,12 @@ inline Linear::PipeParamsTile ggmlMulmmTileParams(uint32_t M, uint32_t N, uint32
 
 // Q4 weights on Adreno run linear-q4-direct, which reads W
 // and I straight from memory instead of staging them in shared memory. On an
-// Adreno 830 (Galaxy S25 Ultra) it runs 3840- and 10240-wide Linears at
-// M = 1056 about 1.8x faster than the scalar tile kernel, and no tile shape
-// of that kernel measured faster than its default. It always accumulates in
-// fp32. Other GPUs keep the tile kernels: it is unmeasured there.
+// Adreno 830 (Galaxy S25 Ultra) it ran 3840- and 10240-wide Linears at
+// M = 1056 about 1.8x faster than the scalar tile kernel with its tile as
+// specialization constants, and 3.6-3.7x faster again with the compile-time
+// tile below; no tile shape of the scalar tile kernel measured faster than
+// its default. It always accumulates in fp32. Other GPUs keep the tile
+// kernels: it is unmeasured there.
 inline bool useQ4Direct(Dtype iDtype, Dtype wDtype, eva::Device device)
 {
     return wDtype == Dtype::Q4 && (iDtype == Dtype::Fp16 || iDtype == Dtype::Fp32)
@@ -660,7 +662,7 @@ inline bool useQ4Direct(Dtype iDtype, Dtype wDtype, eva::Device device)
 // (linear-q8-input) and computes each group's sum with packed 4x8 integer dot
 // products. Where the device runs those natively, it replaces the direct
 // kernel's dequantize-and-fma work: on the Adreno 830 at M = 1056, 3840-wide
-// Linears run 11.8x faster than linear-q4-direct and the FFN shapes 11.2x
+// Linears run 3.2x faster than linear-q4-direct and the FFN shapes 3.1x
 // (quantization included), at ~4e-3 relative error against the fp product,
 // small next to Q4's own.
 inline bool useQ4Q8(eva::Device device)
@@ -668,29 +670,28 @@ inline bool useQ4Q8(eva::Device device)
     return device.isDot4x8PackedMixedAccelerated();
 }
 
-// Their tiles (wgM = wgSize / (wgN / tN) * tM):
-// - linear-q4-direct: 128 threads, each owning a 4 x 4 block of O; 32 threads
-//   along N cover 128 columns and 4 along M cover 16 rows. On the Adreno 830,
-//   the other blocks tried (1-8 rows by 1-8 columns, 64-256 threads, 256
-//   columns) ran 1-140% slower.
-// - linear-q4-q8: 64 threads (one Adreno subgroup), each owning a 4 x 4 block;
-//   8 threads along N cover 32 columns and 8 along M cover 32 rows. Its inner
-//   loop is cheap enough that the W loads dominate once W outgrows the cache,
-//   and a subgroup's W load touches one cache line per thread along N: 32 with
-//   the direct tile, 8 here. The shader fixes this tile at compile time.
-//   Swept that way on the Adreno 830 (1-8 rows by 2-8 columns, 64-128
-//   threads, 16-64 columns), 4 x 4 ran the 3840-wide Linears 1.37x faster
-//   than the 2 x 4 block and the FFN 1.69x; 5 x 4 matched it, the others
-//   were slower.
+// Their tile (wgM = wgSize / (wgN / tN) * tM): 64 threads (one Adreno
+// subgroup), each owning a 4 x 4 block of O; 8 threads along N cover 32
+// columns and 8 along M cover 32 rows. Both shaders fix it at compile time.
+// Their inner loops are cheap enough that the W loads dominate once W
+// outgrows the cache, and a subgroup's W load touches one cache line per
+// thread along N, so few threads along N pay off. Swept on the Adreno 830
+// (1-8 rows by 2-8 columns, 64-128 threads, 16-128 columns):
+// - linear-q4-direct ran the 3840-wide Linears 1.15x faster than its earlier
+//   128-thread, 128-column tile and the FFN 1.64x; 64 threads over 64
+//   columns matched it.
+// - linear-q4-q8 ran them 1.37x faster than its earlier 2 x 4 block and the
+//   FFN 1.69x; 5 x 4 blocks matched it.
+// The other tiles were slower.
 inline Linear::PipeParamsTile q4DirectTile(Dtype iDtype, bool q8)
 {
     Linear::PipeParamsTile t{};
     t.direct = true;
     t.q8 = q8;
-    t.wgSize = q8 ? 64 : 128;
+    t.wgSize = 64;
     t.tM = 4;
     t.tN = 4;
-    t.wgN = q8 ? 32 : 128;
+    t.wgN = 32;
     t.wgM = t.wgSize / (t.wgN / t.tN) * t.tM;
     t.iDtype = iDtype;
     return t;
