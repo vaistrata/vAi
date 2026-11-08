@@ -47,6 +47,58 @@ jobs:
               - '!mkdocs.yml'
               - '!**/*.md'
 
+  # Style check on the lines a PR changes, not on whole files: the tree
+  # predates the formatter, so a whole-file check would fail on code the PR
+  # never touched. git clang-format formats only the hunks between the merge
+  # base and HEAD; ruff gets the changed .py files. pull_request only — a push
+  # has no base to diff against, and a skipped job still reports its check.
+  format:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      BASE_REF: ${{ github.base_ref }}     # env, not inline: no template injection in run:
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0                   # the merge base must be reachable
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      # Versions pinned here and nowhere else; .clang-format tracks this one.
+      # The clang-format wheel ships git-clang-format as a console script.
+      - name: Install
+        run: |
+          pip install clang-format==21.1.8 ruff==0.17.4
+          clang-format --version
+
+      # The pathspecs mirror .clang-format-ignore. git clang-format honours that
+      # file too, so this is a second fence that also keeps the diff small.
+      # Exit codes: 0 clean, 1 formatting differs (git diff --exit-code), 2 error.
+      - name: clang-format (changed lines)
+        run: |
+          base=$(git merge-base "origin/$BASE_REF" HEAD)
+          set +e
+          git clang-format --diff --extensions h,hpp,cpp "$base" -- \
+            . ':!external' ':!vai/shaders' \
+            ':!vai/utils/stb_image.h' ':!vai/utils/stb_image_write.h' ':!vai/utils/tiny-json.h'
+          rc=$?
+          set -e
+          case $rc in
+            0) echo "clang-format: clean" ;;
+            1) echo "::error::clang-format: run 'git clang-format $base' locally and commit the result"; exit 1 ;;
+            *) echo "::error::git clang-format failed (exit $rc)"; exit $rc ;;
+          esac
+
+      - name: ruff format (changed files)
+        run: |
+          base=$(git merge-base "origin/$BASE_REF" HEAD)
+          files=$(git diff --name-only --diff-filter=ACMR "$base" -- '*.py' ':!external')
+          if [ -z "$files" ]; then echo "ruff: no python changes"; exit 0; fi
+          ruff format --check --diff $files
+
   vai-linux:
     needs: filter
     if: github.event_name == 'workflow_dispatch' || needs.filter.outputs.cpp == 'true'

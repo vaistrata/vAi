@@ -1,0 +1,27 @@
+# Formatting at commit time. CI re-checks the same lines for clones that skip
+# this, so it is the convenience, not the gate. Once per clone:
+#
+#   pip install pre-commit && pre-commit install
+#
+# Versions follow .github/workflows/ci.yml.
+repos:
+  - repo: local
+    hooks:
+      # git clang-format touches only the staged hunks, so a one-line change in
+      # a legacy file stays a one-line change; mirrors-clang-format would
+      # reformat the whole file. Returns 1 after rewriting, like any formatter
+      # hook: re-stage and commit again.
+      - id: git-clang-format
+        name: clang-format (staged lines)
+        language: python
+        additional_dependencies: ["clang-format==21.1.8"]
+        entry: git-clang-format --staged --extensions h,hpp,cpp --
+        files: \.(h|hpp|cpp)$
+        exclude: ^(external/|vai/shaders/|vai/utils/(stb_image|stb_image_write|tiny-json)\.h$)
+        require_serial: true          # one temporary index at a time
+
+  # Whole-file, as ruff is. The python tree is small enough to format once.
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.17.4
+    hooks:
+      - id: ruff-format

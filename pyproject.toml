@@ -62,3 +62,10 @@ regex    = '''__version__\s*(?::\s*str)?\s*=\s*["'](?P<value>[^"']+)["']'''
 [tool.pytest.ini_options]
 # Tests import the editable install — run `pip install -e .` first.
 testpaths = ["python/tests"]
+
+
+[tool.ruff]
+# Same width as the C++ side. CI checks only the .py files a PR changes.
+line-length    = 100
+target-version = "py39"
+extend-exclude = ["external", "build"]
