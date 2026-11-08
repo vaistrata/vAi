@@ -19,10 +19,12 @@
 =============================================================================*/
 
 #include "models/zimage/model.h"
+#include "models/zimage/sampler.h"
 #include "models/zimage/tongyi-weights.h"
 #include "models/zimage/tongyi-vae-weights.h"
 #include "vai/engine/safetensors-parser.h"
 #include "vai/utils/time-checker.h"
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -94,39 +96,17 @@ int main(int argc, char** argv)
                    zimage::tongyi::preparedPath(model).c_str());
     }
 
-    // FlowMatchEulerDiscreteScheduler, Turbo settings: sigmas linspace(1, 1/n)
-    // under the static shift 3, then 0. The DiT sees t = 1 - sigma and
-    // predicts -velocity.
-    const uint32_t numSteps = 9;
-    const float shift = 3.0f;
-    std::vector<float> sigmas(numSteps + 1, 0.0f);
-    for (uint32_t i = 0; i < numSteps; ++i)
+    // Turbo: 9 steps; step 0 also uploads the weights and records the graph.
+    const std::vector<float> sigmas = zimage::turboSigmas();
     {
-        float s = 1.0f + (1.0f / numSteps - 1.0f) * float(i) / float(numSteps - 1);
-        sigmas[i] = shift * s / (1.0f + (shift - 1.0f) * s);
-    }
-
-    // First forward records the graph and uploads the weights.
-    Tensor out;
-    {
-        TimeChecker timer("Warm-up forward in {}ms");
-        model(zimage::makeInputs(modelCfg, latent.data(), H, W, capFeats, 0.0f), {{"outPatches", &out}});
-        out.downloadToHost();
-    }
-
-    {
-        TimeChecker total("\nSampled {} steps in {}ms", numSteps);
-        for (uint32_t i = 0; i < numSteps; ++i)
-        {
-            TimeChecker step("  step {} (sigma {}): {}ms", i, sigmas[i]);   // TimeChecker takes bare {} only
-            model(zimage::makeInputs(modelCfg, latent.data(), H, W, capFeats, 1.0f - sigmas[i]),
-                  {{"outPatches", &out}});
-            std::vector<float> v = zimage::unpatchify(modelCfg, out.getData<float>(), H, W);
-
-            const float dt = sigmas[i + 1] - sigmas[i];
-            for (size_t j = 0; j < latent.size(); ++j)
-                latent[j] += dt * -v[j];
-        }
+        TimeChecker total("\nSampled {} steps in {}ms", uint32_t(sigmas.size() - 1));
+        auto t0 = std::chrono::steady_clock::now();
+        zimage::sampleTurbo(model, capFeats, latent, H, W, sigmas, [&](uint32_t i, float sigma) {
+            const auto t1 = std::chrono::steady_clock::now();
+            printf("  step %u (sigma %.3f): %.0fms\n", i, sigma,
+                   std::chrono::duration<double, std::milli>(t1 - t0).count());
+            t0 = t1;
+        });
     }
 
     const char* latentPath = VAI_DATA_DIR "/zimage/demo-latent.bin";

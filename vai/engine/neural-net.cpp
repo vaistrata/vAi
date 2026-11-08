@@ -401,6 +401,30 @@ void NeuralNet::uploadModelParams()
     }
 }
 
+Tensor NeuralNet::paramTensor(const std::vector<uint32_t>& shape, Dtype dtype,
+                              const std::function<void(void*)>& fill)
+{
+    Tensor tensor(shape, dtype);
+    const size_t byteSize = tensor.numBytes();
+    if (device_.deviceType() != eva::DEVICE_TYPE::INTEGRATED_GPU)
+    {
+        tensor.data_->hostData_.resize(byteSize);
+        fill(tensor.data_->hostData_.data());
+        return tensor;
+    }
+
+    vai::PooledBuffer pooledBuffer = bufferPool_->requestBuffer(
+        eva::BUFFER_USAGE::STORAGE_BUFFER | eva::BUFFER_USAGE::TRANSFER_DST,
+        eva::MEMORY_PROPERTY::DEVICE_LOCAL | eva::MEMORY_PROPERTY::HOST_VISIBLE
+        | eva::MEMORY_PROPERTY::HOST_COHERENT,
+        byteSize,
+        byteSize);
+    fill(pooledBuffer.buffer.map());
+    pooledBuffer.buffer.unmap();
+    tensor.bindBuffer(std::move(pooledBuffer));
+    return tensor;
+}
+
 void NeuralNet::recordCommands(const TensorRefDict& outputs)
 {
     sync();

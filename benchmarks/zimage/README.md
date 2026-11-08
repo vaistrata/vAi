@@ -74,6 +74,7 @@ With the Adreno kernels that came after (`linear-q4-direct`, its int8 variant `l
 - `demo-zimage` samples 9 steps in 84 s. A step takes 5.6 s while the phone is cool and 9-13 s once it heats up. Before that, the weights load in 30 s and a warm-up forward takes 9 s.
 - `bench-zimage-vai` gives rel L2 3.9e-2 against the fp32 forward (cosine 0.9992).
 - The DiT loads from a prepared weights file, `data/zimage/<name>-q4-split.safetensors` for these settings (3.66 GB): each tensor already in the dtype the model runs, Q4 included. The first run converts the 23 GB fp32 checkpoint as before (36.5 s) and writes the file; later runs read it in 2.6 s. `bench-zimage-vai --prepared` loads the same way; the result is unchanged (rel L2 3.905e-2 either way).
+- On an integrated GPU the prepared tensors are read straight into their device buffers, mapped (`NeuralNet::paramTensor`): the bytes are neither staged nor copied by the GPU. Reading and uploading the DiT took 2.6 s + 2.3 s and now takes 3.3 s. Steps run no slower from that memory (6230 vs 6233 ms). `demo-zimage` no longer runs a warm-up forward: step 0 uploads and records, and takes 6.0 s on a cool phone, the same as the other steps.
 
 The VAE decoder runs on the GPU too (`models/zimage/vae.h`), so `demo-zimage` goes from caption features to `data/zimage/demo.png` on the phone. On the same phone, 512x512 from a 64x64 latent, against the fp32 diffusers decode of the same latent (`bench-zimage-vae-vai --nodes-per-submit 1`):
 
@@ -81,6 +82,7 @@ The VAE decoder runs on the GPU too (`models/zimage/vae.h`), so `demo-zimage` go
 - A decode takes 2.25 s while the phone is cool (fp32 diffusers on an M-series CPU: 4.1 s). The 3x3 convs are 92% of it and run at about 1.1 TFLOPS; the mid-block attention over 4096 positions takes 36 ms.
 - The decoder has its own conv node, `VaeConvNode`: on this GPU `vai::node::Convolution` returns wrong values for these shapes, through both its fallback and its Winograd plans.
 - In one submission a decode outlasts the driver's submit timeout; with `--nodes-per-submit 1` its longest node takes 0.28 s.
+- The conv's products and sums in fp16 (f16vec4 FMAs, flushed into fp32 every 1, 4 or 16 input channels) ran at 600 GFLOPS against fp32's 1,000 and dropped the decode to 61-66 dB PSNR, so the convs stay in fp32.
 
 ## Building and running
 

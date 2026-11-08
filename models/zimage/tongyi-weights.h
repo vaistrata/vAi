@@ -165,7 +165,15 @@ inline void loadPrepared(Model& model, const std::string& path)
 {
     vai::SafetensorsParser file(path.c_str());
     forEachWeight(model, [&](const std::string& key, vai::Tensor& slot, vai::Dtype dtype, auto) {
-        slot = vai::Tensor(file[key], dtype);
+        const vai::SafetensorRef ref = file[key];
+        if (ref.getDataType() == "BF16" || vai::dtypeFromString(ref.getDataType()) != dtype)
+        {
+            slot = vai::Tensor(ref, dtype);
+            return;
+        }
+        // Stored as the model holds it: read straight into the device buffer.
+        slot = model.paramTensor(ref.getShape(), dtype, [&](void* dst) { vai::readStored(ref, dst); });
+        VAI_ASSERT(slot.numBytes() == ref.byteSize());
     });
 }
 

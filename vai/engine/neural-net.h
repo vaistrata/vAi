@@ -3,6 +3,7 @@
 
 #include "tensor.h"
 #include "pipeline-pool.h"
+#include <functional>
 #include <map>
 #include <memory>
 
@@ -356,6 +357,14 @@ public:
     void recordCommands(const TensorRefDict& outputs);
 
     void uploadModelParams();
+
+    // A weight written straight into its device buffer: fill(dst) writes the
+    // tensor's numBytes(). On an integrated GPU, whose device-local memory is
+    // the host's own, dst is that buffer mapped, so the bytes are neither
+    // staged nor copied; elsewhere it is host memory, uploaded with the other
+    // weights.
+    Tensor paramTensor(const std::vector<uint32_t>& shape, Dtype dtype,
+                       const std::function<void(void*)>& fill);
 
     void resetProfileRecords();
     void printProfile(bool withResetRecords = true);

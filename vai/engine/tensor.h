@@ -74,6 +74,11 @@ Tensor concat(std::initializer_list<SafetensorRef> refs, Dtype targetDtype);
 Tensor slice(const SafetensorRef& ref, uint32_t begin, uint32_t end, Dtype targetDtype);
 
 
+// A checkpoint tensor's bytes as stored, read into dst (ref.byteSize()
+// bytes) by several threads at once.
+void readStored(const SafetensorRef& ref, void* dst);
+
+
 // a + b under numpy broadcasting (e.g. a position table [N, D] plus a bias
 // [D]). Summed in fp32 and rounded to targetDtype once.
 Tensor sum(const SafetensorRef& a, const SafetensorRef& b, Dtype targetDtype);

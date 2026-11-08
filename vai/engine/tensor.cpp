@@ -326,6 +326,14 @@ static void loadInto(const SafetensorRef& ref, size_t byteOffset, size_t srcByte
 }
 
 
+void readStored(const SafetensorRef& ref, void* dst)
+{
+    const std::string storedType = ref.getDataType();
+    VAI_ASSERT(storedType != "BF16");
+    loadInto(ref, 0, ref.byteSize(), storedType, static_cast<char*>(dst), dtypeFromString(storedType));
+}
+
+
 Tensor::Tensor(const SafetensorRef& ref, Dtype targetDtype)
 : data_(std::make_shared<TensorData>(targetDtype==Dtype::None ? dtypeFromString(ref.getDataType()) : targetDtype))
 {
