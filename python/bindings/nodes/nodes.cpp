@@ -1,11 +1,28 @@
 #include "python/bindings/module.h"
-#include "python/bindings/nodes/nodes.h"
+#include "python/bindings/nodes/bind-node.h"
 #include "python/bindings/nodes/kvcache-counter.h"
 #include "vai/nodes/node-common.h"
+#include <algorithm>
 
 namespace pyvai {
 
-// Call order must match the list in nodes.h.
+std::vector<NodeBinding>& nodeBindings()
+{
+    static std::vector<NodeBinding> bindings;   // filled before the module init runs
+    return bindings;
+}
+
+void bindRegisteredNodes(nb::module_& m, const std::string& model)
+{
+    std::vector<NodeBinding> picked;
+    for (const NodeBinding& b : nodeBindings())
+        if (b.model == model)
+            picked.push_back(b);
+    std::sort(picked.begin(), picked.end(), [](const auto& a, const auto& b) { return a.id < b.id; });
+    for (const NodeBinding& b : picked)
+        b.bind(m);
+}
+
 void bindNodes(nb::module_& m)
 {
     // Epilogue and KVCacheCounter are argument types of nodes below: register them first.
@@ -19,40 +36,8 @@ void bindNodes(nb::module_& m)
 
     bindKVCacheCounter(m);
 
-    bindIdentity(m);
-    bindGate(m);
-    bindReshape(m);
-    bindFlatten(m);
-    bindConcat(m);
-    bindPermute(m);
-    bindSlice(m);
-    bindRowSliceScatter(m);
-    bindIndexCopy(m);
-    bindTypeCast(m);
-
-    bindAdd(m);
-    bindMul(m);
-    bindGatedMul(m);
-    bindEleAffine(m);
-    bindActivation(m);
-
-    bindConvolution(m);
-    bindPool2d(m);
-    bindNearestUpsample(m);
-
-    bindLinear(m);
-    bindLayerNorm(m);
-    bindRmsNorm(m);
-    bindBatchNorm(m);
-
-    bindTokenEmbedding(m);
-    bindTimeEmbedding(m);
-    bindCyclicTableReader(m);
-    bindRope(m);
-    bindAttention(m);
-
-    bindArgmax(m);
-    bindTopKSampling(m);
+    // Every python/bindings/nodes/<node>.cpp that ends in PYVAI_NODE_BINDING.
+    bindRegisteredNodes(m, "");
 }
 
 }   // namespace pyvai

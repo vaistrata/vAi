@@ -92,7 +92,7 @@ def test_every_node_header_has_a_binding():
 
 
 def test_every_bound_node_is_registered():
-    """A binding whose bind function is never called binds nothing."""
+    """A binding file without its PYVAI_NODE_BINDING line binds nothing."""
     unregistered = []
     for _, binding, module, _, names in _nodes():
         if not binding.exists():
@@ -102,7 +102,7 @@ def test_every_bound_node_is_registered():
         for name in names:
             cls = getattr(module, name, None)
             if not (isinstance(cls, type) and issubclass(cls, pyvai.Node)):
-                where = module.__name__ if module else "a model_nodes submodule (models.cpp)"
+                where = module.__name__ if module else "model_nodes (PYVAI_MODEL_NODE_BINDING)"
                 unregistered.append(f"{name} ({_rel(binding)}) is not in {where}")
     assert not unregistered, f"bindings not registered: {unregistered}"
 

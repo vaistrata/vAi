@@ -1,5 +1,8 @@
 #include "python/bindings/module.h"
 #include "python/bindings/models/models.h"
+#include "python/bindings/nodes/bind-node.h"
+#include <set>
+#include <string>
 
 
 namespace pyvai {
@@ -15,10 +18,19 @@ void bindModels(nb::module_& m)
     bindPi05(m);
     bindYOLOX(m);
 
-    // Private: python/tests checks these nodes as it checks the core ones.
+    // A model's own nodes (models/<model>/nodes/), one submodule per model that
+    // registers any (PYVAI_MODEL_NODE_BINDING). Private: python/tests checks
+    // them as it checks the core ones.
     nb::module_ nodes = m.def_submodule("model_nodes", "Nodes of models/<model>/nodes/, one submodule per model.");
-    nb::module_ yoloxNodes = nodes.def_submodule("yolox", "models/yolox/nodes/");
-    bindYOLOXNodes(yoloxNodes);
+    std::set<std::string> models;
+    for (const NodeBinding& b : nodeBindings())
+        if (!b.model.empty())
+            models.insert(b.model);
+    for (const std::string& model : models)
+    {
+        nb::module_ sub = nodes.def_submodule(model.c_str(), ("models/" + model + "/nodes/").c_str());
+        bindRegisteredNodes(sub, model);
+    }
 }
 
 }   // namespace pyvai

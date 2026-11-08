@@ -1,10 +1,10 @@
-#include "python/bindings/models/yolox/nodes/nodes.h"
+#include "python/bindings/nodes/bind-node.h"
 #include "models/yolox/nodes/focus-conv.h"
 #include <cstdint>
 
-namespace pyvai::yolox_nodes {
+namespace pyvai {
 
-void bindFocusConv(nb::module_& m)
+static void bindFocusConv(nb::module_& m)
 {
     nb::class_<yolox::FocusConvNode, vai::Node>(m, "FocusConvNode")
         .def(
@@ -27,5 +27,6 @@ void bindFocusConv(nb::module_& m)
             "to [4Ci, H, W]; out0 [Co, H, W] = silu(scale * conv3x3 + bias), same padding. "
             "Slots weight [Co, 4Ci, 3, 3], scale and bias [Co].");
 }
+PYVAI_MODEL_NODE_BINDING(yolox, bindFocusConv);
 
-}   // namespace pyvai::yolox_nodes
+}   // namespace pyvai

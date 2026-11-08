@@ -1,29 +1,16 @@
-#include "python/bindings/nodes/nodes.h"
+#include "python/bindings/nodes/bind-node.h"
 #include "vai/nodes/gated-mul.h"
-#include <optional>
 
 namespace pyvai {
 
-void bindGatedMul(nb::module_& m)
+static void bindGatedMul(nb::module_& m)
 {
-    nb::class_<vai::node::GatedMul, vai::Node>(m, "GatedMulNode")
-        .def(
-            "__init__",
-            [](vai::node::GatedMul* self,
-               vai::Epilogue activation,
-               std::optional<vai::Dtype> o_dtype)
-            {
-                requireCurrentNet("GatedMulNode");
-                new (self) vai::node::GatedMul(vai::node::GatedMul::Config{
-                    .activation = activation,
-                    .oDtype     = o_dtype.value_or(vai::Dtype::None),
-                });
-            },
-            nb::arg("activation") = vai::Epilogue::Silu,
-            nb::arg("o_dtype")    = nb::none(),
-            "Gated FFN tail: out0 [..., H] = act(gate) * up, where gate and up are "
-            "the first and second halves of in0 [..., 2H]."
-        );
+    using C = vai::node::GatedMul::Config;
+    bindNode<vai::node::GatedMul>(m, "GatedMulNode",
+                                  "Gated FFN tail: out0 [..., H] = act(gate) * up, where gate and up are "
+                                  "the first and second halves of in0 [..., 2H].",
+                                  field("activation", &C::activation), field("o_dtype", &C::oDtype));
 }
+PYVAI_NODE_BINDING(bindGatedMul);
 
 }   // namespace pyvai

@@ -1,35 +1,18 @@
-#include "python/bindings/nodes/nodes.h"
+#include "python/bindings/nodes/bind-node.h"
 #include "vai/nodes/layer-norm.h"
-#include <optional>
 
 namespace pyvai {
 
-void bindLayerNorm(nb::module_& m)
+static void bindLayerNorm(nb::module_& m)
 {
-    nb::class_<vai::node::LayerNorm, vai::Node>(m, "LayerNormNode")
-        .def(
-            "__init__",
-            [](vai::node::LayerNorm* self,
-               float eps, bool has_beta,
-               std::optional<vai::Dtype> w_dtype,
-               std::optional<vai::Dtype> o_dtype)
-            {
-                requireCurrentNet("LayerNormNode");
-                new (self) vai::node::LayerNorm(vai::node::LayerNorm::Config{
-                    .eps     = eps,
-                    .hasBeta = has_beta,
-                    .wDtype  = w_dtype.value_or(vai::Dtype::Fp32),
-                    .oDtype  = o_dtype.value_or(vai::Dtype::None),
-                });
-            },
-            nb::arg("eps")      = 1e-5f,
-            nb::arg("has_beta") = true,
-            nb::arg("w_dtype")  = nb::none(),
-            nb::arg("o_dtype")  = nb::none(),
-            "Normalize an [..., feature] input (rank >= 2) over its last axis: "
-            "(x - mean) * rsqrt(var + eps) * gamma + beta. has_beta=False drops the "
-            "`beta` slot. Row statistics accumulate in fp32 whatever the I/O dtypes."
-        );
+    using C = vai::node::LayerNorm::Config;
+    bindNode<vai::node::LayerNorm>(m, "LayerNormNode",
+                                   "Normalize an [..., feature] input (rank >= 2) over its last axis: "
+                                   "(x - mean) * rsqrt(var + eps) * gamma + beta. has_beta=False drops the "
+                                   "`beta` slot. Row statistics accumulate in fp32 whatever the I/O dtypes.",
+                                   field("eps", &C::eps), field("has_beta", &C::hasBeta), field("w_dtype", &C::wDtype),
+                                   field("o_dtype", &C::oDtype));
 }
+PYVAI_NODE_BINDING(bindLayerNorm);
 
 }   // namespace pyvai
