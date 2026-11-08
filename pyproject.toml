@@ -35,7 +35,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-test = ["pytest"]
+# torch is the numeric reference in python/tests only; pyvai never imports it.
+# Install the CPU build first, or pip pulls the CUDA one (several GB):
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+test = ["pytest", "torch"]
 
 [project.urls]
 Homepage = "https://vaistrata.com"

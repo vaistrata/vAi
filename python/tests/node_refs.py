@@ -1,114 +1,90 @@
-"""numpy references for the core nodes, worked in float64.
+"""References for the core nodes, computed by PyTorch in float64 on the CPU.
 
-Each function states the node's math as plainly as numpy allows; node_cases.py
-names them in its specs. They take and return numpy arrays.
+The operator math comes from torch.nn.functional rather than formulas written
+here; these functions only adapt vAi's conventions (no batch axis on images,
+same padding for odd kernels, out0 = scale * conv + bias) to PyTorch's. They
+take and return numpy arrays. PyTorch is a test dependency only (the [test]
+extra); pyvai itself never imports it.
 """
 
-import math
-
 import numpy as np
+import torch
+import torch.nn.functional as F
 
 
-def sigmoid(x):
-    return 1.0 / (1.0 + np.exp(-x))
+def _t(array):
+    return torch.from_numpy(np.asarray(array, dtype=np.float64))
 
 
-_erf = np.vectorize(math.erf, otypes=[np.float64])
+def _np(tensor):
+    return tensor.numpy()
+
 
 # The kernels' epilogues (vai/shaders/common/activation.h).
-EPILOGUES = {
+_EPILOGUES = {
     "NONE": lambda x: x,
-    "RELU": lambda x: np.maximum(x, 0.0),
-    "GELU": lambda x: 0.5 * x * (1.0 + _erf(x / math.sqrt(2.0))),
-    "GELU_TANH": lambda x: (
-        0.5 * x * (1.0 + np.tanh(math.sqrt(2.0 / math.pi) * (x + 0.044715 * x**3)))
-    ),
-    "SILU": lambda x: x * sigmoid(x),
-    "SIGMOID": sigmoid,
+    "RELU": F.relu,
+    "GELU": F.gelu,
+    "GELU_TANH": lambda x: F.gelu(x, approximate="tanh"),
+    "SILU": F.silu,
+    "SIGMOID": torch.sigmoid,
 }
+
+
+def activation(in0, epilogue):
+    return _np(_EPILOGUES[epilogue](_t(in0)))
 
 
 def linear(in0, weight, bias=None, epilogue="NONE"):
     """out0 = epilogue(in0 W^T + bias); weight is [N, K]."""
-    out = in0 @ weight.T
-    if bias is not None:
-        out = out + bias
-    return EPILOGUES[epilogue](out)
+    out = F.linear(_t(in0), _t(weight), None if bias is None else _t(bias))
+    return _np(_EPILOGUES[epilogue](out))
 
 
 def conv2d(in0, weight, bias=None, scale=None, stride=1, epilogue="NONE"):
-    """Same-padded 2D convolution of [Ci, H, W] by [Co, Ci, K, K] (K odd):
-    out0 [Co, ceil(H / stride), ceil(W / stride)] = epilogue(scale * conv + bias)."""
-    co, _, k, _ = weight.shape
-    _, h, w = in0.shape
-    pad = (k - 1) // 2
-    ho, wo = -(-h // stride), -(-w // stride)
-    xp = np.pad(in0, ((0, 0), (pad, pad), (pad, pad)))
-    out = np.zeros((co, ho, wo))
-    for ky in range(k):
-        for kx in range(k):
-            patch = xp[
-                :,
-                ky : ky + stride * (ho - 1) + 1 : stride,
-                kx : kx + stride * (wo - 1) + 1 : stride,
-            ]
-            out += np.einsum("oc,chw->ohw", weight[:, :, ky, kx], patch)
+    """[Ci, H, W] by [Co, Ci, K, K] with same padding (K odd):
+    out0 = epilogue(scale * conv + bias), [Co, ceil(H / stride), ceil(W / stride)]."""
+    k = weight.shape[-1]
+    out = F.conv2d(_t(in0)[None], _t(weight), stride=stride, padding=k // 2)[0]
     if scale is not None:
-        out = out * scale[:, None, None]
+        out = out * _t(scale)[:, None, None]
     if bias is not None:
-        out = out + bias[:, None, None]
-    return EPILOGUES[epilogue](out)
+        out = out + _t(bias)[:, None, None]
+    return _np(_EPILOGUES[epilogue](out))
 
 
-def pool2d(in0, kernel, stride, padding, mode, count_include_pad=True):
-    """Square-window pooling over the last two axes of [..., C, H, W].
-
-    Max ignores samples outside the input. Avg pads with zeros and, with
-    count_include_pad, divides by the full window."""
-    h, w = in0.shape[-2:]
-    ho = (h + 2 * padding - kernel) // stride + 1
-    wo = (w + 2 * padding - kernel) // stride + 1
-    pads = [(0, 0)] * (in0.ndim - 2) + [(padding, padding), (padding, padding)]
-    fill = -np.inf if mode == "max" else 0.0
-    xp = np.pad(in0, pads, constant_values=fill)
-    ones = np.pad(np.ones(in0.shape), pads)
-    windows, counts = [], []
-    for ky in range(kernel):
-        for kx in range(kernel):
-            rows = slice(ky, ky + stride * (ho - 1) + 1, stride)
-            cols = slice(kx, kx + stride * (wo - 1) + 1, stride)
-            windows.append(xp[..., rows, cols])
-            counts.append(ones[..., rows, cols])
-    windows = np.stack(windows)
+def pool2d(in0, kernel, stride, padding, mode):
+    """Square-window pooling over the last two axes. Max ignores samples
+    outside the input; Avg counts the zero padding in the divisor."""
+    x = _t(in0)
     if mode == "max":
-        return windows.max(axis=0)
-    divisor = kernel * kernel if count_include_pad else np.stack(counts).sum(axis=0)
-    return windows.sum(axis=0) / divisor
+        return _np(F.max_pool2d(x, kernel, stride, padding))
+    return _np(F.avg_pool2d(x, kernel, stride, padding, count_include_pad=True))
 
 
 def batch_norm(in0, gamma, beta, mean, variance, eps=1e-5):
-    """Inference batch norm over [C, H, W] with per-channel statistics."""
-    c = (slice(None), None, None)
-    return gamma[c] * (in0 - mean[c]) / np.sqrt(variance[c] + eps) + beta[c]
+    """Inference batch norm over [C, H, W]."""
+    out = F.batch_norm(
+        _t(in0)[None], _t(mean), _t(variance), _t(gamma), _t(beta), training=False, eps=eps
+    )
+    return _np(out[0])
 
 
 def layer_norm(in0, gamma, beta=None, eps=1e-5):
-    mean = in0.mean(axis=-1, keepdims=True)
-    var = in0.var(axis=-1, keepdims=True)
-    out = (in0 - mean) / np.sqrt(var + eps) * gamma
-    return out if beta is None else out + beta
+    shape = (in0.shape[-1],)
+    return _np(F.layer_norm(_t(in0), shape, _t(gamma), None if beta is None else _t(beta), eps))
 
 
 def rms_norm(in0, scale, eps=1e-5):
-    return in0 / np.sqrt(np.mean(in0**2, axis=-1, keepdims=True) + eps) * scale
+    return _np(F.rms_norm(_t(in0), (in0.shape[-1],), _t(scale), eps))
 
 
 def gated_mul(in0, activation="SILU"):
     """act(first half) * second half along the last axis."""
-    half = in0.shape[-1] // 2
-    return EPILOGUES[activation](in0[..., :half]) * in0[..., half:]
+    gate, up = _t(in0).chunk(2, dim=-1)
+    return _np(_EPILOGUES[activation](gate) * up)
 
 
 def nearest_upsample(in0, scale):
     """Replicate every [C, H, W] pixel into a scale x scale block."""
-    return in0.repeat(scale, axis=-2).repeat(scale, axis=-1)
+    return _np(F.interpolate(_t(in0)[None], scale_factor=scale, mode="nearest")[0])

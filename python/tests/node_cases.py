@@ -1,7 +1,7 @@
 """Numeric specs for the core nodes (vai/nodes/).
 
 A spec names a node, how to build it, the shapes of its inputs and parameters,
-and its math as a numpy reference (node_refs.py). test_node_numerics.py turns
+and its math as a reference (node_refs.py, mostly PyTorch). test_node_numerics.py turns
 every spec into the same checks: the output against the reference, a second
 forward giving the identical output, no NaN or Inf, and, for specs that list
 alt_inputs, the same net rerun on new shapes. test_node_completeness.py fails
@@ -137,7 +137,7 @@ for _ep in ("RELU", "GELU", "GELU_TANH", "SILU", "SIGMOID"):
         _ep.lower(),
         lambda ep=_ep: nodes.ActivationNode(epilogue=getattr(pyvai.Epilogue, ep)),
         {"in0": normal((5, 33), 3.0)},
-        lambda in0, ep=_ep: ref.EPILOGUES[ep](in0),
+        lambda in0, ep=_ep: ref.activation(in0, ep),
         tol=TRANS,
     )
 

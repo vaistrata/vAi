@@ -182,8 +182,11 @@ jobs:
           key: python-ubuntu-24.04
           save: ${{ github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
 
+      # torch is the tests' numeric reference. The CPU index first, so the
+      # [test] extra finds it installed instead of pulling the CUDA build.
       - name: Install
         run: |
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
           pip install -e ".[test]" \
             --config-settings=cmake.define.CMAKE_C_COMPILER_LAUNCHER=ccache \
             --config-settings=cmake.define.CMAKE_CXX_COMPILER_LAUNCHER=ccache
