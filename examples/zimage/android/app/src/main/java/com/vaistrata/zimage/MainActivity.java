@@ -103,6 +103,7 @@ public final class MainActivity extends Activity {
     private TextView detailsToggle;
     private TextView log;
     private PowerManager power;
+    private ScrollView scroll;
 
     // The running generation, on the UI thread.
     private boolean ready;
@@ -234,6 +235,8 @@ public final class MainActivity extends Activity {
             return;
         }
         hideKeyboard();
+        // Up to the image card, where the run's progress shows.
+        scroll.post(() -> scroll.smoothScrollTo(0, 0));
         final int n = selectedSize();
         setRunning(true);
         setStatus("", false);
@@ -348,6 +351,9 @@ public final class MainActivity extends Activity {
         }
         if (stage.startsWith("Decoding")) {
             return "Decoding";
+        }
+        if (stage.startsWith("Decoded")) {
+            return "Done";
         }
         if (stage.startsWith("Loading the text encoder") || stage.startsWith("Encoding")) {
             return "Reading the prompt";
@@ -706,7 +712,7 @@ public final class MainActivity extends Activity {
         root.addView(detailsToggle);
         root.addView(log);
 
-        ScrollView scroll = new ScrollView(this);
+        scroll = new ScrollView(this);
         scroll.setBackgroundColor(BG);
         scroll.addView(root);
 
