@@ -1,0 +1,118 @@
+// =============================================================================
+// zimage-ada-norm.comp: RMS / layer norm with adaLN modulation and a gated
+//     residual, the four sandwich-norm sites of a Z-Image block in one pass
+//
+//     y[i, j] = norm(I[i, :])[j] * γ[j] * (1 + M[scaleOffset + j])
+//     O[i, j] = R[i, j] + tanh(M[gateOffset + j]) * y[i, j]
+//
+//   norm   : center == 0  x * rsqrt(mean(x²) + eps)                (RMS)
+//            center == 1  (x - mean) * rsqrt(var + eps)            (layer)
+//   γ, the (1 + M) scale, the tanh gate and the residual R each drop out
+//   (factor 1 / addend 0) when their spec flag is 0.
+//
+// - O (typeO), I / R / M (typeI, shared), γ (typeW) are fp32 or fp16 via
+//   same-binding buffer aliases; statistics accumulate in fp32.
+// - M is the one adaLN row [1, k*F] every token shares; the offsets pick the
+//   chunk (scale / gate) inside it.
+// - wgSize threads normalize one row: strided partial sums, shared-memory
+//   tree reduction (wgSize a power of two, host-guaranteed), a second pass
+//   for the centered variance when center == 1.
+// - Dispatch (host): one workgroup per row, .dispatch(rows).
+// =============================================================================
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_shader_16bit_storage : require
+#include "common/spec_constants.h"
+
+layout(constant_id = 0) const uint wgSize      = 256;   // threads per row (power of two)
+layout(constant_id = 1) const uint center      = 0;     // 1: layer norm, 0: RMS norm
+layout(constant_id = 2) const uint hasGamma    = 1;     // multiply by γ
+layout(constant_id = 3) const uint hasScale    = 0;     // multiply by (1 + M[scaleOffset + j])
+layout(constant_id = 4) const uint hasGate     = 0;     // multiply by tanh(M[gateOffset + j])
+layout(constant_id = 5) const uint hasResidual = 0;     // add R
+layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0;
+layout(constant_id = SPEC_ID_TYPE_I) const uint typeI = 0;   // I, R, M (shared)
+layout(constant_id = SPEC_ID_TYPE_W) const uint typeW = 0;   // γ
+
+layout(local_size_x_id = 0) in;
+
+layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_F32 { float bufferO_f32[]; };
+layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_F16 { float16_t bufferO_f16[]; };
+//////////////////////////////////////////////////////////////////////////////
+layout(set = 0, binding = 1) restrict readonly buffer I_BUF_F32 { float bufferI_f32[]; };
+layout(set = 0, binding = 1) restrict readonly buffer I_BUF_F16 { float16_t bufferI_f16[]; };
+layout(set = 0, binding = 2) restrict readonly buffer R_BUF_F32 { float bufferR_f32[]; };
+layout(set = 0, binding = 2) restrict readonly buffer R_BUF_F16 { float16_t bufferR_f16[]; };
+layout(set = 0, binding = 3) restrict readonly buffer G_BUF_F32 { float bufferG_f32[]; };
+layout(set = 0, binding = 3) restrict readonly buffer G_BUF_F16 { float16_t bufferG_f16[]; };
+layout(set = 0, binding = 4) restrict readonly buffer M_BUF_F32 { float bufferM_f32[]; };
+layout(set = 0, binding = 4) restrict readonly buffer M_BUF_F16 { float16_t bufferM_f16[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint rows;
+    uint F;             // feature size
+    float eps;
+    uint scaleOffset;   // element offset of the scale chunk inside M
+    uint gateOffset;    // element offset of the gate chunk inside M
+};
+
+float readI(uint i) { return (typeI == 0u) ? bufferI_f32[i] : float(bufferI_f16[i]); }
+float readR(uint i) { return (typeI == 0u) ? bufferR_f32[i] : float(bufferR_f16[i]); }
+float readM(uint i) { return (typeI == 0u) ? bufferM_f32[i] : float(bufferM_f16[i]); }
+float readG(uint j) { return (typeW == 0u) ? bufferG_f32[j] : float(bufferG_f16[j]); }
+void writeO(uint i, float v) { if (typeO == 0u) bufferO_f32[i] = v; else bufferO_f16[i] = float16_t(v); }
+
+shared float sRed[wgSize];
+
+float reduceSum(float v)
+{
+    uint tid = gl_LocalInvocationID.x;
+    sRed[tid] = v;
+    barrier();
+    for (uint stride = wgSize / 2u; stride > 0u; stride >>= 1)
+    {
+        if (tid < stride)
+            sRed[tid] += sRed[tid + stride];
+        barrier();
+    }
+    float total = sRed[0];
+    barrier();   // sRed is reused by the next reduction
+    return total;
+}
+
+void main()
+{
+    uint row = gl_WorkGroupID.x;
+    if (row >= rows) return;
+
+    uint tid  = gl_LocalInvocationID.x;
+    uint base = row * F;
+
+    // Statistics: mean (center only), then Σ(x - mean)² — RMS keeps mean 0.
+    float mean = 0.0;
+    if (center != 0u)
+    {
+        float s = 0.0;
+        for (uint j = tid; j < F; j += wgSize)
+            s += readI(base + j);
+        mean = reduceSum(s) / float(F);
+    }
+
+    float q = 0.0;
+    for (uint j = tid; j < F; j += wgSize)
+    {
+        float d = readI(base + j) - mean;
+        q += d * d;
+    }
+    float inv = inversesqrt(reduceSum(q) / float(F) + eps);
+
+    for (uint j = tid; j < F; j += wgSize)
+    {
+        float y = (readI(base + j) - mean) * inv;
+        if (hasGamma != 0u)    y *= readG(j);
+        if (hasScale != 0u)    y *= 1.0 + readM(scaleOffset + j);
+        if (hasGate != 0u)     y *= tanh(readM(gateOffset + j));
+        if (hasResidual != 0u) y += readR(base + j);
+        writeO(base + j, y);
+    }
+}

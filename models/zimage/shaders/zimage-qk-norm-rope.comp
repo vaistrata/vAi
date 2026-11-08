@@ -1,0 +1,92 @@
+// =============================================================================
+// zimage-qk-norm-rope.comp: per-head RMS norm + interleaved-pair RoPE, with the
+//     token-major -> head-major move folded into the store
+//
+//     x      = I[n, h*Dh : (h+1)*Dh]
+//     y      = x * rsqrt(mean(x²) + eps) * γ                (hasNorm == 1)
+//     O[h, n, 2k : 2k+2] = rot(cs[n, k]) · (y[2k], y[2k+1])
+//
+//   rot(c, s) · (a, b) = (a c - b s, a s + b c), the complex product
+//   (a + ib)(c + is) — the pairs are ADJACENT dims (view_as_complex), not the
+//   half-split of vai-rope. cs [N, Dh/2, 2] holds (cos, sin) per pair, built
+//   on the host from each token's position ids, so the 3-axis split of the
+//   frequencies (frame / height / width) never reaches the kernel.
+//
+// - O (typeO), I / cs (typeI, shared), γ (typeW) are fp32 or fp16 via
+//   same-binding buffer aliases; the norm statistic accumulates in fp32.
+// - One workgroup per (token n, head h); thread k owns pair k, so wgSize =
+//   Dh / 2 (a power of two, host-guaranteed) and the Σx² reduction is a
+//   shared-memory tree.
+// - Dispatch (host): .dispatch(N, H).
+// =============================================================================
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_shader_16bit_storage : require
+#include "common/spec_constants.h"
+
+layout(constant_id = 0) const uint wgSize  = 64;    // = Dh / 2
+layout(constant_id = 1) const uint hasNorm = 1;     // 0: rotate only
+layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0;
+layout(constant_id = SPEC_ID_TYPE_I) const uint typeI = 0;   // I, cs (shared)
+layout(constant_id = SPEC_ID_TYPE_W) const uint typeW = 0;   // γ
+
+layout(local_size_x_id = 0) in;
+
+layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_F32 { float bufferO_f32[]; };      // [H, N, Dh]
+layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_F16 { float16_t bufferO_f16[]; };
+//////////////////////////////////////////////////////////////////////////////
+layout(set = 0, binding = 1) restrict readonly buffer I_BUF_F32  { float bufferI_f32[]; };      // [N, H*Dh]
+layout(set = 0, binding = 1) restrict readonly buffer I_BUF_F16  { float16_t bufferI_f16[]; };
+layout(set = 0, binding = 2) restrict readonly buffer CS_BUF_F32 { float bufferCS_f32[]; };     // [N, Dh/2, 2]
+layout(set = 0, binding = 2) restrict readonly buffer CS_BUF_F16 { float16_t bufferCS_f16[]; };
+layout(set = 0, binding = 3) restrict readonly buffer G_BUF_F32  { float bufferG_f32[]; };      // [Dh]
+layout(set = 0, binding = 3) restrict readonly buffer G_BUF_F16  { float16_t bufferG_f16[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint N;
+    uint H;
+    float eps;
+};
+
+float readI(uint i)  { return (typeI == 0u) ? bufferI_f32[i] : float(bufferI_f16[i]); }
+float readCS(uint i) { return (typeI == 0u) ? bufferCS_f32[i] : float(bufferCS_f16[i]); }
+float readG(uint j)  { return (typeW == 0u) ? bufferG_f32[j] : float(bufferG_f16[j]); }
+void writeO(uint i, float v) { if (typeO == 0u) bufferO_f32[i] = v; else bufferO_f16[i] = float16_t(v); }
+
+shared float sRed[wgSize];
+
+void main()
+{
+    const uint Dh = 2u * wgSize;
+    uint n = gl_WorkGroupID.x;
+    uint h = gl_WorkGroupID.y;
+    uint k = gl_LocalInvocationID.x;
+    if (n >= N || h >= H) return;
+
+    uint src = n * H * Dh + h * Dh + 2u * k;
+    float a = readI(src);
+    float b = readI(src + 1u);
+
+    if (hasNorm != 0u)
+    {
+        sRed[k] = a * a + b * b;
+        barrier();
+        for (uint stride = wgSize / 2u; stride > 0u; stride >>= 1)
+        {
+            if (k < stride)
+                sRed[k] += sRed[k + stride];
+            barrier();
+        }
+        float inv = inversesqrt(sRed[0] / float(Dh) + eps);
+        a *= inv * readG(2u * k);
+        b *= inv * readG(2u * k + 1u);
+    }
+
+    uint csIdx = (n * wgSize + k) * 2u;
+    float c = readCS(csIdx);
+    float s = readCS(csIdx + 1u);
+
+    uint dst = (h * N + n) * Dh + 2u * k;
+    writeO(dst,      a * c - b * s);
+    writeO(dst + 1u, a * s + b * c);
+}

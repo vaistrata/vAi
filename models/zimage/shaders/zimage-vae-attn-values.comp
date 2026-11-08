@@ -1,0 +1,6 @@
+// zimage-vae-attn-values.comp: zimage-vae-attn-gemm.glsl with A m-major (the values, V P).
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_control_flow_attributes : enable
+#define A_KMAJOR 0
+#include "zimage-vae-attn-gemm.glsl"
