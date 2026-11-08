@@ -2,7 +2,7 @@
 
 One screen with a prompt, a seed and a Generate button. Tapping the button
 runs all of Z-Image-Turbo on the phone's GPU through vAi: the Qwen3 caption
-encoder, 9 DiT steps, then the VAE decode. The 512x512 result is shown and
+encoder, 8 DiT steps, then the VAE decode. The 512x512 result is shown and
 saved to `Pictures/ZImage`.
 
 This app was written for the Galaxy S25 Ultra (Adreno 830). The kernels are
@@ -16,9 +16,14 @@ the encoder came in):
 |---|---|
 | On launch: read the VAE | 0.5–0.8 s |
 | New prompt: read the text encoder, encode, read the DiT | 2.2 s + 0.1–0.7 s + 3.0–3.3 s |
-| Steps 1–9 | 6.0 s per step while cool, rising to 8.6 s as the GPU throttles |
+| Each of the 8 steps | 6.0 s while cool, rising to 8.6 s as the GPU throttles |
 | VAE decode | 4.4 s |
-| Total, from button press to image | about 80 s for a new prompt, 73 s for a new seed |
+| Total, from button press to image | about 72 s for a new prompt, 65 s for a new seed |
+
+The app samples 8 steps, as diffusers' `ZImagePipeline` example and ComfyUI
+do. It used to sample 9; on the same noise the image is of the same quality,
+and the run is one step (6–9 s) shorter. The totals above are the 9-step
+measurements less one throttled step.
 
 The DiT (3.7 GB) and the text encoder (2.0 GB) are never in memory together.
 Holding both with the VAE took 6.2 GB of GPU memory, and with other apps open

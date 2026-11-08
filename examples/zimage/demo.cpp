@@ -16,6 +16,7 @@
                --nodes-per-submit N  split each forward into submissions of N
                                      nodes (mobile GPU watchdogs)
                --split-ffn-up        halve the longest node, for the same reason
+               --steps N             sampler steps (default 8)
 =============================================================================*/
 
 #include "models/zimage/model.h"
@@ -50,15 +51,16 @@ static std::vector<float> readF32(const SafetensorsParser& parser, const char* k
 int main(int argc, char** argv)
 {
     bool q4 = false, splitFfnUp = false;
-    uint32_t nodesPerSubmit = 0;
+    uint32_t nodesPerSubmit = 0, steps = 8;
     for (int i = 1; i < argc; ++i)
     {
         if (!strcmp(argv[i], "--q4"))                                  q4 = true;
         else if (!strcmp(argv[i], "--split-ffn-up"))                     splitFfnUp = true;
         else if (!strcmp(argv[i], "--nodes-per-submit") && i + 1 < argc) nodesPerSubmit = (uint32_t)atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--steps") && i + 1 < argc)            steps = (uint32_t)atoi(argv[++i]);
         else
         {
-            fprintf(stderr, "usage: %s [--q4] [--nodes-per-submit N] [--split-ffn-up]\n", argv[0]);
+            fprintf(stderr, "usage: %s [--q4] [--nodes-per-submit N] [--split-ffn-up] [--steps N]\n", argv[0]);
             return 1;
         }
     }
@@ -96,8 +98,8 @@ int main(int argc, char** argv)
                    zimage::tongyi::preparedPath(model).c_str());
     }
 
-    // Turbo: 9 steps; step 0 also uploads the weights and records the graph.
-    const std::vector<float> sigmas = zimage::turboSigmas();
+    // Turbo: 8 steps by default; step 0 also uploads the weights and records the graph.
+    const std::vector<float> sigmas = zimage::turboSigmas(steps);
     {
         TimeChecker total("\nSampled {} steps in {}ms", uint32_t(sigmas.size() - 1));
         auto t0 = std::chrono::steady_clock::now();

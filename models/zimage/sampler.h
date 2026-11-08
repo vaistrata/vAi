@@ -14,8 +14,10 @@
 namespace zimage {
 
 // FlowMatchEulerDiscreteScheduler with the Turbo settings: numSteps sigmas
-// linspace(1, 1/numSteps) under the static shift, then a final 0.
-inline std::vector<float> turboSigmas(uint32_t numSteps = 9, float shift = 3.0f)
+// linspace(1, 1/numSteps) under the static shift, then a final 0; one DiT
+// forward per step. 8 is the step count diffusers' ZImagePipeline example and
+// ComfyUI's workflow use.
+inline std::vector<float> turboSigmas(uint32_t numSteps = 8, float shift = 3.0f)
 {
     std::vector<float> sigmas(numSteps + 1, 0.0f);
     for (uint32_t i = 0; i < numSteps; ++i)

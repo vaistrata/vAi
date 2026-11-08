@@ -2,7 +2,7 @@
   Written by   ippx123@gmail.com
   Task         Z-Image on Android — the native side of the app
                (com.vaistrata.zimage.ZImage): a prompt through the caption
-               encoder (Qwen3) and a seeded noise latent -> 9 Turbo steps on
+               encoder (Qwen3) and a seeded noise latent -> 8 Turbo steps on
                the DiT -> VAE decode, all on the GPU, returned as ARGB pixels.
   Assets       under VAI_DATA_DIR (the app's external files, see
                CMakeLists.txt and README.md):

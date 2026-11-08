@@ -91,6 +91,7 @@ The caption encoder runs on the phone too (`models/zimage/text-encoder.h`): Qwen
 - The DiT gives the same picture from these features as from the CUDA bf16 encoder's, with the same scene, layout and quality.
 - Encoding takes 131 ms for 20 tokens and 2.2 s for 512. The weights load in 1.9 s.
 - The prepared file (`data/zimage/Z-Image-Turbo-text-encoder-q4.safetensors`, 2.77 GB) has the projections in Q4 and the embedding table in fp16. The phone does not have room for the 8 GB checkpoint, so `tools.py text-encoder` writes the file on a desktop. Its bytes are identical to the file vAi writes (checked on a 2-layer cut).
+- The sampler now defaults to 8 steps (`turboSigmas`, `demo-zimage --steps N`), as diffusers' `ZImagePipeline` example and ComfyUI use. The schedule is the same `linspace(1, 1/N, N)` under shift 3, only with N = 8. On the phone, 8 steps on the fox's noise give an image of the same quality as 9, with the same scene and detail, one step sooner.
 - The Android app never holds the encoder and the DiT at the same time, so dropping a `NeuralNet` has to give its GPU memory back. It did not: `eva::Buffer` is a handle that frees nothing on its own, and `BufferPool` dropped its handles without destroying the buffers. The pool now destroys them when it goes. Each net owns its pool, and `~NeuralNet` waits for its GPU work first. With this change, the app's GPU memory goes from 6.2 GB to 4.3 GB.
 
 ## Building and running
