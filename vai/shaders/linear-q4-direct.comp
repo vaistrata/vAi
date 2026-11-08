@@ -1,0 +1,139 @@
+/*=============================================================================
+ linear-q4-direct.comp: Q4-weight GEMM that reads its operands straight from
+     memory, without staging them in shared memory
+
+     O[m, n] = sum_k I[m, k] * W[n, k]
+
+     M = flattened batch, N = outDim, K = inDim
+     I fp32 or fp16 [M, K], W Q4 [N, K] (layout at vai::Dtype::Q4), O fp32 or fp16
+
+ For GPUs where shared-memory staging costs more than it saves (Adreno). Each
+ thread owns a tM x tN block of O:
+   - rows m0 .. m0 + tM - 1, so the threads of one row block read the same I
+     values and the cache serves them as a broadcast;
+   - columns n0 + j * TX (TX = wgN / tN threads along N), so a subgroup's
+     lanes work on neighbouring W rows.
+ K advances one Q4 group (32 elements) at a time. A W row's group is one
+ 16-byte load (four words) plus its fp16 scale; I comes 8 values per 16-byte
+ load (two for fp32 I). Both are unpacked straight to fp32, and the products
+ accumulate in fp32.
+
+ Requirements: K % 32 == 0 (Q4's group). No split-K: the host passes
+ splitSize = K and, with bias / epilogue / residual, folds them in the reduce
+ pass as for the tile kernels.
+
+ Dispatch (host): (ceil(N / wgN), ceil(M / wgM), 1), wgM = (wgSize / TX) * tM
+=============================================================================*/
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_control_flow_attributes : enable
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#include "common/spec_constants.h"
+
+// The tile is compile-time (q4DirectTile() on the host must match it): as
+// specialization constants the Adreno 830 compiler keeps the loops over it
+// rolled, and the same tile runs 3.2x slower.
+const uint wgSize = 64;    // threads per workgroup
+const uint wgN    = 32;    // workgroup tile along N
+const uint tM     = 4;     // thread tile along M
+const uint tN     = 4;     // thread tile along N
+
+layout(local_size_x = wgSize, local_size_y = 1, local_size_z = 1) in;
+
+layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0;  // O (output) dtype
+layout(constant_id = SPEC_ID_TYPE_I) const uint typeI = 1;  // I (input) dtype: fp32 or fp16
+
+const uint TX  = wgN / tN;              // threads along N
+const uint wgM = (wgSize / TX) * tM;    // workgroup tile along M
+
+layout(set = 0, binding = 0) writeonly buffer O_BUF_F32 { float bufferO_f32[]; };
+layout(set = 0, binding = 0) writeonly buffer O_BUF_F16 { float16_t bufferO_f16[]; };
+layout(set = 0, binding = 1) readonly buffer I_BUF_U4   { uvec4 bufferI_u4[]; };       // fp16 I: 8 values per element
+layout(set = 0, binding = 1) readonly buffer I_BUF_4F32 { vec4 bufferI_4f32[]; };      // fp32 I: 4 values per element
+layout(set = 0, binding = 2) readonly buffer W_BUF_U4   { uvec4 bufferW_u4[]; };       // one Q4 group per element
+layout(set = 0, binding = 2) readonly buffer W_BUF_F16  { float16_t bufferW_f16[]; };  // the scales, after the words
+
+layout(push_constant) uniform PushConstants {
+    uint M;
+    uint N;
+    uint K;
+    uint splitSize;   // = K (no split-K)
+};
+
+void main()
+{
+    const uint tx = gl_LocalInvocationID.x % TX;
+    const uint ty = gl_LocalInvocationID.x / TX;
+    const uint n0 = gl_WorkGroupID.x * wgN + tx;
+    const uint m0 = gl_WorkGroupID.y * wgM + ty * tM;
+    const uint groups = K / 32u;   // Q4 groups per row
+
+    // Tail rows / columns read the last valid one; their results are not stored.
+    uint rowI[tM];   // first 8-element chunk of each I row
+    uint rowW[tN];   // first group of each W row
+    [[unroll]] for (uint i = 0; i < tM; i++) rowI[i] = min(m0 + i, M - 1u) * (K / 8u);
+    [[unroll]] for (uint j = 0; j < tN; j++) rowW[j] = min(n0 + j * TX, N - 1u) * groups;
+    const uint scale0 = N * K / 4u;   // first scale, in fp16 elements (the words take N * K / 2 bytes)
+
+    float acc[tM * tN];
+    [[unroll]] for (uint i = 0; i < tM * tN; i++) acc[i] = 0.0;
+
+    for (uint g = 0; g < groups; g++)
+    {
+        uvec4 words[tN];
+        [[unroll]] for (uint j = 0; j < tN; j++) words[j] = bufferW_u4[rowW[j] + g];
+
+        // This group's sums, scaled once at the end of the group.
+        float part[tM * tN];
+        [[unroll]] for (uint i = 0; i < tM * tN; i++) part[i] = 0.0;
+
+        [[unroll]] for (uint w = 0; w < 4u; w++)   // 8 elements per word
+        {
+            vec4 a0[tM], a1[tM];
+            [[unroll]] for (uint i = 0; i < tM; i++)
+            {
+                const uint c = rowI[i] + g * 4u + w;   // 8-element chunk
+                if (typeI == DTYPE_F32)
+                {
+                    a0[i] = bufferI_4f32[2u * c];
+                    a1[i] = bufferI_4f32[2u * c + 1u];
+                }
+                else
+                {
+                    const uvec4 u = bufferI_u4[c];
+                    a0[i] = vec4(unpackHalf2x16(u.x), unpackHalf2x16(u.y));
+                    a1[i] = vec4(unpackHalf2x16(u.z), unpackHalf2x16(u.w));
+                }
+            }
+            [[unroll]] for (uint j = 0; j < tN; j++)
+            {
+                const uint q = words[j][w];
+                const vec4 b0 = vec4(uvec4(q,       q >> 4,  q >> 8,  q >> 12) & 0xFu) - 8.0;
+                const vec4 b1 = vec4(uvec4(q >> 16, q >> 20, q >> 24, q >> 28) & 0xFu) - 8.0;
+                [[unroll]] for (uint i = 0; i < tM; i++)
+                    part[i * tN + j] += dot(a0[i], b0) + dot(a1[i], b1);
+            }
+        }
+
+        [[unroll]] for (uint j = 0; j < tN; j++)
+        {
+            const float s = float(bufferW_f16[scale0 + rowW[j] + g]);
+            [[unroll]] for (uint i = 0; i < tM; i++)
+                acc[i * tN + j] = fma(part[i * tN + j], s, acc[i * tN + j]);
+        }
+    }
+
+    [[unroll]] for (uint i = 0; i < tM; i++)
+    {
+        [[unroll]] for (uint j = 0; j < tN; j++)
+        {
+            const uint m = m0 + i, n = n0 + j * TX;
+            if (m < M && n < N)
+            {
+                if (typeO == DTYPE_F32) bufferO_f32[m * N + n] = acc[i * tN + j];
+                else                    bufferO_f16[m * N + n] = float16_t(clamp(acc[i * tN + j], -65504.0, 65504.0));
+            }
+        }
+    }
+}

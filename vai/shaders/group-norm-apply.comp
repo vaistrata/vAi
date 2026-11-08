@@ -1,0 +1,96 @@
+/*=============================================================================
+ group-norm-apply.comp: group normalization, affine and epilogue
+     O[c, j] = act((I[c, j] − mean[g]) · rsqrt(var[g] + eps) · γ[c] + β[c])
+
+ Each workgroup covers the same chunk group-norm-stats.comp reduced, first
+ folding its group's partials (P[g, :], at most a few hundred) into the
+ group's mean and variance, then normalizing the chunk. Folding them again
+ in every workgroup costs a few KB of reads and saves a dispatch and its
+ barrier.
+
+ - I (typeI), O (typeO) are fp32 or fp16; γ, β (typeW) fp32 or fp16;
+   statistics fp32.
+ - epilogue (common/activation.h): e.g. 4 = SiLU, as a ResNet block's
+   norm -> SiLU -> conv reads it.
+ - Dispatch (host): .dispatch(numChunks, G), the stats kernel's grid.
+=============================================================================*/
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_shader_16bit_storage : require
+#include "common/spec_constants.h"
+#include "common/activation.h"
+
+const uint wgSize = 256u;
+layout(local_size_x = wgSize) in;
+
+layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0;   // O (output) dtype
+layout(constant_id = SPEC_ID_TYPE_I) const uint typeI = 0;   // I (input) dtype
+layout(constant_id = SPEC_ID_TYPE_W) const uint typeW = 0;   // γ / β dtype
+
+layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_F32 { float bufferO_f32[]; };
+layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_F16 { float16_t bufferO_f16[]; };
+layout(set = 0, binding = 1) restrict readonly buffer I_BUF_F32 { float bufferI_f32[]; };
+layout(set = 0, binding = 1) restrict readonly buffer I_BUF_F16 { float16_t bufferI_f16[]; };
+layout(set = 0, binding = 2) restrict readonly buffer P_BUF { vec2 bufferP[]; };
+layout(set = 0, binding = 3) restrict readonly buffer GAMMA_BUF_F32 { float bufferGamma_f32[]; };
+layout(set = 0, binding = 3) restrict readonly buffer GAMMA_BUF_F16 { float16_t bufferGamma_f16[]; };
+layout(set = 0, binding = 4) restrict readonly buffer BETA_BUF_F32 { float bufferBeta_f32[]; };
+layout(set = 0, binding = 4) restrict readonly buffer BETA_BUF_F16 { float16_t bufferBeta_f16[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint groupLen;      // L = (C / G) * S
+    uint chunkLen;      // elements per workgroup (a multiple of wgSize)
+    uint numChunks;     // ceil(L / chunkLen)
+    uint spatial;       // S
+    uint chPerGroup;    // C / G
+    float eps;
+};
+
+float readI(uint i)     { return (typeI == DTYPE_F32) ? bufferI_f32[i] : float(bufferI_f16[i]); }
+float readGamma(uint c) { return (typeW == DTYPE_F32) ? bufferGamma_f32[c] : float(bufferGamma_f16[c]); }
+float readBeta(uint c)  { return (typeW == DTYPE_F32) ? bufferBeta_f32[c] : float(bufferBeta_f16[c]); }
+void writeO(uint i, float v) { if (typeO == DTYPE_F32) bufferO_f32[i] = v; else bufferO_f16[i] = float16_t(v); }
+
+shared vec2 sPart[wgSize];
+shared float gMean;
+shared float gInvStd;
+
+void main()
+{
+    const uint g = gl_WorkGroupID.y, k = gl_WorkGroupID.x, tid = gl_LocalInvocationID.x;
+    const uint base = g * groupLen;
+
+    // The group's partials share one shift, so they simply add.
+    vec2 acc = vec2(0.0);
+    for (uint i = tid; i < numChunks; i += wgSize)
+        acc += bufferP[g * numChunks + i];
+    sPart[tid] = acc;
+    barrier();
+    for (uint stride = wgSize / 2u; stride > 0u; stride >>= 1)
+    {
+        if (tid < stride)
+            sPart[tid] += sPart[tid + stride];
+        barrier();
+    }
+    if (tid == 0u)
+    {
+        const float L = float(groupLen);
+        const vec2 s = sPart[0];
+        // Σ(x−mean)² = Σ(x−s)² − (Σ(x−s))²/L; rounding can take it below 0.
+        const float m2 = max(s.y - s.x * s.x / L, 0.0);
+        gMean = readI(base) + s.x / L;
+        gInvStd = inversesqrt(m2 / L + eps);
+    }
+    barrier();
+
+    const float mean = gMean, invStd = gInvStd;
+    const uint begin = k * chunkLen;
+    const uint end = min(begin + chunkLen, groupLen);
+    const uint c0 = g * chPerGroup;
+    for (uint i = begin + tid; i < end; i += wgSize)
+    {
+        const uint c = c0 + i / spatial;
+        const float y = (readI(base + i) - mean) * invStd * readGamma(c) + readBeta(c);
+        writeO(base + i, applyEpilogue(y));
+    }
+}

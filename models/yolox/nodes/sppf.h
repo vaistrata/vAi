@@ -29,6 +29,7 @@ public:
         vai::Dtype oDtype = vai::Dtype::None;   // None: oDefaultDtype
     } config_;
 
+    SPPFNode();
     SPPFNode(Config config);
     void prepare() override;
     void run(eva::CommandBuffer cmdBuff) override;
@@ -37,7 +38,9 @@ private:
     PipeParams pipeParams;
 };
 
-inline SPPFNode::SPPFNode(Config config = Config())
+inline SPPFNode::SPPFNode() : SPPFNode(Config()) {}
+
+inline SPPFNode::SPPFNode(Config config)
 : config_(config)
 {
     addSlot("out0", vai::NodeSlot::output);

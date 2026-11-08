@@ -3,6 +3,7 @@
 
 #include "tensor.h"
 #include "pipeline-pool.h"
+#include <functional>
 #include <map>
 #include <memory>
 
@@ -268,6 +269,11 @@ struct NeuralNetConfig
     // Fallback dtype for layer outputs. A layer's input dtype is whatever its
     // producer wrote; Dtype::None is not allowed.
     Dtype oDefaultDtype = Dtype::Fp32;
+
+    // Nodes per queue submission; 0 records the whole forward into one.
+    // Some drivers reset the GPU when one submission runs too long (Adreno
+    // after a few seconds), so a long forward there needs this set.
+    uint32_t nodesPerSubmit = 0;
 };
 
 
@@ -279,7 +285,11 @@ class NeuralNet
 
     thread_local inline static NeuralNet* currentNet_ = nullptr;
     eva::Device device_;
-    eva::CommandBuffer cmdBuffer_;
+
+    // One forward's commands, split every NeuralNetConfig::nodesPerSubmit
+    // nodes; the first recordedCmdBuffers_ hold the current recording.
+    std::vector<eva::CommandBuffer> cmdBuffers_;
+    size_t recordedCmdBuffers_ = 0;
 
     std::array<eva::CommandBuffer, detail::kInputUploadRing> uploadCmds_;
     std::map<uint64_t, std::vector<PooledBuffer>> pendingStaging_;
@@ -348,6 +358,14 @@ public:
 
     void uploadModelParams();
 
+    // A weight written straight into its device buffer: fill(dst) writes the
+    // tensor's numBytes(). On an integrated GPU, whose device-local memory is
+    // the host's own, dst is that buffer mapped, so the bytes are neither
+    // staged nor copied; elsewhere it is host memory, uploaded with the other
+    // weights.
+    Tensor paramTensor(const std::vector<uint32_t>& shape, Dtype dtype,
+                       const std::function<void(void*)>& fill);
+
     void resetProfileRecords();
     void printProfile(bool withResetRecords = true);
     double getGpuTimeMs(const std::string& tag);
@@ -415,7 +433,11 @@ public:
             needToRerecordCommands_ = false;
         }
 
-        device_.queue() << cmdBuffer_ / timeline_(++submitCount_);
+        // Separate submissions, so a driver times each part on its own. The
+        // nodes' own barriers order them across command buffers.
+        for (size_t i = 0; i + 1 < recordedCmdBuffers_; ++i)
+            device_.queue() << cmdBuffers_[i];
+        device_.queue() << cmdBuffers_[recordedCmdBuffers_ - 1] / timeline_(++submitCount_);
 
         for (auto& [name, node] : outputs_)
             if (node.reached_)
