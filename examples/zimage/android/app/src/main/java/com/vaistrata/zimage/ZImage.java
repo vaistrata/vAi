@@ -32,11 +32,18 @@ final class ZImage {
     /** Reads both networks' weights once; null when done, else the reason it could not. */
     static native String load(Listener listener);
 
-    /** The prompt the caption features came from, if prompt.txt names it. */
+    /** Whether the text encoder loaded; without it only the demo prompt's features exist. */
+    static native boolean hasEncoder();
+
+    /** The last prompt encoded, or the demo features' prompt (prompt.txt) without the encoder. */
     static native String prompt();
 
-    /** IMAGE_SIZE x IMAGE_SIZE ARGB pixels from this seed, or null on failure. */
-    static native int[] generate(long seed, Listener listener);
+    /**
+     * IMAGE_SIZE x IMAGE_SIZE ARGB pixels of this prompt (NFC, see
+     * java.text.Normalizer) from this seed, or null on failure. The prompt is
+     * encoded only when it changed.
+     */
+    static native int[] generate(String prompt, long seed, Listener listener);
 
     /**
      * Unpacks the APK's shaders (assets/shaders/{vai,zimage}) to where the

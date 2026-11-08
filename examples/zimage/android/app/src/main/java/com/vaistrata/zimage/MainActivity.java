@@ -26,14 +26,15 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 
 import java.io.OutputStream;
+import java.text.Normalizer;
 import java.util.Locale;
 import java.util.Random;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
- * One screen: a seed, a Generate button, the image and how the run went.
- * {@code adb shell am start -S -n com.vaistrata.zimage/.MainActivity --el seed 42}
+ * One screen: a prompt, a seed, a Generate button, the image and how the run went.
+ * {@code adb shell am start -S -n com.vaistrata.zimage/.MainActivity --el seed 42 --es prompt "..."}
  * generates as soon as the weights are loaded. Launched that way it also turns
  * the screen on and shows over the lock screen, since a stopped activity's
  * process is frozen mid-run (Samsung's FreecessController does it within a minute).
@@ -42,7 +43,7 @@ public final class MainActivity extends Activity {
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private final Handler ui = new Handler(Looper.getMainLooper());
 
-    private TextView prompt;
+    private EditText prompt;
     private EditText seed;
     private Button generate;
     private ProgressBar progress;
@@ -63,6 +64,10 @@ public final class MainActivity extends Activity {
             setShowWhenLocked(true);
             setTurnScreenOn(true);
             seed.setText(Long.toString(getIntent().getLongExtra("seed", 0)));
+            String p = getIntent().getStringExtra("prompt");
+            if (p != null) {
+                prompt.setText(p);
+            }
         }
         status.setText("Loading...");
         worker.execute(this::load);
@@ -88,8 +93,12 @@ public final class MainActivity extends Activity {
                 status.setText(result + "\n\nData directory: " + ZImage.dataDir());
                 return;
             }
-            String p = ZImage.prompt();
-            prompt.setText(p.isEmpty() ? "(prompt.txt not found: the prepared caption features)" : p);
+            if (!ZImage.hasEncoder()) {
+                // The fixed demo features: their prompt is shown, not edited.
+                String p = ZImage.prompt();
+                prompt.setText(p.isEmpty() ? "(no text encoder: the demo caption features)" : p);
+                prompt.setEnabled(false);
+            }
             status.setText("Ready. " + thermal());
             generate.setEnabled(true);
             if (getIntent().hasExtra("seed")) {
@@ -106,12 +115,17 @@ public final class MainActivity extends Activity {
             status.setText("The seed must be a number");
             return;
         }
+        final String text = Normalizer.normalize(prompt.getText().toString().trim(), Normalizer.Form.NFC);
+        if (ZImage.hasEncoder() && text.isEmpty()) {
+            status.setText("Type a prompt");
+            return;
+        }
         generate.setEnabled(false);
         log.setText("");
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         worker.execute(() -> {
             long t0 = SystemClock.elapsedRealtime();
-            int[] argb = ZImage.generate(s, this::onProgress);
+            int[] argb = ZImage.generate(text, s, this::onProgress);
             double seconds = (SystemClock.elapsedRealtime() - t0) / 1e3;
             Bitmap bitmap = null;
             String saved = null;
@@ -142,7 +156,8 @@ public final class MainActivity extends Activity {
             progress.setMax(total);
             progress.setProgress(done);
             status.setText(stage);
-            if (stage.startsWith("Step ") && stage.contains(" took ") || stage.startsWith("Decoded")) {
+            if (stage.startsWith("Step ") && stage.contains(" took ")
+                    || stage.startsWith("Decoded") || stage.startsWith("Encoded")) {
                 log.append(line + "\n");
             }
         });
@@ -189,9 +204,14 @@ public final class MainActivity extends Activity {
         title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 20);
         root.addView(title);
 
-        prompt = new TextView(this);
-        prompt.setPadding(0, dp(8), 0, dp(8));
-        root.addView(prompt);
+        prompt = new EditText(this);
+        prompt.setHint("Describe the image");
+        prompt.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE
+                | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
+        prompt.setMinLines(2);
+        prompt.setText("A red fox sitting in a snowy birch forest at dawn");
+        root.addView(prompt, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);

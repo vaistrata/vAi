@@ -84,6 +84,15 @@ The VAE decoder runs on the GPU too (`models/zimage/vae.h`), so `demo-zimage` go
 - In one submission a decode outlasts the driver's submit timeout; with `--nodes-per-submit 1` its longest node takes 0.28 s.
 - The conv's products and sums in fp16 (f16vec4 FMAs, flushed into fp32 every 1, 4 or 16 input channels) ran at 600 GFLOPS against fp32's 1,000 and dropped the decode to 61-66 dB PSNR, so the convs stay in fp32.
 
+The caption encoder runs on the phone too (`models/zimage/text-encoder.h`): Qwen3-4B's first 35 decoder layers, whose output is the pipeline's `hidden_states[-2]`. The projections are Q4 and the norms fp32, 2.0 GB in all. The embedding table stays in its file as fp16 and only the prompt's rows are read. Against the fp32 forward of `torch/text_encoder.py` (`bench-zimage-text-encoder-vai --nodes-per-submit 1`, same phone):
+
+- The prompt's token ids match transformers' chat template exactly. Seven prompts were checked: English, Korean, Japanese, emoji, combining accents, runs of spaces and tabs, and one cut off at 512 tokens.
+- On the 20-token fox prompt, rel L2 is 4.98e-2 (cosine 0.99933). The error is the Q4 rounding's own: the fp32 forward with the same Q4 weights gives 4.84e-2, and after two layers vAi matches it exactly (8.201e-2). One token carries most of the norm. Over the others the error is 17%, and fp16 `down_proj` weights only bring that to 15% for 1.26 GB more.
+- The DiT gives the same picture from these features as from the CUDA bf16 encoder's, with the same scene, layout and quality.
+- Encoding takes 131 ms for 20 tokens and 2.2 s for 512. The weights load in 1.9 s.
+- The prepared file (`data/zimage/Z-Image-Turbo-text-encoder-q4.safetensors`, 2.77 GB) has the projections in Q4 and the embedding table in fp16. The phone does not have room for the 8 GB checkpoint, so `tools.py text-encoder` writes the file on a desktop. Its bytes are identical to the file vAi writes (checked on a 2-layer cut).
+- The Android app never holds the encoder and the DiT at the same time, so dropping a `NeuralNet` has to give its GPU memory back. It did not: `eva::Buffer` is a handle that frees nothing on its own, and `BufferPool` dropped its handles without destroying the buffers. The pool now destroys them when it goes. Each net owns its pool, and `~NeuralNet` waits for its GPU work first. With this change, the app's GPU memory goes from 6.2 GB to 4.3 GB.
+
 ## Building and running
 
 Checkpoint: the full `Tongyi-MAI/Z-Image-Turbo` snapshot in `data/zimage/Z-Image-Turbo/`. The DiT loader reads only `transformer/`; `tools.py` reads the text encoder and the VAE from the same folder.
@@ -100,4 +109,5 @@ build/bin/bench-zimage-vai --profile                    # accuracy, vAi latency,
 - Another resolution: pass the same `--height` / `--width` to both benches. Another caption length: `torch/bench.py --cap-tokens N`.
 - `bench-zimage-vai --scalar-attention` runs the scalar attention kernel even on a coopmat device, and `--no-int8-attention` keeps it in fp32 where the int8 kernel would run.
 - The VAE: `python3 benchmarks/zimage/torch/vae.py --stages` stores the fp32 decode of `data/zimage/demo-latent.bin` (or of a seeded latent), and `bench-zimage-vae-vai --stages --profile` compares against it and times the decode. Both take `--height` / `--width`.
+- The caption encoder: `python3 benchmarks/zimage/torch/text_encoder.py --stages` stores the fp32 features of a prompt (`--check-hf` also compares transformers' bf16 run). `python3 examples/zimage/tools.py text-encoder` writes the prepared Q4 file, and `bench-zimage-text-encoder-vai` checks against the reference and times the encoder. `--layers N` runs and checks the first N layers. `--tokens N` times a prompt of N tokens instead.
 - `--q4` stores the block projections as Q4; `--nodes-per-submit N` splits each forward into submissions of N nodes, for GPUs whose driver resets after a few seconds per submission (Adreno). `--split-ffn-up` splits the FFN up projection in two, for the same drivers. `demo-zimage` takes all three.

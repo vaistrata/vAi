@@ -74,6 +74,17 @@ public:
     BufferPool(BufferPoolConfig config)
     : device_(config.device), logLevel(config.logLevel) {}
 
+    // eva::Buffer does not free itself, so the pool frees what it holds. Every
+    // PooledBuffer keeps the pool alive, so by now each buffer is back in it.
+    // A NeuralNet owns its pool and outlives its GPU work (~NeuralNet waits),
+    // so dropping a net gives its memory back.
+    ~BufferPool()
+    {
+        for (auto& [usage, subPool] : bufferPool_)
+            for (auto& [size, entry] : subPool)
+                entry.first.destroy();
+    }
+
     PooledBuffer requestBuffer(
         eva::BUFFER_USAGE usageFlags,
         eva::MEMORY_PROPERTY reqMemProps,

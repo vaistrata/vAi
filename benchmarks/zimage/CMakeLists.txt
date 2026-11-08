@@ -30,3 +30,12 @@ add_dependencies(bench-zimage-vae-vai zimage-shaders)
 target_link_libraries(bench-zimage-vae-vai PRIVATE
     vAi
 )
+
+# The caption encoder (Qwen3) against torch/text_encoder.py's reference.
+add_executable(bench-zimage-text-encoder-vai
+    vai/text-encoder-bench.cpp
+)
+
+target_link_libraries(bench-zimage-text-encoder-vai PRIVATE
+    vAi
+)
