@@ -1,0 +1,24 @@
+# Code owners. One of them must approve a PR that touches these paths once the
+# master branch rule turns on "Require review from Code Owners"; until then
+# they are only requested as reviewers.
+#
+# These files decide what CI checks. A pull_request run uses the files as the
+# PR carries them, so a PR that edits them changes its own checks.
+
+# Workflows, and this file
+/.github/                                @Q-Kyu-Queue @jroooot @meta-manifold
+
+# Format and lint rules
+/.clang-format                           @Q-Kyu-Queue @jroooot @meta-manifold
+/.clang-format-ignore                    @Q-Kyu-Queue @jroooot @meta-manifold
+/vai/shaders/.clang-format               @Q-Kyu-Queue @jroooot @meta-manifold
+/.pre-commit-config.yaml                 @Q-Kyu-Queue @jroooot @meta-manifold
+/pyproject.toml                          @Q-Kyu-Queue @jroooot @meta-manifold
+
+# Node test rules: the shared check, the completeness check and its UNTESTED list
+/python/tests/conftest.py                @Q-Kyu-Queue @jroooot @meta-manifold
+/python/tests/node_check.py              @Q-Kyu-Queue @jroooot @meta-manifold
+/python/tests/test_node_completeness.py  @Q-Kyu-Queue @jroooot @meta-manifold
+
+# The node reference generator the docs check runs
+/docs/tools/                             @Q-Kyu-Queue @jroooot @meta-manifold
