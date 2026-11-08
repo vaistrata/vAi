@@ -46,6 +46,8 @@ const uint tN     = 4;     // thread tile along N
 layout(local_size_x = wgSize, local_size_y = 1, local_size_z = 1) in;
 
 layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0;  // O (output) dtype
+// Accumulator chains per group dot: 1 or 2 (q4DirectTile picks by K).
+layout(constant_id = 4) const uint dotChains = 1;
 
 const uint TX  = wgN / tN;              // threads along N
 const uint wgM = (wgSize / TX) * tM;    // workgroup tile along M
@@ -103,14 +105,32 @@ void main()
 
             [[unroll]] for (uint i = 0; i < tM; i++)
             {
-                int dotNQ = dotPacked4x8EXT(int(qa[i].x), even.x);
-                dotNQ    += dotPacked4x8EXT(int(qa[i].y), odd.x);
-                dotNQ    += dotPacked4x8EXT(int(qa[i].z), even.y);
-                dotNQ    += dotPacked4x8EXT(int(qa[i].w), odd.y);
-                dotNQ    += dotPacked4x8EXT(int(qb[i].x), even.z);
-                dotNQ    += dotPacked4x8EXT(int(qb[i].y), odd.z);
-                dotNQ    += dotPacked4x8EXT(int(qb[i].z), even.w);
-                dotNQ    += dotPacked4x8EXT(int(qb[i].w), odd.w);
+                // One accumulate-form chain (dotPacked4x8AccSatEXT; the sums
+                // stay far from saturating) or two interleaved ones.
+                int dotNQ;
+                if (dotChains == 1u)
+                {
+                    dotNQ = dotPacked4x8AccSatEXT(int(qa[i].x), even.x, 0);
+                    dotNQ = dotPacked4x8AccSatEXT(int(qa[i].y), odd.x, dotNQ);
+                    dotNQ = dotPacked4x8AccSatEXT(int(qa[i].z), even.y, dotNQ);
+                    dotNQ = dotPacked4x8AccSatEXT(int(qa[i].w), odd.y, dotNQ);
+                    dotNQ = dotPacked4x8AccSatEXT(int(qb[i].x), even.z, dotNQ);
+                    dotNQ = dotPacked4x8AccSatEXT(int(qb[i].y), odd.z, dotNQ);
+                    dotNQ = dotPacked4x8AccSatEXT(int(qb[i].z), even.w, dotNQ);
+                    dotNQ = dotPacked4x8AccSatEXT(int(qb[i].w), odd.w, dotNQ);
+                }
+                else
+                {
+                    int dA = dotPacked4x8AccSatEXT(int(qa[i].x), even.x, 0);
+                    int dB = dotPacked4x8AccSatEXT(int(qb[i].x), even.z, 0);
+                    dA = dotPacked4x8AccSatEXT(int(qa[i].y), odd.x, dA);
+                    dB = dotPacked4x8AccSatEXT(int(qb[i].y), odd.z, dB);
+                    dA = dotPacked4x8AccSatEXT(int(qa[i].z), even.y, dA);
+                    dB = dotPacked4x8AccSatEXT(int(qb[i].z), even.w, dB);
+                    dA = dotPacked4x8AccSatEXT(int(qa[i].w), odd.y, dA);
+                    dB = dotPacked4x8AccSatEXT(int(qb[i].w), odd.w, dB);
+                    dotNQ = dA + dB;
+                }
                 // sum (n - 8) q_I = sum n q_I - 8 sum q_I
                 acc[i * tN + j] = fma(s * ds[i].x, float(dotNQ) - 8.0 * ds[i].y, acc[i * tN + j]);
             }

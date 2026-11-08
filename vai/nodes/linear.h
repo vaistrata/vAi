@@ -105,6 +105,7 @@ public:
         uint32_t sgpNIter;  // sgN / sgpN
         uint32_t tM;        // thread tile
         uint32_t tN;
+        uint32_t dotChains = 1;   // linear-q4-q8: accumulator chains per group dot (q4DirectTile)
         uint32_t tK = 0;    // coopmat k tile: k depth per coopMatMulAdd (= device coopmat K);
                             // 0 on the scalar path — doubles as the coopmat-tile marker
         vai::Dtype iDtype = vai::Dtype::None;
@@ -683,7 +684,13 @@ inline bool useQ4Q8(eva::Device device)
 // - linear-q4-q8 ran them 1.37x faster than its earlier 2 x 4 block and the
 //   FFN 1.69x; 5 x 4 blocks matched it.
 // The other tiles were slower.
-inline Linear::PipeParamsTile q4DirectTile(Dtype iDtype, bool q8)
+// linear-q4-q8 sums each group's 8 dots in dotPacked4x8AccSatEXT chains:
+// one chain ran the K = 3840 Linears 1.15-1.2x faster than separate dots
+// added up, but the FFN's down projection (K = 10240) 1.4x slower; two
+// interleaved chains run that one 1.07x faster instead (Adreno 830,
+// M = 1056; results identical). Measured only at those two K, hence the
+// cut between them.
+inline Linear::PipeParamsTile q4DirectTile(Dtype iDtype, bool q8, uint32_t K)
 {
     Linear::PipeParamsTile t{};
     t.direct = true;
@@ -694,6 +701,7 @@ inline Linear::PipeParamsTile q4DirectTile(Dtype iDtype, bool q8)
     t.wgN = 32;
     t.wgM = t.wgSize / (t.wgN / t.tN) * t.tM;
     t.iDtype = iDtype;
+    t.dotChains = (q8 && K > 6144) ? 2 : 1;
     return t;
 }
 
@@ -886,7 +894,7 @@ inline void Linear::prepare()
         // An explicit splitSize keeps the tile kernels, which split K.
         const bool direct = config_.splitSize == 0 && useQ4Direct(iDtype, config_.wDtype, device());
         const bool q8 = direct && config_.int8Input && useQ4Q8(device());
-        const PipeParamsTile t = direct ? q4DirectTile(iDtype, q8)
+        const PipeParamsTile t = direct ? q4DirectTile(iDtype, q8, K)
                                         : ggmlMulmmTileParams(M, N, K, iDtype, config_.wDtype, device());
 
         // Resolve split-K for this shape: none for the direct kernel, an
@@ -927,6 +935,7 @@ inline void Linear::prepare()
                 eva::constant_id<1>(t.wgN),                          // wgN
                 eva::constant_id<2>(t.tM),                           // tM
                 eva::constant_id<3>(t.tN),                           // tN
+                eva::constant_id<4>(t.dotChains),                    // dotChains (linear-q4-q8)
                 eva::constant_id<SPEC_ID_TYPE_O>(config_.oDtype),    // typeO
                 eva::constant_id<SPEC_ID_TYPE_I>(iDtype)             // typeI
             });
