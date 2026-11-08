@@ -4,6 +4,7 @@
               cap_feats [Nc0, 2560]  Qwen3 caption encoder hidden states (the
                                      pipeline's second-to-last layer, padding dropped)
               noise     [16, H/8, W/8] the initial latent
+            and the prompt itself -> data/zimage/prompt.txt  (shown by the Android app)
   decode    data/zimage/demo-latent.bin -> data/zimage/demo.png  (VAE)
 
 Both read Tongyi-MAI/Z-Image-Turbo through diffusers (text_encoder/, tokenizer/, vae/):
@@ -36,6 +37,8 @@ def prepare(args):
 
     os.makedirs(DATA, exist_ok=True)
     save_file({"cap_feats": cap, "noise": noise}, os.path.join(DATA, "demo-input.safetensors"))
+    with open(os.path.join(DATA, "prompt.txt"), "w") as f:   # shown by the Android app
+        f.write(args.prompt + "\n")
     print(f"cap_feats {tuple(cap.shape)}, noise {tuple(noise.shape)}")
 
 
