@@ -65,3 +65,7 @@ regex    = '''__version__\s*(?::\s*str)?\s*=\s*["'](?P<value>[^"']+)["']'''
 [tool.pytest.ini_options]
 # Tests import the editable install — run `pip install -e .` first.
 testpaths = ["python/tests"]
+# importlib: test files in different folders may share a name (a core node's
+# and a model's); pythonpath makes python/tests/node_check.py importable.
+addopts = ["--import-mode=importlib"]
+pythonpath = ["python/tests"]
