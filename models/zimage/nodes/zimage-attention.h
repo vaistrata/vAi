@@ -28,21 +28,28 @@ namespace zimage {
              Its tile is scalarKeysPerTile: with 32 keys the per-thread
              scores and prefetch spill registers on an Adreno 830 and run
              ~140x slower (past the driver's submit timeout at DiT lengths).
-    int8     the scalar frame with the Q·K dots on packed int8 dot products
-             (K quantized per key while staged, the query per row) and V
-             staged as fp16 (zimage-attention-i8.comp), where
-             int8Supported(). On a cool Galaxy S25 Ultra (N = 1056, 30
-             heads) 34 ms vs. 83 ms scalar; the 512x512 forward's rel L2
-             against fp32 goes 3.70e-2 -> 3.91e-2.
+    int8     where int8Supported(): Q and K quantized to int8 per row (the
+             softmax scale in Q's) and V cast to fp16 by
+             zimage-attention-i8-quant, then a register-tiled kernel with
+             no shared memory: Q·K on packed int8 dot products, P·V summed
+             in fp16 (zimage-attention-i8.comp). On a cool Galaxy S25 Ultra
+             (N = 1056, 30 heads) 12.6 ms (0.8 + 11.8) vs. 83 ms scalar and
+             34 ms for the shared-memory int8 kernel it replaced; the 512x512
+             forward's rel L2 against fp32 is 3.99e-2 (3.70e-2 scalar, 3.91e-2
+             the old int8 kernel). Needs N % kInt8KeysPerTile == 0; other
+             lengths run scalar.
   coopmatSupported() picks first; allowCoopmat = false and int8QK = false
   turn the kernels off.
 =============================================================================*/
 class FullAttentionNode : public vai::Node
 {
-    eva::ComputePipeline pipe;
-    eva::DescriptorSet descSet;
+    eva::ComputePipeline pipe, pipeQuant;
+    eva::DescriptorSet descSet, descQuant;
 
 public:
+    static constexpr uint32_t kInt8RowsPerWg = 32, kInt8KeysPerTile = 32;   // zimage-attention-i8.comp
+    static constexpr uint32_t kQuantRowsPerWg = 8;                           // zimage-attention-i8-quant.comp
+
     struct PipeParams {
         bool coopmat = false;
         bool int8 = false;
@@ -108,10 +115,13 @@ inline bool FullAttentionNode::coopmatSupported(const Config& c, eva::Device dev
 
 inline bool FullAttentionNode::int8Supported(const Config& c, eva::Device device)
 {
-    // zimage-attention-i8.comp: compile-time head dim and tile, one subgroup
-    // butterfly over the 32 invocations that stage a key.
+    // zimage-attention-i8.comp: compile-time head dim and tile; the quant
+    // pass's row max is one butterfly over 32 invocations. The kernels use
+    // the signed dot form (1.2x the mixed one on Adreno 830), which devices
+    // accelerating the mixed form also accelerate, and fp16 arithmetic, as
+    // linear-q4-q8 does under the same check.
     return device.isDot4x8PackedMixedAccelerated()
-        && c.headDim == 128 && c.scalarKeysPerTile == 16 && device.subgroupSize() >= 32;
+        && c.headDim == 128 && device.subgroupSize() >= 32;
 }
 
 inline FullAttentionNode::FullAttentionNode(Config config)
@@ -121,6 +131,9 @@ inline FullAttentionNode::FullAttentionNode(Config config)
     addSlot("Q", vai::NodeSlot::input);
     addSlot("K", vai::NodeSlot::input);
     addSlot("V", vai::NodeSlot::input);
+    addSlot("qk8", vai::NodeSlot::temporary);      // int8: Q's rows, then K's
+    addSlot("scales", vai::NodeSlot::temporary);   // int8: each row's scale, same order
+    addSlot("v16", vai::NodeSlot::temporary);      // int8: V as fp16
 
     VAI_ASSERT(config_.headDim % 16 == 0 && config_.keysPerTile % 16 == 0);
     config_.oDtype = (config_.oDtype == vai::Dtype::None) ? oDefaultDtype() : config_.oDtype;
@@ -139,47 +152,99 @@ inline void FullAttentionNode::prepare()
     VAI_ASSERT(k.isShapeOf(H, N, Dh));
     VAI_ASSERT(v.isShapeOf(N, H * Dh));
     const bool coopmat = config_.allowCoopmat && coopmatSupported(config_, device());
+    const bool int8 = !coopmat && config_.int8QK && N % kInt8KeysPerTile == 0
+                   && int8Supported(config_, device());
     const PipeParams p = {
         .coopmat = coopmat,
-        .int8 = !coopmat && config_.int8QK && int8Supported(config_, device()),
-        .keysPerTile = coopmat ? config_.keysPerTile : config_.scalarKeysPerTile,
+        .int8 = int8,
+        .keysPerTile = coopmat ? config_.keysPerTile : int8 ? kInt8KeysPerTile : config_.scalarKeysPerTile,
         .vDtype = v.dtype(),
     };
     VAI_ASSERT(N % 16 == 0 && N % p.keysPerTile == 0);
     if (!pipe || p != pipeParams)
     {
         pipeParams = p;
-        const uint32_t sg = p.coopmat ? device().subgroupSize() : 0;
-        const uint32_t wgSize = p.coopmat ? config_.numSubgroups * sg : 128;
-        rowsPerWg = p.coopmat ? 16 * config_.numSubgroups : wgSize / 4;
-
-        pipe = pipelinePool().request(ZIMAGE_SHADER_OUTPUT_DIR,
-            p.coopmat ? "zimage-attention" : p.int8 ? "zimage-attention-i8" : "zimage-attention-scalar", {
-                eva::constant_id<0>(wgSize),
-                eva::constant_id<1>(sg),                               // sgSize (coopmat; scalar ignores)
-                eva::constant_id<2>(Dh),
-                eva::constant_id<3>(p.keysPerTile),                    // Bc
-                eva::constant_id<4>(p.vDtype),                         // typeV
+        if (p.int8)
+        {
+            rowsPerWg = kInt8RowsPerWg;
+            pipe = pipelinePool().request(ZIMAGE_SHADER_OUTPUT_DIR, "zimage-attention-i8", {
                 eva::constant_id<SPEC_ID_TYPE_O>(config_.oDtype)       // typeO
-            },
-            { .requiredSubgroupSize = sg });                           // 0 = not forced
-        if (!descSet)
+            });
+            pipeQuant = pipelinePool().request(ZIMAGE_SHADER_OUTPUT_DIR, "zimage-attention-i8-quant", {
+                eva::constant_id<4>(p.vDtype)                          // typeV
+            });
             descSet = vai::gVaiDestSetPool(pipe.descSetLayout(0));
+            descQuant = vai::gVaiDestSetPool(pipeQuant.descSetLayout(0));
+        }
+        else
+        {
+            const uint32_t sg = p.coopmat ? device().subgroupSize() : 0;
+            const uint32_t wgSize = p.coopmat ? config_.numSubgroups * sg : 128;
+            rowsPerWg = p.coopmat ? 16 * config_.numSubgroups : wgSize / 4;
+
+            pipe = pipelinePool().request(ZIMAGE_SHADER_OUTPUT_DIR,
+                p.coopmat ? "zimage-attention" : "zimage-attention-scalar", {
+                    eva::constant_id<0>(wgSize),
+                    eva::constant_id<1>(sg),                               // sgSize (coopmat; scalar ignores)
+                    eva::constant_id<2>(Dh),
+                    eva::constant_id<3>(p.keysPerTile),                    // Bc
+                    eva::constant_id<4>(p.vDtype),                         // typeV
+                    eva::constant_id<SPEC_ID_TYPE_O>(config_.oDtype)       // typeO
+                },
+                { .requiredSubgroupSize = sg });                           // 0 = not forced
+            descSet = vai::gVaiDestSetPool(pipe.descSetLayout(0));
+        }
     }
 
+    if (p.int8)
+    {
+        VAI_ASSERT(v.dtype() == vai::Dtype::Fp32 || v.dtype() == vai::Dtype::Fp16);
+        (*this)["qk8"] = vai::Tensor({2 * H * N * Dh / 4}, vai::Dtype::Fp32);   // bytes, as floats
+        (*this)["scales"] = vai::Tensor({2 * H * N}, vai::Dtype::Fp32);
+        (*this)["v16"] = vai::Tensor({N, H * Dh}, vai::Dtype::Fp16);
+    }
     (*this)["out0"] = vai::Tensor({N, H * Dh}, config_.oDtype);
 }
 
 inline void FullAttentionNode::run(eva::CommandBuffer cmdBuff)
 {
     auto outBuf = (*this)["out0"].buffer();
+    const uint32_t N = (*this)["Q"].shape()[1], H = config_.numHeads;
+    const float scaleLog2 = float(1.4426950408889634 / std::sqrt(double(config_.headDim)));
+
+    if (pipeParams.int8)
+    {
+        auto qk8 = (*this)["qk8"].buffer();
+        auto scales = (*this)["scales"].buffer();
+        auto vIn = (*this)["V"].buffer();
+        auto v16 = (*this)["v16"].buffer();
+        descQuant.write({ qk8, scales, (*this)["Q"].buffer(), (*this)["K"].buffer(), vIn, v16 });
+        descSet.write({ outBuf, qk8, v16, scales });
+
+        struct { uint32_t rows; float scaleLog2; } quant = { H * N, scaleLog2 };
+        struct { uint32_t N, H; } attn = { N, H };
+        cmdBuff
+            .bindPipeline(pipeQuant)
+            .bindDescSets({descQuant})
+            .setPushConstants(0, sizeof(quant), &quant)
+            .dispatch(CEIL_DIV(H * N, kQuantRowsPerWg), 3)
+            .barrier(eva::SYNC_SCOPE::COMPUTE_WRITE / qk8 / eva::SYNC_SCOPE::COMPUTE_READ)
+            .barrier(eva::SYNC_SCOPE::COMPUTE_WRITE / scales / eva::SYNC_SCOPE::COMPUTE_READ)
+            .barrier(eva::SYNC_SCOPE::COMPUTE_WRITE / v16 / eva::SYNC_SCOPE::COMPUTE_READ)
+            .bindPipeline(pipe)
+            .bindDescSets({descSet})
+            .setPushConstants(0, sizeof(attn), &attn)
+            .dispatch(CEIL_DIV(N, rowsPerWg), H)
+            .barrier(eva::SYNC_SCOPE::COMPUTE_WRITE / outBuf / eva::SYNC_SCOPE::COMPUTE_READ);
+        return;
+    }
+
     descSet.write({ outBuf, (*this)["Q"].buffer(), (*this)["K"].buffer(), (*this)["V"].buffer() });
 
     struct {
         uint32_t N, H;
         float scaleLog2;
-    } constants = { (*this)["Q"].shape()[1], config_.numHeads,
-                    float(1.4426950408889634 / std::sqrt(double(config_.headDim))) };
+    } constants = { N, H, scaleLog2 };
 
     cmdBuff
         .bindPipeline(pipe)

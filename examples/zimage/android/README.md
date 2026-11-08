@@ -20,6 +20,10 @@ the encoder came in):
 | VAE decode | 4.4 s |
 | Total, from button press to image | about 72 s for a new prompt, 65 s for a new seed |
 
+Since the attention kernel was rewritten (12.6 ms per layer instead of 34 ms;
+see `benchmarks/zimage/README.md`), the steps run faster. On a phone already
+warm from benchmarks they took 7.5 s each, where they had taken 8–12 s warm.
+
 The app samples 8 steps, as diffusers' `ZImagePipeline` example and ComfyUI
 do. It used to sample 9; on the same noise the image is of the same quality,
 and the run is one step (6–9 s) shorter. The totals above are the 9-step
