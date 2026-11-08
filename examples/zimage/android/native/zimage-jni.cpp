@@ -25,6 +25,7 @@
 #include <android/log.h>
 #include <jni.h>
 
+#include <atomic>
 #include <chrono>
 #include <exception>
 #include <filesystem>
@@ -63,6 +64,14 @@ struct Engine
 std::mutex gMutex;
 std::unique_ptr<Engine> gEngine;
 
+// Set by ZImage.cancel() (without the mutex, which generate holds); a
+// generation stops at its next stage, at most one DiT step away.
+std::atomic<bool> gCancel{false};
+struct Cancelled : std::exception
+{
+    const char* what() const noexcept override { return "cancelled"; }
+};
+
 // ZImage.Listener.onProgress(stage, done, total) on the calling thread.
 struct Progress
 {
@@ -75,8 +84,12 @@ struct Progress
     , method(env->GetMethodID(env->GetObjectClass(listener), "onProgress", "(Ljava/lang/String;II)V"))
     {}
 
-    void operator()(const std::string& stage, int done, int total) const
+    // Throws Cancelled once ZImage.cancel() was called, unless the stage is
+    // the last. Only between stages: no GPU work is in flight then.
+    void operator()(const std::string& stage, int done, int total, bool cancellable = true) const
     {
+        if (cancellable && gCancel.load())
+            throw Cancelled();
         __android_log_print(ANDROID_LOG_INFO, kTag, "%s (%d/%d)", stage.c_str(), done, total);
         jstring s = env->NewStringUTF(stage.c_str());
         env->CallVoidMethod(listener, method, s, done, total);
@@ -255,7 +268,7 @@ std::vector<jint> generate(Engine& e, const std::string& prompt, uint64_t seed, 
     std::ostringstream s;
     s.precision(1);
     s << std::fixed << "Decoded in " << msSince(t0) / 1e3 << " s";
-    progress(s.str(), steps + 1, steps + 1);
+    progress(s.str(), steps + 1, steps + 1, /*cancellable*/ false);
 
     std::vector<jint> argb(size_t(imgH) * imgW);
     for (size_t i = 0; i < argb.size(); ++i)
@@ -317,6 +330,7 @@ Java_com_vaistrata_zimage_ZImage_load(JNIEnv* env, jclass, jobject listener)
 {
     std::lock_guard lock(gMutex);
     if (gEngine) return nullptr;
+    gCancel = false;
     try {
         return toJava(env, load(Progress(env, listener)));
     } catch (const std::exception& e) {
@@ -347,6 +361,7 @@ Java_com_vaistrata_zimage_ZImage_generate(JNIEnv* env, jclass, jstring jprompt, 
 {
     std::lock_guard lock(gMutex);
     if (!gEngine || size < 256 || size > 1024 || size % 16 != 0) return nullptr;
+    gCancel = false;
     try {
         const std::string prompt = utf8(env, jprompt);
         const std::vector<jint> argb = generate(*gEngine, prompt, uint64_t(seed), uint32_t(size),
@@ -354,10 +369,20 @@ Java_com_vaistrata_zimage_ZImage_generate(JNIEnv* env, jclass, jstring jprompt, 
         jintArray out = env->NewIntArray(jsize(argb.size()));
         env->SetIntArrayRegion(out, 0, jsize(argb.size()), argb.data());
         return out;
+    } catch (const Cancelled&) {
+        __android_log_print(ANDROID_LOG_INFO, kTag, "generate cancelled");
+        return nullptr;
     } catch (const std::exception& e) {
         __android_log_print(ANDROID_LOG_ERROR, kTag, "generate failed: %s", e.what());
         return nullptr;
     }
+}
+
+// Stops the running generate at its next stage; it then returns null.
+JNIEXPORT void JNICALL
+Java_com_vaistrata_zimage_ZImage_cancel(JNIEnv*, jclass)
+{
+    gCancel = true;
 }
 
 } // extern "C"

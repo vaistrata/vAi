@@ -1,9 +1,21 @@
 # Z-Image on Android
 
-One screen with a prompt, a seed and a Generate button. Tapping the button
-runs all of Z-Image-Turbo on the phone's GPU through vAi: the Qwen3 caption
-encoder, 8 DiT steps, then the VAE decode. The result, 512x512 by default,
-is shown and saved to `Pictures/ZImage`.
+One screen with a prompt, a seed, the image size (512, 768 or 1024 square)
+and a Generate button. Tapping the button runs all of Z-Image-Turbo on the
+phone's GPU through vAi: the Qwen3 caption encoder, 8 DiT steps, then the VAE
+decode. The result is shown and saved to `Pictures/ZImage`.
+
+- While it runs, the bar follows the stages. Below it are the elapsed time
+  and, from the second step on, about how long is left: the pace of the steps
+  after the first (which also uploads the weights), with the decode counted
+  as 0.6 of a step.
+- Generate turns into Cancel. A cancelled run stops at its next stage, which
+  is at most one DiT step away: no GPU work is in flight between stages. A
+  finished decode is never thrown away.
+- Under the image is a strip of the images in `Pictures/ZImage`, newest
+  first. Tapping one shows it. If the app made it, the tap also puts its
+  prompt, seed and size back, from `history.tsv` in the app's files, so
+  Generate makes it again. A long press opens it in the system viewer.
 
 This app was written for the Galaxy S25 Ultra (Adreno 830). The kernels are
 tuned for Adreno, and every forward is split into one submission per node,
@@ -44,8 +56,8 @@ them first (`dropDit`), and the app's resident memory falls from 3.8 GB to
 
 ## Larger images
 
-`generate` takes the image size: a multiple of 16 from 256 to 1024. From adb,
-`--ei size 768` sets it. Past 512, the decode's feature maps do not fit beside
+`generate` takes the image size: a multiple of 16 from 256 to 1024. The
+screen offers 512, 768 and 1024; from adb, `--ei size 768` sets it. Past 512, the decode's feature maps do not fit beside
 the DiT. At 768 the VAE alone peaks at 1.8 GB of device memory, against 1.1 GB
 at 512, and the low-memory killer took the app mid-decode. So the decode runs
 alone: the DiT is dropped before it, and the VAE after it, along with the

@@ -44,6 +44,12 @@ final class ZImage {
     static native int[] generate(String prompt, long seed, int size, Listener listener);
 
     /**
+     * Stops the running generate() at its next stage (at most one DiT step
+     * away); it then returns null. Callable from any thread.
+     */
+    static native void cancel();
+
+    /**
      * Unpacks the APK's shaders (assets/shaders/{vai,zimage}) to where the
      * native side reads them, once per installed version.
      */
