@@ -1,8 +1,11 @@
 # Code owners. One of them must approve a PR that touches these paths once the
 # master branch rule turns on "Require review from Code Owners"; until then
 # they are only requested as reviewers.
-#
-# These files decide what CI checks. A pull_request run uses the files as the
+
+# The core engine: graph, tensors, buffers, pipelines, weight loading
+/vai/engine/                             @Q-Kyu-Queue @jroooot @meta-manifold
+
+# The files below decide what CI checks. A pull_request run uses them as the
 # PR carries them, so a PR that edits them changes its own checks.
 
 # Workflows, and this file
