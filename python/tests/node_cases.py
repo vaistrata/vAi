@@ -1,16 +1,23 @@
-"""Numeric specs for the core nodes (vai/nodes/).
+"""Numeric specs for the core nodes (vai/nodes/) and the models' own nodes
+(models/<model>/nodes/).
 
 A spec names a node, how to build it, the shapes of its inputs and parameters,
-and its math as a reference (node_refs.py, mostly PyTorch). test_node_numerics.py turns
-every spec into the same checks: the output against the reference, a second
-forward giving the identical output, no NaN or Inf, and, for specs that list
-alt_inputs, the same net rerun on new shapes. test_node_completeness.py fails
-when a bound node has no spec.
+and its math as a reference (node_refs.py, mostly PyTorch). The runner draws
+the inputs and parameters once and hands the same arrays to the node and to
+the reference. test_node_numerics.py turns every spec into the same checks:
+the output against the reference, a second forward giving the identical
+output, no NaN or Inf, and, for specs that list alt_inputs, the same net rerun
+on new shapes. test_node_completeness.py fails when a node has no binding or
+a bound node has no spec.
 
-Adding a node: bind it in python/bindings/nodes/<name>.cpp, then add at least
-one spec(...) for it below.
+Adding a node: bind it, then add at least one spec(...) for it below.
+- vai/nodes/<name>.h: python/bindings/nodes/<name>.cpp, re-exported by
+  pyvai.nodes.
+- models/<model>/nodes/<name>.h: python/bindings/models/<model>/nodes/<name>.cpp,
+  bound into the private submodule pyvai._pyvai.model_nodes.<model>.
 """
 
+import types
 from dataclasses import dataclass, field
 from typing import Callable, Dict, Optional, Tuple
 
@@ -19,6 +26,23 @@ import numpy as np
 
 import pyvai
 from pyvai import nodes
+from pyvai._pyvai import model_nodes
+
+# models/<model>/nodes/ as bound: {model: submodule}.
+MODEL_NODES = {k: v for k, v in vars(model_nodes).items() if isinstance(v, types.ModuleType)}
+_MODEL_OF = {
+    cls: model
+    for model, module in MODEL_NODES.items()
+    for cls in vars(module).values()
+    if isinstance(cls, type)
+}
+
+
+def node_name(cls):
+    """A core node by its class name, a model's as '<model>.<class name>'."""
+    model = _MODEL_OF.get(cls)
+    return f"{model}.{cls.__name__}" if model else cls.__name__
+
 
 # (rtol, atol). Pick by what the kernel does, not by what passes.
 EXACT = (0.0, 0.0)  # copies, layout changes, max, argmax, casts
@@ -32,7 +56,7 @@ FP16 = (1e-3, 5e-3)
 
 @dataclass
 class Spec:
-    node: type  # the bound class; its name is what completeness counts
+    node: type  # the bound class; node_name() of it is what completeness counts
     label: str
     make: Callable[[], object]  # builds the node inside the net
     inputs: Dict[str, object]  # slot -> shape (standard normal) or fn(rng) -> array
@@ -46,7 +70,7 @@ class Spec:
 
     @property
     def id(self):
-        return f"{self.node.__name__}-{self.label}"
+        return f"{node_name(self.node)}-{self.label}"
 
 
 SPECS = []
@@ -56,7 +80,7 @@ COVERED = set()
 def spec(node, label, make, inputs, ref, **kwargs):
     s = Spec(node, label, make, inputs, ref, **kwargs)
     SPECS.append(s)
-    COVERED.add(node.__name__)
+    COVERED.add(node_name(node))
     return s
 
 
@@ -436,4 +460,61 @@ spec(
     lambda in0: in0.argmax(axis=-1),
     tol=EXACT,
     out="u32",
+)
+
+
+# ---------------------------------------------------------------------------
+# models/yolox/nodes/
+# ---------------------------------------------------------------------------
+
+yolox = MODEL_NODES["yolox"]
+
+
+def _focus_conv(ci, co, hw, label, alt_hw=None):
+    spec(
+        yolox.FocusConvNode,
+        label,
+        lambda: yolox.FocusConvNode(in_channels=ci, out_channels=co),
+        {"in0": (ci, *hw)},
+        ref.yolox_focus_conv,
+        params={
+            "weight": normal((co, 4 * ci, 3, 3), 1.0 / np.sqrt(36 * ci)),
+            "scale": uniform((co,), 0.5, 1.5),
+            "bias": (co,),
+        },
+        alt_inputs={"in0": (ci, *alt_hw)} if alt_hw else None,
+    )
+
+
+_focus_conv(3, 16, (16, 16), "rgb", alt_hw=(26, 18))
+_focus_conv(3, 12, (22, 30), "odd_tiles")  # 11 x 15 output: no aligned tile
+
+
+def _decode(image_size, num_classes, label):
+    inputs = {}
+    for scale, stride in (("p3", 8), ("p4", 16), ("p5", 32)):
+        g = image_size // stride
+        inputs["regobj_" + scale] = (5, g, g)
+        inputs["cls_" + scale] = (num_classes, g, g)
+    spec(
+        yolox.DecodeNode,
+        label,
+        lambda: yolox.DecodeNode(image_size=image_size, num_classes=num_classes),
+        inputs,
+        lambda **slots: ref.yolox_decode(slots, image_size),
+        tol=TRANS,
+    )
+
+
+_decode(64, 3, "img64")
+_decode(96, 80, "img96_coco")  # odd 3 x 3 P5 grid, COCO's class count
+
+spec(
+    yolox.SPPFNode,
+    "c4",
+    yolox.SPPFNode,
+    {"in0": (4, 13, 13)},
+    ref.yolox_sppf,
+    tol=EXACT,
+    alt_inputs={"in0": (3, 32, 32)},  # rerun at the H * W = 1024 limit
 )

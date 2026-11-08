@@ -77,7 +77,8 @@ set_target_properties(_pyvai PROPERTIES
 )
 
 # Model-local shaders are compiled once under models/ (see models/CMakeLists.txt).
-add_dependencies(_pyvai yolox-shaders)
+# Every model's: the bindings reach model-local nodes, not only the bound models.
+add_dependencies(_pyvai ${VAI_MODEL_SHADER_TARGETS})
 
 ################################################################################
 # Package assembly — pure-Python files

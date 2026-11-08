@@ -88,3 +88,41 @@ def gated_mul(in0, activation="SILU"):
 def nearest_upsample(in0, scale):
     """Replicate every [C, H, W] pixel into a scale x scale block."""
     return _np(F.interpolate(_t(in0)[None], scale_factor=scale, mode="nearest")[0])
+
+
+# ---------------------------------------------------------------------------
+# models/yolox/nodes/
+# ---------------------------------------------------------------------------
+
+
+def yolox_focus_conv(in0, weight, scale, bias):
+    """Megvii's Focus (the four pixel phases of [C, 2H, 2W] stacked top-left,
+    bottom-left, top-right, bottom-right), then the stem's 3x3 conv with
+    out0 = silu(scale * conv + bias)."""
+    x = _t(in0)
+    focus = torch.cat([x[:, 0::2, 0::2], x[:, 1::2, 0::2], x[:, 0::2, 1::2], x[:, 1::2, 1::2]])
+    return conv2d(_np(focus), weight, bias, scale, 1, "SILU")
+
+
+def yolox_sppf(in0):
+    """[C, H, W] -> [4C, H, W]: in0 and three chained 5x5 stride-1 max pools."""
+    stages = [_t(in0)]
+    for _ in range(3):
+        stages.append(F.max_pool2d(stages[-1], 5, 1, 2))
+    return _np(torch.cat(stages))
+
+
+def yolox_decode(slots, image_size):
+    """Megvii's decode_outputs over the P3, P4, P5 heads: one row per cell, P3
+    first and cells row-major, (cx, cy, w, h, obj, class scores)."""
+    rows = []
+    for scale, stride in (("p3", 8), ("p4", 16), ("p5", 32)):
+        regobj, cls = _t(slots["regobj_" + scale]), _t(slots["cls_" + scale])
+        g = image_size // stride
+        pred = torch.cat([regobj, cls]).reshape(regobj.shape[0] + cls.shape[0], g * g).T
+        ys, xs = torch.meshgrid(torch.arange(g), torch.arange(g), indexing="ij")
+        grid = torch.stack([xs, ys], -1).reshape(-1, 2).to(pred.dtype)
+        centers = (pred[:, :2] + grid) * stride
+        sizes = pred[:, 2:4].exp() * stride
+        rows.append(torch.cat([centers, sizes, pred[:, 4:].sigmoid()], 1))
+    return _np(torch.cat(rows))
