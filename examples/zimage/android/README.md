@@ -2,8 +2,8 @@
 
 One screen with a prompt, a seed and a Generate button. Tapping the button
 runs all of Z-Image-Turbo on the phone's GPU through vAi: the Qwen3 caption
-encoder, 8 DiT steps, then the VAE decode. The 512x512 result is shown and
-saved to `Pictures/ZImage`.
+encoder, 8 DiT steps, then the VAE decode. The result, 512x512 by default,
+is shown and saved to `Pictures/ZImage`.
 
 This app was written for the Galaxy S25 Ultra (Adreno 830). The kernels are
 tuned for Adreno, and every forward is split into one submission per node,
@@ -35,6 +35,33 @@ the low-memory killer took the app during the VAE decode. A new prompt
 instead drops the DiT, builds the encoder, encodes and drops it, then reads
 the DiT again. That costs about 5 s and keeps the app at 4.3 GB. A new seed
 for the same prompt reuses both the features and the DiT.
+
+Until now, dropping the DiT freed nothing. The caption features, once fed to
+the DiT, held the device buffer they had been uploaded to, and that buffer
+kept the DiT's whole buffer pool alive. A host-only copy of them now replaces
+them first (`dropDit`), and the app's resident memory falls from 3.8 GB to
+0.3 GB when the DiT goes.
+
+## Larger images
+
+`generate` takes the image size: a multiple of 16 from 256 to 1024. From adb,
+`--ei size 768` sets it. Past 512, the decode's feature maps do not fit beside
+the DiT. At 768 the VAE alone peaks at 1.8 GB of device memory, against 1.1 GB
+at 512, and the low-memory killer took the app mid-decode. So the decode runs
+alone: the DiT is dropped before it, and the VAE after it, along with the
+feature maps its buffer pool keeps. The next image reads both again (about
+4.5 s).
+
+On the same phone, new prompt, from a phone warm from earlier runs:
+
+| Size | DiT tokens | Each step | VAE decode | Total |
+|---|---|---|---|---|
+| 512 | 1056 | 7–8 s | 5.4 s | about 70 s |
+| 768 | 2336 | 12–16 s | 10.3 s | about 2.4 min |
+| 1024 | 4128 | 24–32 s | 17.0 s | about 4.5 min |
+
+During the 1024 steps the phone had about 1.1 GB of memory left, with the
+usual apps in the background; `generate` refuses larger sizes.
 
 The text is NFC-normalized first (`java.text.Normalizer`), as Qwen3's
 tokenizer expects, and cut off at 512 tokens, as the pipeline does. Without

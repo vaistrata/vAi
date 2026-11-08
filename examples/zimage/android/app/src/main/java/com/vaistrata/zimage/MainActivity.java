@@ -35,7 +35,7 @@ import java.util.concurrent.Executors;
 /**
  * One screen: a prompt, a seed, a Generate button, the image and how the run went.
  * {@code adb shell am start -S -n com.vaistrata.zimage/.MainActivity --el seed 42 --es prompt "..."}
- * generates as soon as the weights are loaded. Launched that way it also turns
+ * (and optionally {@code --ei size 768}) generates as soon as the weights are loaded. Launched that way it also turns
  * the screen on and shows over the lock screen, since a stopped activity's
  * process is frozen mid-run (Samsung's FreecessController does it within a minute).
  */
@@ -51,6 +51,7 @@ public final class MainActivity extends Activity {
     private ImageView image;
     private TextView log;
     private PowerManager power;
+    private int size = 512;
 
     @Override
     protected void onCreate(Bundle state) {
@@ -68,6 +69,7 @@ public final class MainActivity extends Activity {
             if (p != null) {
                 prompt.setText(p);
             }
+            size = getIntent().getIntExtra("size", size);
         }
         status.setText("Loading...");
         worker.execute(this::load);
@@ -123,14 +125,15 @@ public final class MainActivity extends Activity {
         generate.setEnabled(false);
         log.setText("");
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        final int n = size;
         worker.execute(() -> {
             long t0 = SystemClock.elapsedRealtime();
-            int[] argb = ZImage.generate(text, s, this::onProgress);
+            int[] argb = ZImage.generate(text, s, n, this::onProgress);
             double seconds = (SystemClock.elapsedRealtime() - t0) / 1e3;
             Bitmap bitmap = null;
             String saved = null;
             if (argb != null) {
-                bitmap = Bitmap.createBitmap(argb, ZImage.IMAGE_SIZE, ZImage.IMAGE_SIZE, Bitmap.Config.ARGB_8888);
+                bitmap = Bitmap.createBitmap(argb, n, n, Bitmap.Config.ARGB_8888);
                 saved = save(bitmap, s);
             }
             final Bitmap result = bitmap;

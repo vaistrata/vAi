@@ -16,8 +16,6 @@ import java.nio.file.Files;
 final class ZImage {
     static { System.loadLibrary("zimage-jni"); }
 
-    static final int IMAGE_SIZE = 512;
-
     interface Listener {
         /** A stage of a load or a generation; done out of total. */
         void onProgress(String stage, int done, int total);
@@ -39,11 +37,11 @@ final class ZImage {
     static native String prompt();
 
     /**
-     * IMAGE_SIZE x IMAGE_SIZE ARGB pixels of this prompt (NFC, see
-     * java.text.Normalizer) from this seed, or null on failure. The prompt is
-     * encoded only when it changed.
+     * size x size ARGB pixels of this prompt (NFC, see java.text.Normalizer)
+     * from this seed, or null on failure; size is a multiple of 16 from 256
+     * to 1024. The prompt is encoded only when it changed.
      */
-    static native int[] generate(String prompt, long seed, Listener listener);
+    static native int[] generate(String prompt, long seed, int size, Listener listener);
 
     /**
      * Unpacks the APK's shaders (assets/shaders/{vai,zimage}) to where the

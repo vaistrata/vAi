@@ -3,7 +3,7 @@
   Task         Z-Image on Android — the native side of the app
                (com.vaistrata.zimage.ZImage): a prompt through the caption
                encoder (Qwen3) and a seeded noise latent -> 8 Turbo steps on
-               the DiT -> VAE decode, all on the GPU, returned as ARGB pixels.
+               the DiT -> VAE decode at 512, 768 or 1024 square, all on the GPU, returned as ARGB pixels.
   Assets       under VAI_DATA_DIR (the app's external files, see
                CMakeLists.txt and README.md):
                zimage/Z-Image-Turbo-q4-split.safetensors     (prepared DiT)
@@ -40,7 +40,10 @@ using namespace vai;
 namespace {
 
 constexpr const char* kTag = "zimage";
-constexpr uint32_t kLatentSize = 64;   // 512x512 images
+constexpr uint32_t kVaeScale = 8;      // image pixels per latent position
+// Past 512x512 the decode runs alone: the DiT goes before it, and the VAE,
+// with the feature maps its buffer pool keeps, after it.
+constexpr uint32_t kKeepNetsUpTo = 512;
 
 // The DiT (3.7 GB) and the text encoder (2.0 GB) are never in memory at
 // once: with both and the VAE, a phone running other apps has the low-memory
@@ -109,6 +112,26 @@ std::unique_ptr<zimage::Model> makeDit(const Engine& e)
     });
 }
 
+// Frees the DiT. The caption features go first: fed to the DiT, they hold
+// the device buffer they were uploaded to, and that buffer keeps the DiT's
+// whole buffer pool alive (weights included), so resetting the DiT alone
+// freed nothing. A host-only copy takes their place.
+void dropDit(Engine& e)
+{
+    if (e.capFeats.numElements() > 0)
+        e.capFeats = Tensor(e.capFeats.shape(), Dtype::Fp32)
+                         .setFloats(static_cast<const float*>(e.capFeats.hostData()));
+    e.dit.reset();
+}
+
+void loadVae(Engine& e)
+{
+    auto t0 = std::chrono::steady_clock::now();
+    e.vae = std::make_unique<zimage::VaeDecoder>(netConfig(e.device));
+    loadWeights<"tongyi">(*e.vae);
+    __android_log_print(ANDROID_LOG_INFO, kTag, "VAE weights in %.0f ms", msSince(t0));
+}
+
 void loadDit(Engine& e, const Progress& progress, int done, int total)
 {
     auto t0 = std::chrono::steady_clock::now();
@@ -151,11 +174,8 @@ std::string load(const Progress& progress)
     }
 
     const int parts = withEncoder ? 1 : 2;
-    auto t0 = std::chrono::steady_clock::now();
     progress("Loading the VAE", 0, parts);
-    engine->vae = std::make_unique<zimage::VaeDecoder>(netConfig(engine->device));
-    loadWeights<"tongyi">(*engine->vae);
-    __android_log_print(ANDROID_LOG_INFO, kTag, "VAE weights in %.0f ms", msSince(t0));
+    loadVae(*engine);
     if (!withEncoder)
         loadDit(*engine, progress, 1, parts);
     progress("Ready", parts, parts);
@@ -167,7 +187,7 @@ std::string load(const Progress& progress)
 // The prompt's caption features, through an encoder that lives for this call.
 void encode(Engine& e, const std::string& prompt, const Progress& progress)
 {
-    e.dit.reset();
+    dropDit(e);
     auto t0 = std::chrono::steady_clock::now();
     progress("Loading the text encoder", 0, 2);
     zimage::TextEncoder encoder(netConfig(e.device));
@@ -185,9 +205,12 @@ void encode(Engine& e, const std::string& prompt, const Progress& progress)
     progress(s.str(), 2, 2);
 }
 
-std::vector<jint> generate(Engine& e, const std::string& prompt, uint64_t seed, const Progress& progress)
+// size x size ARGB pixels; size a multiple of 16 (the DiT's 2x2 patches of
+// the latent).
+std::vector<jint> generate(Engine& e, const std::string& prompt, uint64_t seed, uint32_t size,
+                           const Progress& progress)
 {
-    const uint32_t H = kLatentSize, W = kLatentSize;
+    const uint32_t H = size / kVaeScale, W = size / kVaeScale;
     if (e.tokenizer && (prompt != e.prompt || e.capFeats.numElements() == 0))
         encode(e, prompt, progress);
     if (!e.dit)
@@ -207,12 +230,28 @@ std::vector<jint> generate(Engine& e, const std::string& prompt, uint64_t seed, 
         t0 = std::chrono::steady_clock::now();
     });
 
+    // The decode's feature maps grow with the image (at 768, 128 x 768 x 768
+    // fp32 is 0.3 GB, 1.8 GB of device memory in all) and do not fit beside
+    // the DiT: the low-memory killer took the app mid-decode. The next image
+    // reads both again (~4.5 s).
+    const bool alone = size > kKeepNetsUpTo;
+    if (alone)
+        dropDit(e);
+    if (!e.vae)
+        loadVae(e);
+
     progress("Decoding with the VAE", steps, steps + 1);
     t0 = std::chrono::steady_clock::now();
-    Tensor image;
-    (*e.vae)({{"inLatent", zimage::decoderInput(e.vae->vaeCfg, latent.data(), H, W)}}, {{"outImage", &image}});
-    const uint32_t imgH = image.shape()[1], imgW = image.shape()[2];
-    const std::vector<uint8_t> rgb = zimage::toRgb8(image.getData<float>(), imgH, imgW);
+    std::vector<uint8_t> rgb;
+    uint32_t imgH, imgW;
+    {
+        Tensor image;
+        (*e.vae)({{"inLatent", zimage::decoderInput(e.vae->vaeCfg, latent.data(), H, W)}}, {{"outImage", &image}});
+        imgH = image.shape()[1], imgW = image.shape()[2];
+        rgb = zimage::toRgb8(image.getData<float>(), imgH, imgW);
+    }
+    if (alone)
+        e.vae.reset();
     std::ostringstream s;
     s.precision(1);
     s << std::fixed << "Decoded in " << msSince(t0) / 1e3 << " s";
@@ -300,16 +339,18 @@ Java_com_vaistrata_zimage_ZImage_prompt(JNIEnv* env, jclass)
     return env->NewStringUTF(gEngine ? gEngine->prompt.c_str() : "");
 }
 
-// ARGB pixels of a 512x512 image of this prompt (NFC; ignored without the
-// encoder), or null on failure.
+// ARGB pixels of a size x size image of this prompt (NFC; ignored without
+// the encoder), or null on failure.
 JNIEXPORT jintArray JNICALL
-Java_com_vaistrata_zimage_ZImage_generate(JNIEnv* env, jclass, jstring jprompt, jlong seed, jobject listener)
+Java_com_vaistrata_zimage_ZImage_generate(JNIEnv* env, jclass, jstring jprompt, jlong seed, jint size,
+                                          jobject listener)
 {
     std::lock_guard lock(gMutex);
-    if (!gEngine) return nullptr;
+    if (!gEngine || size < 256 || size > 1024 || size % 16 != 0) return nullptr;
     try {
         const std::string prompt = utf8(env, jprompt);
-        const std::vector<jint> argb = generate(*gEngine, prompt, uint64_t(seed), Progress(env, listener));
+        const std::vector<jint> argb = generate(*gEngine, prompt, uint64_t(seed), uint32_t(size),
+                                                Progress(env, listener));
         jintArray out = env->NewIntArray(jsize(argb.size()));
         env->SetIntArrayRegion(out, 0, jsize(argb.size()), argb.data());
         return out;
