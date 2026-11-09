@@ -14,6 +14,8 @@ foreach(shaderDir ${MODEL_SHADER_DIRS})
     eva_compile_shaders(TARGET ${model}-shaders OUTPUT_DIR ${outDir} SHADERS ${shaders})
 
     list(APPEND definitions ${MODEL}_SHADER_OUTPUT_DIR="${outDir}")
+    list(APPEND targets ${model}-shaders)
 endforeach()
 
 set(VAI_MODEL_SHADER_DEFINITIONS ${definitions} PARENT_SCOPE)
+set(VAI_MODEL_SHADER_TARGETS ${targets} PARENT_SCOPE)
