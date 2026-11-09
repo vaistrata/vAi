@@ -29,6 +29,7 @@ public:
         vai::Dtype oDtype = vai::Dtype::None;   // None: oDefaultDtype
     } config_;
 
+    Add();
     Add(Config config);
     void prepare() override;
     void run(eva::CommandBuffer cmdBuff) override;
@@ -38,7 +39,9 @@ private:
 };
 
 
-inline Add::Add(Config config = Config())
+inline Add::Add() : Add(Config()) {}
+
+inline Add::Add(Config config)
 : config_(config)
 {
     addSlot("out0", NodeSlot::output);

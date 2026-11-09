@@ -56,6 +56,7 @@ public:
         float temperature = 1.0f;
     } config_;
 
+    TopKSampling();
     TopKSampling(Config config);
     void prepare() override;
     void run(eva::CommandBuffer cmdBuff) override;
@@ -130,7 +131,9 @@ inline TopKSampling::PipeParams topkTuning(uint32_t M, uint32_t N, uint32_t k, D
 }
 
 
-inline TopKSampling::TopKSampling(Config config = Config())
+inline TopKSampling::TopKSampling() : TopKSampling(Config()) {}
+
+inline TopKSampling::TopKSampling(Config config)
 : config_(config)
 {
     addSlot("out0", NodeSlot::output);

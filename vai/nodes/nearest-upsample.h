@@ -32,6 +32,7 @@ public:
         vai::Dtype oDtype = vai::Dtype::None;   // None: oDefaultDtype
     } config_;
 
+    NearestUpsample(uint32_t scaleFactor = 2);
     NearestUpsample(uint32_t scaleFactor, Config config);
     void prepare() override;
     void run(eva::CommandBuffer cmdBuff) override;
@@ -41,7 +42,9 @@ private:
 };
 
 
-inline NearestUpsample::NearestUpsample(uint32_t scaleFactor = 2, Config config = Config())
+inline NearestUpsample::NearestUpsample(uint32_t scaleFactor) : NearestUpsample(scaleFactor, Config()) {}
+
+inline NearestUpsample::NearestUpsample(uint32_t scaleFactor, Config config)
 : scale(scaleFactor)
 , config_(config)
 {

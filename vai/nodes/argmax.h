@@ -30,6 +30,7 @@ public:
     struct Config {
     } config_;
 
+    Argmax();
     Argmax(Config config);
     void prepare() override;
     void run(eva::CommandBuffer cmdBuff) override;
@@ -42,7 +43,9 @@ private:
 /////////////////////////////////////////////////////////////////////////////////////////
 // Argmax
 /////////////////////////////////////////////////////////////////////////////////////////
-inline Argmax::Argmax(Config config = Config())
+inline Argmax::Argmax() : Argmax(Config()) {}
+
+inline Argmax::Argmax(Config config)
 : config_(config)
 {
     addSlot("out0", NodeSlot::output);
