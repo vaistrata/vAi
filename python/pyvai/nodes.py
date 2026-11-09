@@ -8,6 +8,7 @@ A new node is bound in bindings/nodes/<node>.cpp, through bindNode() and one
 PYVAI_NODE_BINDING line (bindings/nodes/bind-node.h), and re-exported here
 (the import list and `__all__`; tests/test_nodes.py fails if one is missing).
 """
+
 from ._pyvai import (
     # shape / plumbing
     IdentityNode,
