@@ -1,0 +1,7 @@
+# Not ours to format. clang-format 18+ honours this for direct invocations;
+# the CI job (git clang-format) carries the same list as git pathspecs.
+external/*
+vai/shaders/*
+vai/utils/stb_image.h
+vai/utils/stb_image_write.h
+vai/utils/tiny-json.h

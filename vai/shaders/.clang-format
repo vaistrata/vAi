@@ -1,0 +1,5 @@
+# GLSL lives here, the .h includes under common/ too. clang-format would read
+# them as C++ and mangle layout() blocks; SortIncludes is the one pass
+# DisableFormat alone does not switch off.
+DisableFormat: true
+SortIncludes: Never

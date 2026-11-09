@@ -1,0 +1,63 @@
+---
+# vAi C++ style for clang-format 21.1.8 (the version is pinned in
+# .github/workflows/ci.yml and .pre-commit-config.yaml).
+#
+# LLVM plus the overrides below. Each one follows the documented conventions
+# (docs/ko/index.md, common code conventions) or what most of the tree already
+# does. Agreed in a cross-review with a second model and measured on the tree:
+# a full format changes about 24% of the lines once.
+#
+# The tree predates the formatter, so CI checks only the lines a PR changes
+# (git clang-format). Comments and include order are left alone: node header
+# stamps feed docs/tools/gen-node-docs.py, and include order can matter.
+BasedOnStyle: LLVM
+Language: Cpp
+Standard: Latest
+
+UseTab: Never
+IndentWidth: 4
+ColumnLimit: 120                # 0 joins hand-wrapped statements into long lines
+AccessModifierOffset: -4        # public: in the class column
+MaxEmptyLinesToKeep: 2          # two blank lines separate sections in 138 of 208 files
+SpacesBeforeTrailingComments: 3 # 589 of the trailing comments use three spaces
+
+# Allman everywhere except namespaces (154 of 154 open on the same line), enums
+# (12 of 17 multi-line enums; short ones stay on one line) and lambda bodies
+# (125 of 206 multi-line lambdas open on the same line).
+BreakBeforeBraces: Custom
+BraceWrapping:
+  AfterCaseLabel: true
+  AfterClass: true
+  AfterControlStatement: Always
+  AfterEnum: false
+  AfterExternBlock: true
+  AfterFunction: true
+  AfterNamespace: false
+  AfterObjCDeclaration: true
+  AfterStruct: true
+  AfterUnion: true
+  BeforeCatch: true
+  BeforeElse: true
+  BeforeLambdaBody: false
+  BeforeWhile: false
+  IndentBraces: false
+  SplitEmptyFunction: true
+  SplitEmptyRecord: true
+  SplitEmptyNamespace: true
+
+# One line only for short functions inside a class and for empty bodies, such
+# as a delegating constructor; every other function body is Allman.
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortLambdasOnASingleLine: All
+AllowShortEnumsOnASingleLine: true
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+
+# Keep template <...> on its own line: gen-node-docs.py finds templated node
+# classes such as Pool2d by the class line.
+BreakTemplateDeclarations: Yes
+PointerAlignment: Left
+
+SortIncludes:
+  Enabled: false
+ReflowComments: Never

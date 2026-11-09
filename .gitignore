@@ -3,6 +3,9 @@
 !.gitmodules
 !README.md
 !LICENSE
+!.clang-format
+!.clang-format-ignore
+!.pre-commit-config.yaml
 
 !CMakeLists.txt
 
