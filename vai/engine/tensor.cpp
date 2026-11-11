@@ -2,7 +2,12 @@
 #include "neural-net.h"   // getVaiDevice(), getVaiPool()
 #include <atomic>
 #include <bit>
+#include <cmath>
 #include <algorithm>
+#include <cstdio>
+#include <filesystem>
+#include <stdexcept>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -153,14 +158,87 @@ static void transformParallel(const Src* src, Dst* dst, size_t count, Fn fn)
 }
 
 
+// fp32 -> Q4 (layout at vai::Dtype). Each group's largest magnitude maps to
+// q = 0 (-8 * scale), as ggml's Q4_0 does; the scale is rounded to fp16 first,
+// so q is chosen against the scale the GPU will read.
+static void quantizeQ4(const float* src, void* dst, size_t count)
+{
+    auto words  = static_cast<uint32_t*>(dst);
+    auto scales = reinterpret_cast<uint16_t*>(static_cast<char*>(dst) + count / 2);
+    parallelChunks(count / 32, [=](size_t begin, size_t end) {
+        for (size_t g = begin; g < end; ++g)
+        {
+            const float* x = src + g * 32;
+            // |peak| has its own variable: testing fabs(x[i]) > fabs(peak) makes
+            // NDK r30's clang 21 at -O3 skip a negative peak at x[0].
+            float peak = 0.0f, mag = 0.0f;
+            for (int i = 0; i < 32; ++i)
+            {
+                const float a = std::fabs(x[i]);
+                if (a > mag) { mag = a; peak = x[i]; }
+            }
+
+            const uint16_t scale = floatToHalf(peak / -8.0f);
+            const float d = halfToFloat(scale);
+            const float inv = (d != 0.0f) ? 1.0f / d : 0.0f;
+            scales[g] = scale;
+            for (int w = 0; w < 4; ++w)
+            {
+                uint32_t word = 0;
+                for (int i = 0; i < 8; ++i)
+                {
+                    // In double the product is exact, so q is the same whether or
+                    // not the compiler fuses this into an FMA (clang does on ARM).
+                    const int q = std::clamp(int(std::floor(double(x[w * 8 + i]) * inv + 8.5)), 0, 15);
+                    word |= uint32_t(q) << (4 * i);
+                }
+                words[g * 4 + w] = word;
+            }
+        }
+    });
+}
+
+static void dequantizeQ4(const void* src, float* dst, size_t count)
+{
+    auto words  = static_cast<const uint32_t*>(src);
+    auto scales = reinterpret_cast<const uint16_t*>(static_cast<const char*>(src) + count / 2);
+    parallelChunks(count / 8, [=](size_t begin, size_t end) {
+        for (size_t w = begin; w < end; ++w)
+        {
+            const float d = halfToFloat(scales[w / 4]);
+            for (int i = 0; i < 8; ++i)
+                dst[w * 8 + i] = (float((words[w] >> (4 * i)) & 0xFu) - 8.0f) * d;
+        }
+    });
+}
+
+
 // dtype-tagged element-wise conversion of `count` elements from src to dst.
-// Handles all fp32 / fp16 combinations; same-dtype is a memcpy.
+// Handles all fp32 / fp16 combinations and Q4 both ways; same-dtype is a memcpy.
 void convertDtype(const void* src, Dtype srcDtype,
                   void* dst, Dtype dstDtype, size_t count)
 {
     if (srcDtype == dstDtype)
     {
-        std::memcpy(dst, src, count * bytesPerElement(srcDtype));
+        std::memcpy(dst, src, byteSize(srcDtype, count));
+        return;
+    }
+    if (srcDtype == Dtype::Q4 || dstDtype == Dtype::Q4)
+    {
+        VAI_ASSERT(count % 32 == 0);
+        // Q4 goes through fp32 on the side that is not Q4.
+        const bool f32 = (srcDtype == Dtype::Fp32 || dstDtype == Dtype::Fp32);
+        std::vector<float> wide(f32 ? 0 : count);
+        if (dstDtype == Dtype::Q4)
+        {
+            if (!f32) convertDtype(src, srcDtype, wide.data(), Dtype::Fp32, count);
+            quantizeQ4(f32 ? static_cast<const float*>(src) : wide.data(), dst, count);
+        }
+        else
+        {
+            dequantizeQ4(src, f32 ? static_cast<float*>(dst) : wide.data(), count);
+            if (!f32) convertDtype(wide.data(), Dtype::Fp32, dst, dstDtype, count);
+        }
         return;
     }
     auto sF = static_cast<const float*>(src);
@@ -248,12 +326,35 @@ static void loadInto(const SafetensorRef& ref, size_t byteOffset, size_t srcByte
 }
 
 
+void readStored(const SafetensorRef& ref, void* dst)
+{
+    const std::string storedType = ref.getDataType();
+    VAI_ASSERT(storedType != "BF16");
+    loadInto(ref, 0, ref.byteSize(), storedType, static_cast<char*>(dst), dtypeFromString(storedType));
+}
+
+
 Tensor::Tensor(const SafetensorRef& ref, Dtype targetDtype)
 : data_(std::make_shared<TensorData>(targetDtype==Dtype::None ? dtypeFromString(ref.getDataType()) : targetDtype))
 {
     shape_ = ref.getShape();
 
     const std::string storedType = ref.getDataType();
+
+    // A Q4 file tensor is read as stored; anything else quantizes from fp32.
+    if (storedType == "Q4")
+    {
+        VAI_ASSERT(dtype() == Dtype::Q4 && "a Q4 file tensor loads only as Q4");
+        data_->hostData_.resize(numBytes());
+        loadInto(ref, 0, ref.byteSize(), storedType, data_->hostData_.data(), Dtype::Q4);
+        return;
+    }
+    if (dtype() == Dtype::Q4)
+    {
+        setFloats(static_cast<const float*>(Tensor(ref, Dtype::Fp32).hostData()));
+        return;
+    }
+
     const size_t count    = numElements();
     const size_t srcBytes = ref.byteSize();
     const size_t dstBytes = count * bytesPerElement(dtype());
@@ -269,6 +370,12 @@ Tensor concat(std::initializer_list<SafetensorRef> refs, Dtype targetDtype)
 {
     VAI_ASSERT(refs.size() > 0);
     VAI_ASSERT(targetDtype != Dtype::None);
+
+    if (targetDtype == Dtype::Q4)
+    {
+        Tensor wide = concat(refs, Dtype::Fp32);
+        return Tensor(wide.shape(), Dtype::Q4).setFloats(static_cast<const float*>(wide.hostData()));
+    }
 
     const std::string storedType = refs.begin()->getDataType();
 
@@ -316,6 +423,12 @@ Tensor concat(std::initializer_list<SafetensorRef> refs, Dtype targetDtype)
 Tensor slice(const SafetensorRef& ref, uint32_t begin, uint32_t end, Dtype targetDtype)
 {
     VAI_ASSERT(targetDtype != Dtype::None);
+
+    if (targetDtype == Dtype::Q4)
+    {
+        Tensor wide = slice(ref, begin, end, Dtype::Fp32);
+        return Tensor(wide.shape(), Dtype::Q4).setFloats(static_cast<const float*>(wide.hostData()));
+    }
 
     std::vector<uint32_t> shape = ref.getShape();
     VAI_ASSERT(!shape.empty());
@@ -408,7 +521,8 @@ Tensor sum(const SafetensorRef& a, const SafetensorRef& b, Dtype targetDtype)
         return ta.reshape(shape);
 
     Tensor result(shape, targetDtype);
-    result.data_->hostData_.resize(count * bytesPerElement(targetDtype));
+    VAI_ASSERT(targetDtype != Dtype::Q4 || shape.back() % 32 == 0);
+    result.data_->hostData_.resize(byteSize(targetDtype, count));
     convertDtype(out, Dtype::Fp32, result.data_->hostData_.data(), targetDtype, count);
     return result;
 }
@@ -431,12 +545,13 @@ Tensor& Tensor::setFloats(std::vector<float>&& inData)
 Tensor& Tensor::setFloats(const float* inData)
 {
     VAI_ASSERT(validShape() && baseOffset_ == 0);
+    VAI_ASSERT(data_->dtype_ != Dtype::Q4 || shape_.back() % 32 == 0);   // a Q4 group stays in one row
     const size_t count = numElements();
 
     data_->lastSubmission_ = {nullptr, 0};
     data_->hostUploaded_ = false;
 
-    data_->hostData_.resize(count * bytesPerElement(data_->dtype_));
+    data_->hostData_.resize(byteSize(data_->dtype_, count));
     convertDtype(inData, Dtype::Fp32, data_->hostData_.data(), data_->dtype_, count);
     return *this;
 }
@@ -486,6 +601,60 @@ Tensor& Tensor::downloadToHost()
         data_->hostSyncedAt_ = data_->lastSubmission_;
     }
     return *this;
+}
+
+
+void saveSafetensors(const std::string& path,
+                     const std::vector<std::pair<std::string, const Tensor*>>& tensors)
+{
+    auto dtypeString = [](Dtype dt) -> const char*
+    {
+        switch (dt) {
+            case Dtype::Fp32: return "F32";
+            case Dtype::Fp16: return "F16";
+            case Dtype::Q4:   return "Q4";
+            case Dtype::None: break;
+        }
+        VAI_ASSERT(false && "saveSafetensors: tensor without a dtype");
+        return "";
+    };
+
+    // Header: {"name": {"dtype", "shape", "data_offsets"}, ...}, offsets from
+    // the end of the header, padded with spaces to 8 bytes as the format asks.
+    std::string header = "{";
+    size_t offset = 0;
+    for (const auto& [name, t] : tensors)
+    {
+        VAI_ASSERT(t && t->hasHostData() && t->baseOffset() == 0);
+        const size_t bytes = t->numBytes();
+        header += (header.size() > 1 ? ",\"" : "\"") + name + "\":{\"dtype\":\"" + dtypeString(t->dtype())
+                + "\",\"shape\":[";
+        for (size_t d = 0; d < t->shape().size(); ++d)
+            header += (d ? "," : "") + std::to_string(t->shape()[d]);
+        header += "],\"data_offsets\":[" + std::to_string(offset) + "," + std::to_string(offset + bytes) + "]}";
+        offset += bytes;
+    }
+    header += "}";
+    header.append((8 - header.size() % 8) % 8, ' ');
+
+    const std::string partial = path + ".partial";
+    std::FILE* f = std::fopen(partial.c_str(), "wb");
+    if (!f)
+        throw std::runtime_error("saveSafetensors: cannot create " + partial);
+
+    const uint64_t headerLength = header.size();
+    bool ok = std::fwrite(&headerLength, sizeof(headerLength), 1, f) == 1
+           && std::fwrite(header.data(), 1, header.size(), f) == header.size();
+    for (const auto& [name, t] : tensors)
+        ok = ok && std::fwrite(t->hostData(), 1, t->numBytes(), f) == t->numBytes();
+    ok = (std::fclose(f) == 0) && ok;
+
+    if (!ok)
+    {
+        std::filesystem::remove(partial);
+        throw std::runtime_error("saveSafetensors: failed writing " + partial);
+    }
+    std::filesystem::rename(partial, path);
 }
 
 

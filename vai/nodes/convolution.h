@@ -668,7 +668,7 @@ inline const K1S1CMExactRule* findK1S1CMExactRule(const eva::Device& device, con
     {
         if (rule.vendorId == device.vendorID() &&
             rule.deviceId == device.deviceID() &&
-            rule.coreClusterCount == device.coreClusterCount() &&
+            rule.coreClusterCount == device.computeBlockCount() &&
             rule.weightDtype == workload.wDtype &&
             rule.fusion == workload.fusion &&
             rule.shape.matchShape(workload))
@@ -855,7 +855,7 @@ inline const K1S1ExactRule* findK1S1ExactRule(const eva::Device& device, const W
     {
         if (rule.vendorId == device.vendorID() &&
             rule.deviceId == device.deviceID() &&
-            rule.coreClusterCount == device.coreClusterCount() &&
+            rule.coreClusterCount == device.computeBlockCount() &&
             rule.inputDtype == workload.iDtype &&
             rule.outputDtype == workload.oDtype &&
             rule.weightDtype == workload.wDtype &&
@@ -936,7 +936,7 @@ inline const K3S1AlgorithmRule* findK3S1AlgorithmRule(const eva::Device& device)
     {
         if (rule.vendorId == device.vendorID() &&
             rule.deviceId == device.deviceID() &&
-            rule.coreClusterCount == device.coreClusterCount())
+            rule.coreClusterCount == device.computeBlockCount())
             return &rule;
     }
     return nullptr;
@@ -982,7 +982,7 @@ inline const K3S1ExactAlgorithmRule* findK3S1ExactAlgorithmRule(
     {
         if (rule.vendorId == device.vendorID() &&
             rule.deviceId == device.deviceID() &&
-            rule.coreClusterCount == device.coreClusterCount() &&
+            rule.coreClusterCount == device.computeBlockCount() &&
             rule.weightDtype == workload.wDtype &&
             rule.shape.matchShape(workload))
             return &rule;
@@ -1009,7 +1009,7 @@ inline const K3S1ImplicitRule* findK3S1ImplicitRule(
     {
         if (rule.vendorId == device.vendorID() &&
             rule.deviceId == device.deviceID() &&
-            rule.coreClusterCount == device.coreClusterCount() &&
+            rule.coreClusterCount == device.computeBlockCount() &&
             rule.weightDtype == weightDtype)
             return &rule;
     }
@@ -1193,7 +1193,7 @@ inline const K3S1ImplicitPlanRule* findK3S1ImplicitPlanRule(
     {
         if (rule.vendorId == device.vendorID() &&
             rule.deviceId == device.deviceID() &&
-            rule.coreClusterCount == device.coreClusterCount() &&
+            rule.coreClusterCount == device.computeBlockCount() &&
             rule.weightDtype == workload.wDtype &&
             rule.shape.matchShape(workload))
             return &rule;
@@ -1379,7 +1379,7 @@ inline const K3S1CMImplicitGeometry* findK3S1CMExactImplicitRule(const eva::Devi
     {
         if (rule.vendorId == device.vendorID() &&
             rule.deviceId == device.deviceID() &&
-            rule.coreClusterCount == device.coreClusterCount() &&
+            rule.coreClusterCount == device.computeBlockCount() &&
             rule.weightDtype == workload.wDtype &&
             rule.shape.matchShape(workload))
             return &rule.geometry;
@@ -1520,7 +1520,7 @@ inline const K3S2ExactRule* findK3S2ExactRule(const eva::Device& device, const W
     {
         if (rule.vendorId == device.vendorID() &&
             rule.deviceId == device.deviceID() &&
-            rule.coreClusterCount == device.coreClusterCount() &&
+            rule.coreClusterCount == device.computeBlockCount() &&
             rule.weightDtype == workload.wDtype &&
             rule.shape.matchShape(workload))
             return &rule;
@@ -1706,7 +1706,7 @@ public:
 inline uint32_t selectK1S1SplitK(const eva::Device& device, const Workload& workload)
 {
     const uint32_t vendorId = device.vendorID();
-    const uint32_t coreClusterCount = device.coreClusterCount();
+    const uint32_t coreClusterCount = device.computeBlockCount();
     const uint32_t ci = workload.ci;
     const uint32_t co = workload.co;
     const uint32_t n = workload.spatialSize();
@@ -3343,7 +3343,7 @@ inline void Convolution::validateInputs(const Workload& workload)
 inline K1S1Plan selectK1S1TiledPlan(const eva::Device& device, const Workload& workload)
 {
     const uint32_t vendorId = device.vendorID();
-    const uint32_t coreClusterCount = device.coreClusterCount();
+    const uint32_t coreClusterCount = device.computeBlockCount();
     const uint32_t Ci = workload.ci;
     const uint32_t Co = workload.co;
     const uint32_t spatialSize = workload.spatialSize();
@@ -3411,7 +3411,7 @@ inline K1S1Plan selectK1S1CMPlan(
     const uint32_t vendorId = device.vendorID();
     const AMDArchitecture architecture =
         classifyAMDArchitecture(vendorId, device.deviceID());
-    const uint32_t coreClusterCount = device.coreClusterCount();
+    const uint32_t coreClusterCount = device.computeBlockCount();
     const Dtype acc = selectAccType(device, caps);
     const uint32_t ci = workload.ci;
     const uint32_t co = workload.co;
@@ -3721,7 +3721,7 @@ inline std::optional<ConvPlan> selectK1S1Candidate(
         if (workload.wDtype == Dtype::Fp32 &&
             vendorId == eva::VENDOR_ID::AMD &&
             device.deviceID() == kAMDStrixPointDeviceId &&
-            device.coreClusterCount() == 16u)
+            device.computeBlockCount() == 16u)
             candidate.requiredSubgroupSize = 32u;
 
         if (workload.wDtype == Dtype::Fp16 &&
@@ -3770,7 +3770,7 @@ inline std::optional<K3S1Plan> selectK3S1ImplicitCMPlan(
     candidate.flatSpatial =
         device.vendorID() == eva::VENDOR_ID::AMD &&
         device.deviceID() == kAMDStrixHaloDeviceId &&
-        device.coreClusterCount() == 40u &&
+        device.computeBlockCount() == 40u &&
         (workload.wo % 8u) == 0u &&
         (workload.spatialSize() % candidate.wgN) == 0u;
     return candidate;
@@ -3813,7 +3813,7 @@ inline std::optional<K3S1Plan> selectK3S1WinogradPlan(
         if (vendorId == eva::VENDOR_ID::AMD)
         {
             if (device.deviceID() == kAMDStrixHaloDeviceId &&
-                device.coreClusterCount() == 40u &&
+                device.computeBlockCount() == 40u &&
                 co > 64u && numTiles >= 25u)
             {
                 selectedPlan.wgSize = 128u;
@@ -3834,7 +3834,7 @@ inline std::optional<K3S1Plan> selectK3S1WinogradPlan(
             if (co <= 64u)
             {
                 if (device.deviceID() == kAMDStrixHaloDeviceId &&
-                    device.coreClusterCount() == 40u)
+                    device.computeBlockCount() == 40u)
                 {
                     selectedPlan.wgM = co <= 32u ? co : 64u;
                     selectedPlan.wgN = 32u;
@@ -3902,7 +3902,7 @@ inline std::optional<K3S1Plan> selectK3S1WinogradPlan(
         selectedPlan.outputStoreMode =
             device.vendorID() == eva::VENDOR_ID::AMD &&
             device.deviceID() == kAMDStrixHaloDeviceId &&
-            device.coreClusterCount() == 40u &&
+            device.computeBlockCount() == 40u &&
             (ho % 4u) == 0u && (wo % 4u) == 0u;
         return selectedPlan;
     }
@@ -4019,7 +4019,7 @@ inline std::optional<K3S1Plan> selectK3S1WinogradPlan(
             selectedPlan.sgSize = 32u;
         }
 
-        if (device.deviceID() == kAMDStrixHaloDeviceId && device.coreClusterCount() == 40u &&
+        if (device.deviceID() == kAMDStrixHaloDeviceId && device.computeBlockCount() == 40u &&
             ci == 256u && co == 256u && ho == 80u && wo == 80u)
         {
             selectedPlan.wgSize = 256u;
@@ -4181,7 +4181,7 @@ inline std::optional<K3S2Plan> selectK3S2DirectPlan(
             }
             else if (Ci >= 128u &&
                      CEIL_DIV(N, 64u) * CEIL_DIV(Co, 64u) <
-                         scaleWorkSupplyThreshold(60u, device.coreClusterCount()))
+                         scaleWorkSupplyThreshold(60u, device.computeBlockCount()))
             {
                 selectedPlan.splitK = Ci >= 512u ? 8u : 4u;
             }
@@ -4196,7 +4196,7 @@ inline std::optional<K3S2Plan> selectK3S2DirectPlan(
                 CEIL_DIV(N, 64u) * CEIL_DIV(Co, 128u);
             if (Ci >= 128u &&
                 unsplitWorkgroups < scaleWorkSupplyThreshold(
-                    splitWorkgroupThreshold, device.coreClusterCount()))
+                    splitWorkgroupThreshold, device.computeBlockCount()))
                 selectedPlan.splitK = Ci >= 512u ? 8u : 4u;
 
             selectedPlan.wgSize = 256u;
@@ -4309,11 +4309,11 @@ inline std::optional<K3S2Plan> selectK3S2CMPlan(
         const uint32_t unsplitWaves =
             unsplitWorkgroups * (candidate.wgSize / 32u);
         if (unsplitWaves < scaleWorkSupplyThreshold(
-                512u, device.coreClusterCount()) &&
+                512u, device.computeBlockCount()) &&
             reductionTiles >= 144u && (Co % 128u) == 0u)
         {
             const uint32_t targetWaves =
-                scaleWorkSupplyThreshold(1024u, device.coreClusterCount());
+                scaleWorkSupplyThreshold(1024u, device.computeBlockCount());
             const uint32_t splitBaseWorkgroups =
                 CEIL_DIV(N, 64u) * (Co / 128u);
             uint32_t selectedSplitK = 1u;
@@ -4368,7 +4368,7 @@ inline std::optional<K3S2Plan> selectK3S2CMPlan(
     const uint32_t unsplitWorkgroups =
         CEIL_DIV(N, candidate.wgN) * (Co / candidate.wgM);
     const uint32_t targetWorkgroups =
-        scaleWorkSupplyThreshold(256u, device.coreClusterCount());
+        scaleWorkSupplyThreshold(256u, device.computeBlockCount());
     if (architecture == AMDArchitecture::RDNA4)
     {
         for (uint32_t splitK : {1u, 3u, 9u})
@@ -4481,7 +4481,7 @@ inline std::optional<ConvPlan> selectK3S2Candidate(
     if (!selectedCM && workload.wDtype == Dtype::Fp32 &&
         device.vendorID() == eva::VENDOR_ID::AMD &&
         device.deviceID() == kAMDStrixPointDeviceId &&
-        device.coreClusterCount() == 16u &&
+        device.computeBlockCount() == 16u &&
         subgroupSizeInRange(device, 32u))
         candidate.requiredSubgroupSize = 32u;
     return candidate;
@@ -4558,7 +4558,7 @@ inline ConvPlan selectGeneralFallbackPlan(
             workload.wDtype == Dtype::Fp32 &&
             device.vendorID() == eva::VENDOR_ID::AMD &&
             device.deviceID() == kAMDStrixPointDeviceId &&
-            device.coreClusterCount() == 16u)
+            device.computeBlockCount() == 16u)
         {
             fallback.implicit.structuredInputLoad = true;
             fallback.implicit.alignM =

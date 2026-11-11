@@ -41,8 +41,11 @@ class Tokenizer
 {
 public:
     // Throws if the file is missing, malformed, or uses a construct outside the
-    // supported subset.
-    explicit Tokenizer(const std::string& tokenizerJsonPath);
+    // supported subset. Unicode NFC is one: vAi does not compose. inputIsNfc
+    // says the caller hands encode() text that is NFC already (normalized with
+    // java.text.Normalizer or ICU, or ASCII), so an NFC normalizer is taken as
+    // done rather than refused (Qwen2 / Qwen3).
+    explicit Tokenizer(const std::string& tokenizerJsonPath, bool inputIsNfc = false);
     ~Tokenizer();
     Tokenizer(Tokenizer&&) noexcept;
     Tokenizer& operator=(Tokenizer&&) noexcept;
