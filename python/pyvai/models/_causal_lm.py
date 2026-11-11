@@ -5,6 +5,7 @@ iter_tokens() yields token ids as they are sampled, stream() the same as text
 deltas, and generate() the whole completion. One generation at a time per
 model: two interleaved generators would share one KV cache.
 """
+
 from __future__ import annotations
 
 import codecs
@@ -25,8 +26,8 @@ class _CausalLM:
     _bos_piece: str | None = None
     _eos_pieces: tuple[str, ...] = ()
 
-    def __init__(self, model):
-        self.model = model
+    def __init__(self, net):
+        self.net = net
         self.tokenizer: Tokenizer | None = None
         self._weights_loaded = False
 
@@ -34,7 +35,7 @@ class _CausalLM:
 
     def load_weights(self, path: str | Path):
         """Load the checkpoint folder at `path` (every *.safetensors in it)."""
-        self.model.load_weights(str(path))
+        self.net.load_weights(str(path))
         self._weights_loaded = True
         return self
 
@@ -43,25 +44,17 @@ class _CausalLM:
         self.tokenizer = Tokenizer(str(tokenizer_json))
         return self
 
-    def set_profile_tags(self):
-        """Turn on per-node GPU profiling."""
-        self.model.set_profile_tags()
-        return self
-
-    def print_profile(self) -> None:
-        self.model.print_profile()
-
     # -- context state -------------------------------------------------------
 
     @property
     def tokens_so_far(self) -> int:
         """Tokens the KV cache currently holds."""
-        return self.model.tokens_so_far
+        return self.net.tokens_so_far
 
     @property
     def context_budget(self) -> int:
         """The KV-cache depth (the model's max_runtime_context)."""
-        return self.model.max_runtime_context
+        return self.net.max_runtime_context
 
     @property
     def context_left(self) -> int:
@@ -70,7 +63,7 @@ class _CausalLM:
 
     def reset_cache(self) -> None:
         """Rewind the KV cache to an empty context."""
-        self.model.reset_cache()
+        self.net.reset_cache()
 
     # -- internals -----------------------------------------------------------
 
@@ -90,7 +83,7 @@ class _CausalLM:
         ids = list(self.tokenizer.encode(text))
         if add_bos and self._bos_piece is not None:
             bos = self.tokenizer.piece_to_id(self._bos_piece)
-            if bos != -1 and ids[:1] != [bos]:   # never double a BOS the text spelled out
+            if bos != -1 and ids[:1] != [bos]:  # never double a BOS the text spelled out
                 ids.insert(0, bos)
         return ids
 
@@ -100,21 +93,27 @@ class _CausalLM:
     def _prefill(self, ids: list[int], image: Tensor | None) -> Tensor:
         if image is not None:
             raise TypeError(f"{type(self).__name__} takes no image")
-        return self.model.prefill(Tensor.from_u32(ids))
+        return self.net.prefill(Tensor.from_u32(ids))
 
     def _prefill_extra_tokens(self, image: Tensor | None) -> int:
         return 0
 
-    def _iter_ids(self, ids: list[int], max_new_tokens: int | None,
-                  stop_ids: Iterable[int] | None, *,
-                  reset_cache: bool, image: Tensor | None = None) -> Iterator[int]:
+    def _iter_ids(
+        self,
+        ids: list[int],
+        max_new_tokens: int | None,
+        stop_ids: Iterable[int] | None,
+        *,
+        reset_cache: bool,
+        image: Tensor | None = None,
+    ) -> Iterator[int]:
         """The decode loop over an encoded prompt; see iter_tokens()."""
         if not ids:
             raise ValueError(f"{type(self).__name__}: the prompt encodes to no tokens")
         stop = set(stop_ids) if stop_ids is not None else self._piece_ids(self._eos_pieces)
 
         if reset_cache:
-            self.model.reset_cache()
+            self.net.reset_cache()
         # The core does not check the budget: refuse a prompt that overflows it,
         # and stop decoding when the cache is full.
         budget = self.context_budget
@@ -123,9 +122,10 @@ class _CausalLM:
             raise ContextFullError(
                 f"{type(self).__name__}: the prompt is {prompt_len} tokens on top of "
                 f"{self.tokens_so_far} cached, over the KV-cache budget of {budget} "
-                "(max_runtime_context)")
+                "(max_runtime_context)"
+            )
 
-        token = self._prefill(ids, image)   # the model also samples the first token
+        token = self._prefill(ids, image)  # the model also samples the first token
         nxt = int(token.to_u32()[0])
         produced = 0
         while (max_new_tokens is None or produced < max_new_tokens) and nxt not in stop:
@@ -133,15 +133,20 @@ class _CausalLM:
             produced += 1
             if produced == max_new_tokens or self.tokens_so_far + 1 > budget:
                 return
-            token = self.model.decode(token)    # the same Tensor, advanced in place
+            token = self.net.decode(token)  # the same Tensor, advanced in place
             nxt = int(token.to_u32()[0])
 
     # -- completion ----------------------------------------------------------
 
-    def iter_tokens(self, prompt: str, max_new_tokens: int | None = 128,
-                    stop_ids: Iterable[int] | None = None, *,
-                    reset_cache: bool = True,
-                    add_bos: bool | None = None) -> Iterator[int]:
+    def iter_tokens(
+        self,
+        prompt: str,
+        max_new_tokens: int | None = 128,
+        stop_ids: Iterable[int] | None = None,
+        *,
+        reset_cache: bool = True,
+        add_bos: bool | None = None,
+    ) -> Iterator[int]:
         """Prefill `prompt`, then yield sampled ids until `max_new_tokens`
         (None: no cap; 0 still prefills), a `stop_ids` token (default: the
         model's end-of-sequence pieces; neither yielded nor cached) or a full
@@ -152,28 +157,43 @@ class _CausalLM:
         self._require_ready("iter_tokens")
         if add_bos is None:
             add_bos = reset_cache
-        yield from self._iter_ids(self._encode(prompt, add_bos), max_new_tokens, stop_ids,
-                                  reset_cache=reset_cache)
+        yield from self._iter_ids(
+            self._encode(prompt, add_bos), max_new_tokens, stop_ids, reset_cache=reset_cache
+        )
 
-    def stream(self, prompt: str, max_new_tokens: int | None = 128,
-               stop_ids: Iterable[int] | None = None, *,
-               reset_cache: bool = True,
-               add_bos: bool | None = None) -> Iterator[str]:
+    def stream(
+        self,
+        prompt: str,
+        max_new_tokens: int | None = 128,
+        stop_ids: Iterable[int] | None = None,
+        *,
+        reset_cache: bool = True,
+        add_bos: bool | None = None,
+    ) -> Iterator[str]:
         """The completion as text deltas, never the prompt. Same arguments as
         iter_tokens()."""
         tok = self._require_ready("stream")
         yield from _decode_stream(
-            tok, self.iter_tokens(prompt, max_new_tokens, stop_ids,
-                                  reset_cache=reset_cache, add_bos=add_bos))
+            tok,
+            self.iter_tokens(
+                prompt, max_new_tokens, stop_ids, reset_cache=reset_cache, add_bos=add_bos
+            ),
+        )
 
-    def generate(self, prompt: str, max_new_tokens: int | None = 128,
-                 stop_ids: Iterable[int] | None = None, *,
-                 reset_cache: bool = True,
-                 add_bos: bool | None = None) -> str:
+    def generate(
+        self,
+        prompt: str,
+        max_new_tokens: int | None = 128,
+        stop_ids: Iterable[int] | None = None,
+        *,
+        reset_cache: bool = True,
+        add_bos: bool | None = None,
+    ) -> str:
         """The completion of `prompt` (the new text only). Same arguments as
         iter_tokens()."""
-        return "".join(self.stream(prompt, max_new_tokens, stop_ids,
-                                   reset_cache=reset_cache, add_bos=add_bos))
+        return "".join(
+            self.stream(prompt, max_new_tokens, stop_ids, reset_cache=reset_cache, add_bos=add_bos)
+        )
 
 
 def _decode_stream(tokenizer: Tokenizer, ids: Iterable[int]) -> Iterator[str]:

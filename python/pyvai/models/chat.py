@@ -2,10 +2,11 @@
 
 A `ChatSession` keeps the conversation in the model's KV cache: each turn
 prefills only the text written since the last one, and the reply is sampled
-on top, as in the C++ chat demos (examples/llama3/chat.cpp). The template is
+on top, as in the C++ chat demos (examples/chat-llama3/main.cpp). The template is
 plain data (`ChatTemplate`) spelled out per model, because vAi does not run
 the Jinja `chat_template` a checkpoint declares.
 """
+
 from __future__ import annotations
 
 from collections.abc import Iterator
@@ -24,6 +25,7 @@ class ChatTemplate:
     `eog_pieces` end an assistant turn: the session stops on any of them
     without feeding it back, and closes the turn with `end_of_turn` when the
     next user message arrives."""
+
     bos: str
     user_header: str
     assistant_header: str
@@ -40,8 +42,7 @@ class ChatSession:
     cache while in use: run no completions on that model between turns, and
     keep one live session per model."""
 
-    def __init__(self, lm: _CausalLM, template: ChatTemplate,
-                 max_new_tokens: int | None = None):
+    def __init__(self, lm: _CausalLM, template: ChatTemplate, max_new_tokens: int | None = None):
         tok = lm._require_ready("chat")
         self._lm = lm
         self._template = template
@@ -49,8 +50,10 @@ class ChatSession:
         self._eog = lm._piece_ids(template.eog_pieces)
         missing = [p for p in template.eog_pieces if tok.piece_to_id(p) == -1]
         if missing:
-            raise RuntimeError(f"ChatSession: the tokenizer has no piece {missing} — "
-                               "wrong tokenizer.json for this template?")
+            raise RuntimeError(
+                f"ChatSession: the tokenizer has no piece {missing} — "
+                "wrong tokenizer.json for this template?"
+            )
         self.messages: list[dict[str, str]] = []
         self._started = False
 
@@ -74,8 +77,9 @@ class ChatSession:
         afterwards the close of the previous reply (its end-of-turn token was
         never fed back), then the user turn and the open assistant header."""
         t = self._template
-        return ((t.end_of_turn if self._started else t.bos)
-                + t.user(user_message) + t.assistant_header)
+        return (
+            (t.end_of_turn if self._started else t.bos) + t.user(user_message) + t.assistant_header
+        )
 
     def _take_images(self, user_message: str):
         """(text, images): the message as the model reads it and what its
@@ -89,22 +93,30 @@ class ChatSession:
         ContextFullError if the turn does not fit; a turn that fails before it
         reaches the cache leaves the session untouched."""
         tok = self._lm.tokenizer
-        text, image = self._take_images(user_message)   # raises before the cache is touched
+        text, image = self._take_images(user_message)  # raises before the cache is touched
         if not self._started:
-            self._lm.reset_cache()          # a fresh conversation starts from an empty cache
+            self._lm.reset_cache()  # a fresh conversation starts from an empty cache
         ids = self._lm._encode(self._delta(text), add_bos=False)
         n = len(ids) + self._lm._prefill_extra_tokens(image)
         if n > self.context_left:
             raise ContextFullError(
                 f"ChatSession: this turn is {n} tokens but only {self.context_left} "
-                f"of {self._lm.context_budget} fit — the conversation is full")
+                f"of {self._lm.context_budget} fit — the conversation is full"
+            )
         if max_new_tokens is None:
             max_new_tokens = self.max_new_tokens
         reply: list[str] = []
         cached = self._lm.tokens_so_far
         try:
-            yield from _collect(reply, _decode_stream(tok, self._lm._iter_ids(
-                ids, max_new_tokens, self._eog, reset_cache=False, image=image)))
+            yield from _collect(
+                reply,
+                _decode_stream(
+                    tok,
+                    self._lm._iter_ids(
+                        ids, max_new_tokens, self._eog, reset_cache=False, image=image
+                    ),
+                ),
+            )
         finally:
             # Recorded once the turn reached the cache, even if the consumer stops
             # reading early: the next turn closes what was produced. A prefill

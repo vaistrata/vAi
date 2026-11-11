@@ -34,7 +34,7 @@ float16 = Dtype.F16
 
 
 # The package version's single source; pyproject.toml reads it by regex.
-__version__: str = "v0.0.0"
+__version__: str = "0.1.0"
 __all__ = [
     "init_vai_engine",
     "get_vai_device",

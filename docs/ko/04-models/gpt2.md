@@ -7,9 +7,11 @@ GPT-2(Radford et al., 2019)는 OpenAI에서 개발한 디코더 전용 트랜스
 ## 설정
 
 ```cpp
+namespace gpt2 = model::production::gpt2;
+
 auto modelCfg = gpt2::ModelConfig::_124M();
 
-gpt2::Model model({
+gpt2::Net net({
     .device       = device,
     .defaultDtype = Dtype::Fp16,
     .ioDtypeHint  = Dtype::Fp32,
@@ -18,7 +20,7 @@ gpt2::Model model({
 
 ### NeuralNetConfig
 
-GPT-2는 기본값을 그대로 쓰되 각 `LayerNorm`만 `wDtype = fp32`로 강제합니다.
+GPT-2는 기본값을 그대로 쓰고, 로더가 각 `LayerNorm`의 계수만 fp32로 읽습니다.
 세부사항은 [신경망](../03-usage/neural-net.md) 참조.
 
 ### ModelConfig
@@ -74,12 +76,12 @@ input         - "residual"/mhAttn         - "residual"/ffn;
 Q, K, V를 `{D, 3D}` 투영 하나로 계산한 뒤 헤드 축에서 세 조각으로 잘라냅니다.
 
 ```cpp
-toQKV - splitHeads - perQKV - sliceQ - "Q"/attn - mergeOut - toOut;
+projQKV - splitHeads - perQKV - sliceQ - "Q"/attn - mergeOut - projOut;
                      perQKV - sliceK - "K"/attn;
                      perQKV - sliceV - "V"/attn;
 ```
 
-`toOut`이 `acceptResidual = true`라 블록의 잔차를 `residual`로 받아 투영 결과에 더합니다.
+`projOut`이 `acceptResidual = true`라 블록의 잔차를 `residual`로 받아 투영 결과에 더합니다.
 
 #### FeedForward
 
@@ -105,25 +107,27 @@ fc1 - fc2;   // 768 -> 3072 -> 768
 
 ## 체크포인트
 
-체크포인트는 사이즈별 폴더(`ModelConfig::variant`)에, 토크나이저는 그 위에 둡니다.
+체크포인트는 `data/ckpts/gpt2/openai/` 아래 사이즈별 폴더(`ModelConfig::variant`)에, 토크나이저는 `data/tokenizers/gpt2/`에 둡니다.
 `tokenizer.json`은 네 크기가 함께 씁니다.
 
 ```
-data/gpt2/
-├── tokenizer.json
-├── 124M/
-│   └── model.safetensors
-├── 355M/
-│   └── model.safetensors
-└── ...
+data/
+├── ckpts/gpt2/openai/
+│   ├── 124M/
+│   │   └── model.safetensors
+│   ├── 355M/
+│   │   └── model.safetensors
+│   └── ...
+└── tokenizers/gpt2/
+    └── tokenizer.json
 ```
 
 해당 HuggingFace 저장소에서 받아 별도 변환 없이 그대로 씁니다. 가중치 라이선스는 MIT입니다.
 
 ```bash
-mkdir -p data/gpt2/124M && cd data/gpt2
-curl -LO https://huggingface.co/openai-community/gpt2/resolve/main/tokenizer.json
-curl -L -o 124M/model.safetensors \
+mkdir -p data/ckpts/gpt2/openai/124M data/tokenizers/gpt2
+curl -L -o data/tokenizers/gpt2/tokenizer.json https://huggingface.co/openai-community/gpt2/resolve/main/tokenizer.json
+curl -L -o data/ckpts/gpt2/openai/124M/model.safetensors \
   https://huggingface.co/openai-community/gpt2/resolve/main/model.safetensors
 ```
 
@@ -131,12 +135,12 @@ HuggingFace 저장소의 **Files and versions** 탭에서 `model.safetensors`와
 
 ### 가중치 로딩
 
-체크포인트를 그래프 슬롯에 매핑하는 코드는 [`models/gpt2/openai-weights.h`](../../../models/gpt2/openai-weights.h)에 있습니다.
-실행하는 쪽은 한 줄이면 됩니다. 경로는 특수화가 조립하므로(`VAI_DATA_DIR "/gpt2/" + modelCfg.variant`)
+체크포인트를 그래프 슬롯에 매핑하는 코드는 [`models/production/gpt2/openai-weights.h`](../../../models/production/gpt2/openai-weights.h)에 있습니다.
+실행하는 쪽은 한 줄이면 됩니다. 경로는 특수화가 조립하므로(`VAI_DATA_DIR "/ckpts/gpt2/openai/" + modelCfg.variant`)
 사이즈만 정하면 됩니다. 배포명 태그의 원리는 [커스텀 모델 작성의 `배포명-weights.h`](../05-contributing-models.md#배포명-weightsh) 참조.
 
 ```cpp
-loadWeights<"openai">(model);
+loadWeights<"openai">(net);
 ```
 
 ## 실행
@@ -144,24 +148,24 @@ loadWeights<"openai">(model);
 ### 폴더 구조
 
 ```
-models/gpt2/
-├── model.h                       모델 정의 및 NodeGroup 정의
-└── openai-weights.h              OpenAI(HuggingFace `openai-community/*`) 체크포인트 매핑
-
-examples/gpt2/
+models/production/gpt2/
+├── net.h                         모델 정의 및 NodeGroup 정의
+├── openai-weights.h              OpenAI(HuggingFace `openai-community/*`) 체크포인트 매핑
 ├── demo.cpp                      demo-gpt2: 한 프롬프트 완성 + 시간 측정
 └── CMakeLists.txt
 
-data/gpt2/
-├── tokenizer.json
-└── <variant>/                    ModelConfig::variant: 124M, 355M, 774M, 1.5B
-    └── model.safetensors
+data/
+├── ckpts/gpt2/openai/
+│   └── <variant>/                    ModelConfig::variant: 124M, 355M, 774M, 1.5B
+│       └── model.safetensors
+└── tokenizers/gpt2/
+    └── tokenizer.json
 ```
 
 ### 빌드 및 실행
 
 ```bash
-cmake -B build -DVAI_BUILD_EXAMPLES=ON
+cmake -B build
 cmake --build build --config RelWithDebInfo
 
 # Run

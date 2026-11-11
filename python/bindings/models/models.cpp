@@ -1,8 +1,5 @@
 #include "python/bindings/module.h"
-#include "python/bindings/models/models.h"
-#include "python/bindings/nodes/bind-node.h"
-#include <set>
-#include <string>
+#include "models.h"
 
 
 namespace pyvai {
@@ -10,6 +7,7 @@ namespace pyvai {
 void bindModels(nb::module_& m)
 {
     bindModelConfigs(m);   // the families' configs are built from these
+    bindMNIST(m);
     bindGPT2(m);
     bindLlama3(m);
     bindGemma3(m);
@@ -18,19 +16,11 @@ void bindModels(nb::module_& m)
     bindPi05(m);
     bindYOLOX(m);
 
-    // A model's own nodes (models/<model>/nodes/), one submodule per model that
-    // registers any (PYVAI_MODEL_NODE_BINDING). Private: python/tests checks
-    // them as it checks the core ones.
-    nb::module_ nodes = m.def_submodule("model_nodes", "Nodes of models/<model>/nodes/, one submodule per model.");
-    std::set<std::string> modelNames;
-    for (const NodeBinding& b : nodeBindings())
-        if (!b.modelName.empty())
-            modelNames.insert(b.modelName);
-    for (const std::string& modelName : modelNames)
-    {
-        nb::module_ sub = nodes.def_submodule(modelName.c_str(), ("models/" + modelName + "/nodes/").c_str());
-        bindRegisteredNodes(sub, modelName);
-    }
+    // Private: python/tests checks these nodes as it checks the core ones.
+    nb::module_ nodes =
+        m.def_submodule("model_nodes", "Nodes of models/<impl>/<model>/nodes/, one submodule per model.");
+    nb::module_ yoloxNodes = nodes.def_submodule("yolox", "models/experimental/yolox/nodes/");
+    bindYOLOXNodes(yoloxNodes);
 }
 
 }   // namespace pyvai

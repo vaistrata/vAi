@@ -2,7 +2,7 @@
  General FP16 cooperative-matrix implicit-GEMM convolution.
  A/B operands are FP16. typeAcc selects FP16 (0) or FP32 (1) accumulation.
  Bindings: O=0, I=1, W=2, BIAS=3, SCALE=4, RESIDUAL=5.
- Dispatch: x/y are plan-selected pc.n/pc.co tiles.
+ Dispatch: x/y are plan-selected pc.n/pc.co tiles, z=pc.batch images.
  Push constants: PushConstants.
 =============================================================================*/
 #version 460
@@ -23,6 +23,7 @@ layout(constant_id = 3) const uint panelK = 32u;
 layout(constant_id = 4) const uint sgM = 16u; // M tile dimension computed by each subgroup.
 layout(constant_id = 5) const uint sgN = 16u; // N tile dimension computed by each subgroup.
 layout(constant_id = 6) const bool shortcut = false;
+layout(constant_id = 7) const uint residualOrder = 0u;  // 0: after the epilogue, 1: before it
 layout(constant_id = SPEC_ID_TYPE_CI) const uint CI_SPEC = 0u;
 layout(constant_id = SPEC_ID_TYPE_CO) const uint CO_SPEC = 0u;
 layout(constant_id = SPEC_ID_TYPE_HI) const uint HI_SPEC = 0u;
@@ -51,7 +52,10 @@ layout(set = 0, binding = 5) restrict readonly buffer RES_BUF_F16 { float16_t bu
 layout(push_constant) uniform PushConstants {
     uint hi; uint wi; uint ho; uint wo; uint ci; uint co;
     uint n; uint splitCount; uint kernel; uint stride;
+    uint batch;             // images, stacked on the dispatch z axis
 } pc;
+
+#include "common/conv_batch.h"
 
 const uint tile = 16u;
 const uint subgroupSize = 32u;
@@ -69,15 +73,19 @@ shared float16_t Bs[panelK * wgN];
 #define acc16 coopmat<float16_t, gl_ScopeSubgroup, tile, tile, gl_MatrixUseAccumulator>
 #define acc32 coopmat<float, gl_ScopeSubgroup, tile, tile, gl_MatrixUseAccumulator>
 
-float readI(uint index) { return typeI == DTYPE_F32 ? bufferI_f32[index] : float(bufferI_f16[index]); }
+// The workgroup's image within I, and within O and the residual.
+uint imageInputBase = 0u;
+uint imageOutputBase = 0u;
+
+float readI(uint index) { index += imageInputBase; return typeI == DTYPE_F32 ? bufferI_f32[index] : float(bufferI_f16[index]); }
 float readBias(uint c)
 {
     if (hasBias == 0u) return 0.0;
     return typeP == DTYPE_F32 ? bufferBias_f32[c] : float(bufferBias_f16[c]);
 }
 float readScale(uint c) { return typeP == DTYPE_F32 ? bufferScale_f32[c] : float(bufferScale_f16[c]); }
-float readResidual(uint index) { return typeI == DTYPE_F32 ? bufferRes_f32[index] : float(bufferRes_f16[index]); }
-void writeO(uint index, float value) { if (typeO == DTYPE_F32) bufferO_f32[index] = value; else bufferO_f16[index] = float16_t(value); }
+float readResidual(uint index) { index += imageOutputBase; return typeI == DTYPE_F32 ? bufferRes_f32[index] : float(bufferRes_f16[index]); }
+void writeO(uint index, float value) { index += imageOutputBase; if (typeO == DTYPE_F32) bufferO_f32[index] = value; else bufferO_f16[index] = float16_t(value); }
 
 float readConvInput(uint k, uint n, uint Hi, uint Wi, uint Wo, uint Ci)
 {
@@ -98,8 +106,9 @@ float readConvInput(uint k, uint n, uint Hi, uint Wi, uint Wo, uint Ci)
 float finishOutput(uint channel, uint index, float value)
 {
     value = hasScale == 0u ? value + readBias(channel) : fma(value, readScale(channel), readBias(channel));
+    if (shortcut && residualOrder == 1u) value += readResidual(index);
     value = applyEpilogue(value);
-    if (shortcut) value += readResidual(index);
+    if (shortcut && residualOrder == 0u) value += readResidual(index);
     return value;
 }
 
@@ -124,6 +133,9 @@ void main()
     const uint Ci = CI_SPEC != 0u ? CI_SPEC : pc.ci;
     const uint Co = CO_SPEC != 0u ? CO_SPEC : pc.co;
     const uint N = Ho * Wo;
+    const uint image = convImage(pc.batch);
+    imageInputBase = image * Ci * Hi * Wi;
+    imageOutputBase = image * Co * N;
     const uint rawK = Ci * pc.kernel * pc.kernel;
     const uint paddedK = ((rawK + 15u) / 16u) * 16u;
     const uint kTiles = paddedK / 16u;

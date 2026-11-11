@@ -1,5 +1,5 @@
-#ifndef VAI_BUFFER_POOL_H
-#define VAI_BUFFER_POOL_H
+#ifndef VAI_ENGINE_BUFFER_POOL_H
+#define VAI_ENGINE_BUFFER_POOL_H
 
 #include "eva-runtime.h"
 #include <map>
@@ -154,4 +154,4 @@ inline void PooledBuffer::release()
 
 } // namespace vai
 
-#endif // VAI_BUFFER_POOL_H
+#endif   // VAI_ENGINE_BUFFER_POOL_H

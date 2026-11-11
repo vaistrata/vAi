@@ -1,7 +1,7 @@
 #ifndef VAI_NODES_PERMUTE_H
 #define VAI_NODES_PERMUTE_H
 
-#include "vai/nodes/node-common.h"
+#include "node-common.h"
 
 namespace vai::node {
 
@@ -32,8 +32,8 @@ public:
         bool operator==(const PipeParams&) const = default;
     };
 
-    struct Config {
-        vai::Dtype oDtype = vai::Dtype::None;   // None: oDefaultDtype
+    struct Config
+    {
     } config_;
 
     Permute(std::vector<uint32_t> perms, Config config);
@@ -53,12 +53,11 @@ inline Permute::Permute(std::vector<uint32_t> perms, Config config = Config())
     addSlot("in0", NodeSlot::input);
 
     VAI_ASSERT(!perms_.empty() && perms_.size() <= PERMUTE_MAX_RANK);
-
-    config_.oDtype = (config_.oDtype == Dtype::None) ? oDefaultDtype() : config_.oDtype;
 }
 
 inline void Permute::prepare()
 {
+    const Dtype oDtype = (oDtype_ == Dtype::None) ? oDefaultDtype() : oDtype_;
     const Tensor& inTen = (*this)["in0"];
 
     const Dtype iDtype = inTen.dtype();
@@ -68,10 +67,10 @@ inline void Permute::prepare()
     {
         pipeParams = p;
         pipe = pipelinePool().request("permute", {
-            eva::constant_id<SPEC_ID_TYPE_O>(config_.oDtype),          // typeO
-            eva::constant_id<SPEC_ID_TYPE_I>(iDtype),                  // typeI
-            eva::constant_id<0>((uint32_t) perms_.size())              // rank
-        });
+                                                     eva::constant_id<SPEC_ID_TYPE_O>(oDtype),      // typeO
+                                                     eva::constant_id<SPEC_ID_TYPE_I>(iDtype),      // typeI
+                                                     eva::constant_id<0>((uint32_t)perms_.size())   // rank
+                                                 });
         if (!descSet)
             descSet = gVaiDestSetPool(pipe.descSetLayout(0));
     }
@@ -101,14 +100,14 @@ inline void Permute::prepare()
         outShape[i] = D[perms_[i]];
 
     // Pass-through requires the dtype to stay unchanged.
-    if (canSkip && iDtype == config_.oDtype)
+    if (canSkip && iDtype == oDtype)
     {
         (*this)["out0"] = inTen.reshape(outShape);
         skip = true;
     }
     else
     {
-        (*this)["out0"] = Tensor(outShape, config_.oDtype);
+        (*this)["out0"] = Tensor(outShape, oDtype);
         skip = false;
     }
 }

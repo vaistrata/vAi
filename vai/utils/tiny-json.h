@@ -10,8 +10,8 @@
   previous value was left unread.
 =============================================================================*/
 
-#ifndef TINY_JSON_H
-#define TINY_JSON_H
+#ifndef VAI_UTILS_TINY_JSON_H
+#define VAI_UTILS_TINY_JSON_H
 
 #include <cstddef>
 
@@ -154,4 +154,4 @@ inline bool sj_iter_object(sj_Reader *r, sj_Value obj, sj_Value *key, sj_Value *
 
 } // namespace tinyjson
 
-#endif // TINY_JSON_H
+#endif // VAI_UTILS_TINY_JSON_H

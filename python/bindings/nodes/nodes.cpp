@@ -1,32 +1,15 @@
 #include "python/bindings/module.h"
-#include "python/bindings/nodes/bind-node.h"
-#include "python/bindings/nodes/kvcache-counter.h"
+#include "nodes.h"
+#include "kvcache-counter.h"
 #include "vai/nodes/node-common.h"
-#include <algorithm>
 
 namespace pyvai {
 
-std::vector<NodeBinding>& nodeBindings()
-{
-    static std::vector<NodeBinding> bindings;   // filled before the module init runs
-    return bindings;
-}
-
-void bindRegisteredNodes(nb::module_& m, const std::string& modelName)
-{
-    std::vector<NodeBinding> picked;
-    for (const NodeBinding& b : nodeBindings())
-        if (b.modelName == modelName)
-            picked.push_back(b);
-    std::sort(picked.begin(), picked.end(),
-              [](const auto& a, const auto& b) { return a.bindFunctionName < b.bindFunctionName; });
-    for (const NodeBinding& b : picked)
-        b.bindFunction(m);
-}
-
+// Call order must match the list in nodes.h.
 void bindNodes(nb::module_& m)
 {
-    // Epilogue and KVCacheCounter are argument types of nodes below: register them first.
+    // Epilogue, ResidualOrder and KVCacheCounter are argument types of nodes below:
+    // register them first.
     nb::enum_<vai::Epilogue>(m, "Epilogue")
         .value("NONE",      vai::Epilogue::None)
         .value("RELU",      vai::Epilogue::Relu)
@@ -35,10 +18,49 @@ void bindNodes(nb::module_& m)
         .value("SILU",      vai::Epilogue::Silu)
         .value("SIGMOID",   vai::Epilogue::Sigmoid);
 
+    nb::enum_<vai::ResidualOrder>(m, "ResidualOrder",
+                                  "Where LinearNode and ConvolutionNode add their `residual` input, relative to "
+                                  "the epilogue.")
+        .value("AFTER_EPILOGUE", vai::ResidualOrder::AfterEpilogue, "epilogue(x + bias) + residual, a following add.")
+        .value("BEFORE_EPILOGUE", vai::ResidualOrder::BeforeEpilogue,
+               "epilogue(x + bias + residual), an add ahead of the activation.");
+
     bindKVCacheCounter(m);
 
-    // Every python/bindings/nodes/<node>.cpp that ends in PYVAI_NODE_BINDING.
-    bindRegisteredNodes(m, "");
+    bindIdentity(m);
+    bindGate(m);
+    bindReshape(m);
+    bindFlatten(m);
+    bindConcat(m);
+    bindPermute(m);
+    bindSlice(m);
+    bindRowSliceScatter(m);
+    bindIndexCopy(m);
+    bindTypeCast(m);
+
+    bindAdd(m);
+    bindMul(m);
+    bindGatedMul(m);
+    bindEleAffine(m);
+    bindActivation(m);
+
+    bindConvolution(m);
+    bindPool2d(m);
+    bindNearestUpsample(m);
+
+    bindLinear(m);
+    bindLayerNorm(m);
+    bindGroupNorm(m);
+    bindRmsNorm(m);
+
+    bindTokenEmbedding(m);
+    bindTimeEmbedding(m);
+    bindCyclicTableReader(m);
+    bindRope(m);
+    bindAttention(m);
+
+    bindArgmax(m);
+    bindTopKSampling(m);
 }
 
 }   // namespace pyvai

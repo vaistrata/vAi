@@ -3,7 +3,7 @@
 
 // Module assembly: one bind* per area, called by module.cpp in this order (a
 // type must be registered before a signature refers to it).
-#include "python/bindings/common.h"
+#include "common.h"
 
 namespace pyvai {
 

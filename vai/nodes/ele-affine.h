@@ -1,7 +1,7 @@
 #ifndef VAI_NODES_ELE_AFFINE_H
 #define VAI_NODES_ELE_AFFINE_H
 
-#include "vai/nodes/node-common.h"
+#include "node-common.h"
 
 namespace vai::node {
 
@@ -10,12 +10,13 @@ namespace vai::node {
   EleAffine - element-wise affine, O = scale * in0 + shift
   Input: in0    [..., D]
          scale  broadcast to in0's shape (right-aligned, size-1 axes broadcast);
-                absent without hasScale (scale 1)
-         shift  likewise; absent without hasShift (shift 0)
+                scale 1 when absent
+         shift  likewise; shift 0 when absent
   Output: out0  in0's shape
 
   scale / shift are inputs under scaleAsInput / shiftAsInput, otherwise
-  parameters at wDtype. Each may broadcast over any axes as long as the axes it keeps
+  parameters at the loader's dtype. Each applies when present: filled by the
+  loader, or wired; at least one has to be. Each may broadcast over any axes as long as the axes it keeps
   are adjacent, e.g. [1, D] over [T, D], or [C, 1, 1] over [C, H, W].
 
   An add is shift alone, a multiply scale alone, and a gated residual x + g * y
@@ -43,23 +44,24 @@ public:
         vai::Dtype iDtype     = vai::Dtype::None;
         vai::Dtype scaleDtype = vai::Dtype::None;
         vai::Dtype shiftDtype = vai::Dtype::None;
+        bool hasScale = false;
+        bool hasShift = false;
 
         bool operator==(const PipeParams&) const = default;
     };
 
     struct Config {
-        bool hasScale = true;
-        bool hasShift = true;
-        bool scaleAsInput = true;            // input instead of persistent
-        bool shiftAsInput = true;
-        vai::Dtype wDtype = vai::Dtype::None;   // parameters; None: wDefaultDtype
-        vai::Dtype oDtype = vai::Dtype::None;   // None: oDefaultDtype
+        bool scaleAsInput = false;   // input instead of persistent
+        bool shiftAsInput = false;
     } config_;
 
-    EleAffine();
     EleAffine(Config config);
     void prepare() override;
     void run(eva::CommandBuffer cmdBuff) override;
+
+    // The loader filled it, or under scaleAsInput / shiftAsInput it is wired.
+    bool hasScale() const { return (*this)["scale"].validShape(); }
+    bool hasShift() const { return (*this)["shift"].validShape(); }
 
 private:
     PipeParams pipeParams;
@@ -106,32 +108,25 @@ inline EleAffine::Broadcast eleAffineBroadcast(const std::vector<uint32_t>& o, c
 }
 
 
-inline EleAffine::EleAffine() : EleAffine(Config()) {}
-
 inline EleAffine::EleAffine(Config config)
 : config_(config)
 {
     addSlot("out0", NodeSlot::output);
     addSlot("in0", NodeSlot::input);
-    VAI_ASSERT(config_.hasScale || config_.hasShift);   // neither is a TypeCast
-    if (config_.hasScale) addSlot("scale", config_.scaleAsInput ? NodeSlot::input : NodeSlot::persistent);
-    if (config_.hasShift) addSlot("shift", config_.shiftAsInput ? NodeSlot::input : NodeSlot::persistent);
-
-    config_.wDtype = (config_.wDtype == Dtype::None) ? wDefaultDtype() : config_.wDtype;
-    config_.oDtype = (config_.oDtype == Dtype::None) ? oDefaultDtype() : config_.oDtype;
+    addSlot("scale", config_.scaleAsInput ? NodeSlot::input : NodeSlot::persistent);
+    addSlot("shift", config_.shiftAsInput ? NodeSlot::input : NodeSlot::persistent);
 }
 
 inline void EleAffine::prepare()
 {
+    const Dtype oDtype = (oDtype_ == Dtype::None) ? oDefaultDtype() : oDtype_;
     const Tensor& inTen    = (*this)["in0"];
-    const Tensor* scaleTen = config_.hasScale ? &(*this)["scale"] : nullptr;
-    const Tensor* shiftTen = config_.hasShift ? &(*this)["shift"] : nullptr;
+    const Tensor* scaleTen = hasScale() ? &(*this)["scale"] : nullptr;
+    const Tensor* shiftTen = hasShift() ? &(*this)["shift"] : nullptr;
     VAI_ASSERT(inTen.validShape());
+    VAI_ASSERT(scaleTen || shiftTen);   // neither is a TypeCast
 
     const uint32_t N = inTen.numElements();
-
-    if (scaleTen && !config_.scaleAsInput) VAI_ASSERT(scaleTen->dtype() == config_.wDtype);
-    if (shiftTen && !config_.shiftAsInput) VAI_ASSERT(shiftTen->dtype() == config_.wDtype);
 
     auto broadcastOf = [&](const Tensor* t)
     {
@@ -148,43 +143,46 @@ inline void EleAffine::prepare()
     };
 
     PipeParams p = {
-        .scale      = broadcastOf(scaleTen),
-        .shift      = broadcastOf(shiftTen),
-        .iDtype     = inTen.dtype(),
+        .scale = broadcastOf(scaleTen),
+        .shift = broadcastOf(shiftTen),
+        .iDtype = inTen.dtype(),
         .scaleDtype = scaleTen ? scaleTen->dtype() : Dtype::None,
         .shiftDtype = shiftTen ? shiftTen->dtype() : Dtype::None,
+        .hasScale = scaleTen != nullptr,
+        .hasShift = shiftTen != nullptr,
     };
     p.aligned = N % 4u == 0 && inTen.byteOffset() % (4u * bytesPerElement(inTen.dtype())) == 0
              && vec4Ok(scaleTen, p.scale) && vec4Ok(shiftTen, p.shift);
     if (!pipe || p != pipeParams)
     {
         pipeParams = p;
-        pipe = pipelinePool().request("ele-affine", {
-            eva::constant_id<0>(p.scale.inner),                  // scaleInner
-            eva::constant_id<1>(p.scale.count),                  // scaleCount
-            eva::constant_id<2>(p.shift.inner),                  // shiftInner
-            eva::constant_id<3>(p.shift.count),                  // shiftCount
-            eva::constant_id<4>(config_.hasScale ? 1u : 0u),     // hasScale
-            eva::constant_id<5>(config_.hasShift ? 1u : 0u),     // hasShift
-            eva::constant_id<6>(p.scaleDtype),                   // typeS
-            eva::constant_id<7>(p.shiftDtype),                   // typeB
-            eva::constant_id<SPEC_ID_TYPE_O>(config_.oDtype),    // typeO
-            eva::constant_id<SPEC_ID_TYPE_I>(p.iDtype),          // typeI
-            eva::constant_id<SPEC_ID_ALIGNED>(p.aligned ? 1u : 0u)  // aligned (vec4)
-        });
+        pipe = pipelinePool().request("ele-affine",
+                                      {
+                                          eva::constant_id<0>(p.scale.inner),                      // scaleInner
+                                          eva::constant_id<1>(p.scale.count),                      // scaleCount
+                                          eva::constant_id<2>(p.shift.inner),                      // shiftInner
+                                          eva::constant_id<3>(p.shift.count),                      // shiftCount
+                                          eva::constant_id<4>(p.hasScale ? 1u : 0u),               // hasScale
+                                          eva::constant_id<5>(p.hasShift ? 1u : 0u),               // hasShift
+                                          eva::constant_id<6>(p.scaleDtype),                       // typeScale
+                                          eva::constant_id<7>(p.shiftDtype),                       // typeShift
+                                          eva::constant_id<SPEC_ID_TYPE_O>(oDtype),                // typeO
+                                          eva::constant_id<SPEC_ID_TYPE_I>(p.iDtype),              // typeI
+                                          eva::constant_id<SPEC_ID_ALIGNED>(p.aligned ? 1u : 0u)   // aligned (vec4)
+                                      });
         if (!descSet)
             descSet = gVaiDestSetPool(pipe.descSetLayout(0));
     }
 
-    (*this)["out0"] = Tensor(inTen.shape(), config_.oDtype);
+    (*this)["out0"] = Tensor(inTen.shape(), oDtype);
 }
 
 inline void EleAffine::run(eva::CommandBuffer cmdBuff)
 {
     auto outBuf   = (*this)["out0"].buffer();
     auto inBuf    = (*this)["in0"].buffer();
-    auto scaleBuf = config_.hasScale ? (*this)["scale"].buffer() : eva::Buffer();
-    auto shiftBuf = config_.hasShift ? (*this)["shift"].buffer() : eva::Buffer();
+    auto scaleBuf = pipeParams.hasScale ? (*this)["scale"].buffer() : eva::Buffer();
+    auto shiftBuf = pipeParams.hasShift ? (*this)["shift"].buffer() : eva::Buffer();
 
     descSet.write({ outBuf, inBuf, scaleBuf, shiftBuf });
 

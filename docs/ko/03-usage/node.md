@@ -25,7 +25,8 @@ Linear::Linear(Config options)
     addSlot("in0", NodeSlot::input);
     addSlot("weight", NodeSlot::persistent);
     addSlot("partial", NodeSlot::temporary);   // reduce 패스를 탈 때만 할당된다
-    if (config_.hasBias) addSlot("bias", NodeSlot::persistent);
+    addSlot("bias", NodeSlot::persistent);
+    if (config_.acceptResidual) addSlot("residual", NodeSlot::input);
 
     // ... dtype 결정, 파이프라인 요청
 }
@@ -48,9 +49,9 @@ Attention::Attention(Config options)
 }
 ```
 
-슬롯 구성은 옵션에 따라 달라지기도 합니다. `Linear`의 `bias`는
-`hasBias`일 때만 생기고 그림에 없는 `partial`은 밖으로 드러나지 않는
-내부 버퍼입니다.
+슬롯 구성은 옵션에 따라 달라지기도 합니다. `Linear`의 `residual`은
+`acceptResidual`일 때만 생깁니다. `bias`는 항상 있고 가중치 로더가 채웠을 때만
+적용됩니다. 그림에 없는 `partial`은 밖으로 드러나지 않는 내부 버퍼입니다.
 
 ## 슬롯
 
@@ -81,7 +82,7 @@ Attention::Attention(Config options)
 파라미터 값이 올라가는 슬롯입니다. 올리지 않으면 `Node::prepare()`의 형상 검증에 걸립니다.
 
 ```cpp
-SafetensorsParser parser(VAI_DATA_DIR "/mnist/model.safetensors");
+SafetensorsParser parser(VAI_DATA_DIR "/ckpts/mnist/jroot/model.safetensors");
 linear["weight"] = Tensor(parser["fc.weight"]);
 linear["bias"]   = Tensor(parser["fc.bias"]);
 ```
@@ -111,7 +112,7 @@ linear["bias"]   = Tensor(parser["fc.bias"]);
 
 ```cpp
 linear.slot("weight");   // OK
-linear.slot("gamma");    // LinearNode에 없는 슬롯(예외)
+linear.slot("scale");    // LinearNode에 없는 슬롯(예외)
 ```
 
 어떤 슬롯이 있는지는 [제공 노드들](../06-nodes.md)의 노드별 슬롯 표에
@@ -185,9 +186,9 @@ input                  - "in1"/add1;   // 원래 입력은 add1의 in1로
 받으므로 전부 지정해야 합니다.
 
 ```cpp
-input - toQ - splitQ - perQ - "Q"/attn - mergeOut - toOut;
-input - toK - splitK - perK - "K"/attn;
-input - toV - splitV - perV - "V"/attn;
+input - projQ - splitQ - perQ - "Q"/attn - mergeOut - projOut;
+input - projK - splitK - perK - "K"/attn;
+input - projV - splitV - perV - "V"/attn;
 ```
 
 ## `Node::prepare()`와 `Node::run()`

@@ -5,7 +5,7 @@
 // alike. The forward they inherit from NeuralNet would skip the KV-cache
 // counter, so __call__ is refused.
 
-#include "python/bindings/models/models.h"
+#include "models.h"
 #include <cstdint>
 #include <optional>
 #include <string>

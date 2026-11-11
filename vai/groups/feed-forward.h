@@ -27,21 +27,12 @@ struct FeedForward : public vai::NodeGroup
         uint32_t hiddenDim;
         uint32_t outDim;
         vai::Epilogue activation = vai::Epilogue::None;
-        bool hasBias = false;
         bool acceptResidual = false;   // open "residual" and fold its addend into fc2
     };
 
     FeedForward(Config config)
-    : fc1({
-        .inDim = config.inDim,
-        .outDim = config.hiddenDim,
-        .hasBias = config.hasBias,
-        .epilogue = config.activation})
-    , fc2({
-        .inDim = config.hiddenDim,
-        .outDim = config.outDim,
-        .hasBias = config.hasBias,
-        .acceptResidual = config.acceptResidual})
+        : fc1({.inDim = config.inDim, .outDim = config.hiddenDim, .epilogue = config.activation}),
+          fc2({.inDim = config.hiddenDim, .outDim = config.outDim, .acceptResidual = config.acceptResidual})
     {
         fc1 - fc2;
 

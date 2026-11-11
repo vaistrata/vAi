@@ -1,37 +1,44 @@
-#include "python/bindings/nodes/bind-node.h"
+#include "nodes.h"
 #include "vai/nodes/convolution.h"
 #include <cstdint>
+#include <optional>
 
 namespace pyvai {
 
-static void bindConvolution(nb::module_& m)
+void bindConvolution(nb::module_& m)
 {
-    using C = vai::node::Convolution::Config;
-    bindNode<vai::node::Convolution>(
-        m, "ConvolutionNode",
-        "has_bias / has_scale add `bias` / `scale` slots [out_channels], applied "
-        "as out0 = scale * conv + bias; a batch norm folds into them. fp16 "
-        "activations require fp16 weights, and so does an fp16 output.",
-        required("in_channels", &C::inChannels).check(atLeast(1u), "must be >= 1"),
-        required("out_channels", &C::outChannels).check(atLeast(1u), "must be >= 1"),
-        required("kernel_size", &C::kernelSize).check([](uint32_t k) { return k % 2 == 1; }, "must be odd"),
-        required("stride", &C::stride).check(atLeast(1u), "must be >= 1"), field("has_bias", &C::hasBias),
-        field("has_scale", &C::hasScale), field("epilogue", &C::epilogue), field("w_dtype", &C::wDtype),
-        // The core resolves None to the net's defaults, then asserts that fp32
-        // weights never write an fp16 output.
-        field("o_dtype", &C::oDtype)
-            .check(
-                [](vai::Dtype o, const C& c) {
-                    const vai::NeuralNetConfig& net = vai::NeuralNet::current()->config();
-                    const vai::Dtype w = c.wDtype == vai::Dtype::None ? net.wDefaultDtype : c.wDtype;
-                    return w == vai::Dtype::Fp16 || (o == vai::Dtype::None ? net.oDefaultDtype : o) != vai::Dtype::Fp16;
-                },
-                "cannot be fp16 with fp32 weights (w_dtype / o_dtype, or the net's defaults)"))
-        .def("enable_residual_add", &vai::node::Convolution::enableResidualAdd,
-             "Fuse a residual add through a new `residual` input slot [out_channels, "
-             "Ho, Wo]; call before wiring it. Returns False and changes nothing unless "
-             "the conv is 3x3, stride 1 and scaled with in_channels == out_channels.");
+    nb::class_<vai::node::Convolution, vai::Node>(m, "ConvolutionNode")
+        .def(
+            "__init__",
+            [](vai::node::Convolution* self, uint32_t in_channels, uint32_t out_channels, uint32_t kernel_size,
+               uint32_t stride, bool accept_residual, vai::ResidualOrder residual_order, vai::Epilogue epilogue,
+               std::optional<vai::Dtype> o_dtype) {
+                requireCurrentNet("ConvolutionNode");
+                if (in_channels == 0 || out_channels == 0)
+                    throw nb::value_error("ConvolutionNode: channels must be >= 1");
+                if (kernel_size == 0 || kernel_size % 2 == 0)
+                    throw nb::value_error("ConvolutionNode: kernel_size must be odd");
+                if (stride == 0)
+                    throw nb::value_error("ConvolutionNode: stride must be >= 1");
+                new (self) vai::node::Convolution(vai::node::Convolution::Config{
+                    .inChannels = in_channels,
+                    .outChannels = out_channels,
+                    .kernelSize = kernel_size,
+                    .stride = stride,
+                    .acceptResidual = accept_residual,
+                    .residualOrder = residual_order,
+                    .epilogue = epilogue,
+                });
+                self->setODtype(o_dtype.value_or(vai::Dtype::None), dtypeKey());
+            },
+            nb::arg("in_channels"), nb::arg("out_channels"), nb::arg("kernel_size"), nb::arg("stride"),
+            nb::arg("accept_residual") = false, nb::arg("residual_order") = vai::ResidualOrder::AfterEpilogue,
+            nb::arg("epilogue") = vai::Epilogue::None, nb::arg("o_dtype") = nb::none(),
+            "The `scale` / `bias` slots [out_channels] apply when filled, as "
+            "out0 = scale * conv + bias; a batch norm folds into them. "
+            "accept_residual opens the `residual` input [out_channels, Ho, Wo] (input "
+            "dtype), added after the epilogue or before it per residual_order. fp16 "
+            "activations require fp16 weights, and so does an fp16 output.");
 }
-PYVAI_NODE_BINDING(bindConvolution);
 
 }   // namespace pyvai

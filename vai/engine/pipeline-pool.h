@@ -1,5 +1,5 @@
-#ifndef VAI_PIPELINE_POOL_H
-#define VAI_PIPELINE_POOL_H
+#ifndef VAI_ENGINE_PIPELINE_POOL_H
+#define VAI_ENGINE_PIPELINE_POOL_H
 
 #include "tensor.h"
 #include <string>
@@ -117,4 +117,4 @@ inline eva::ComputePipeline PipelinePool::request(
 
 } // namespace vai
 
-#endif // VAI_PIPELINE_POOL_H
+#endif   // VAI_ENGINE_PIPELINE_POOL_H

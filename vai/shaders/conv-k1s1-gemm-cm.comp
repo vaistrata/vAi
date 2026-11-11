@@ -1,7 +1,7 @@
 /*=============================================================================
  Unified FP16-operand cooperative-matrix 1x1 GEMM.
- Bindings: O=0, I=1, W=2, BIAS=3, SCALE=4.
- Dispatch: x/y are plan-selected pc.n/pc.co tiles, z=split count.
+ Bindings: O=0, I=1, W=2, BIAS=3, SCALE=4, RESIDUAL=5.
+ Dispatch: x/y are plan-selected pc.n/pc.co tiles, z=pc.batch images x split count.
  Push constants: PushConstants.
 =============================================================================*/
 #version 460
@@ -32,6 +32,8 @@ layout(constant_id = 11) const bool storeMode = false; // false: scalar store, t
 layout(constant_id = 12) const bool reorder = false;
 layout(constant_id = 13) const uint swapXY = 0u;
 layout(constant_id = 14) const bool directOutput = false;
+layout(constant_id = 15) const bool shortcut = false;
+layout(constant_id = 16) const uint residualOrder = 0u;  // 0: after the epilogue, 1: before it
 layout(constant_id = SPEC_ID_TYPE_CI) const uint CI_SPEC = 0u;
 layout(constant_id = SPEC_ID_TYPE_N) const uint N_SPEC = 0u;
 layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0u;
@@ -60,6 +62,8 @@ layout(set = 0, binding = 3) restrict readonly buffer BIAS_BUF_4F32 { vec4 buffe
 layout(set = 0, binding = 4) restrict readonly buffer SCALE_BUF_F32 { float bufferScale_f32[]; }; // multiplicative affine term
 layout(set = 0, binding = 4) restrict readonly buffer SCALE_BUF_F16 { float16_t bufferScale_f16[]; };
 layout(set = 0, binding = 4) restrict readonly buffer SCALE_BUF_4F32 { vec4 bufferScale_4f32[]; };
+layout(set = 0, binding = 5) restrict readonly buffer RES_BUF_F32 { float bufferRes_f32[]; };
+layout(set = 0, binding = 5) restrict readonly buffer RES_BUF_F16 { float16_t bufferRes_f16[]; };
 
 layout(push_constant) uniform PushConstants {
     uint hi;
@@ -72,7 +76,10 @@ layout(push_constant) uniform PushConstants {
     uint splitCount;
     uint kernel;
     uint stride;
+    uint batch;             // images, stacked on the dispatch z axis
 } pc;
+
+#include "common/conv_batch.h"
 
 const uint tM = 16u, tN = 16u, tK = 16u;
 const uint sgCountM = wgM / sgM;
@@ -97,8 +104,13 @@ shared f16vec4 Bs[loadMode != 0u ? B_ELEMS / 4u : 1u];
 #define accMatF16 coopmat<float16_t, gl_ScopeSubgroup, tM, tN, gl_MatrixUseAccumulator>
 #define accMatF32 coopmat<float, gl_ScopeSubgroup, tM, tN, gl_MatrixUseAccumulator>
 
-vec4 readI4(uint i) { return typeI == DTYPE_F32 ? bufferI_4f32[i] : vec4(bufferI_4f16[i]); }
-float readI(uint i) { return typeI == DTYPE_F32 ? bufferI_f32[i] : float(bufferI_f16[i]); }
+// The workgroup's image within I, and within O and the residual.
+uint imageInputBase = 0u;
+uint imageOutputBase = 0u;
+
+// The four elements of I from element i, a multiple of 4 with the image's base.
+vec4 readI4(uint i) { i = (imageInputBase + i) >> 2u; return typeI == DTYPE_F32 ? bufferI_4f32[i] : vec4(bufferI_4f16[i]); }
+float readI(uint i) { i += imageInputBase; return typeI == DTYPE_F32 ? bufferI_f32[i] : float(bufferI_f16[i]); }
 
 float readBias(uint i)
 {
@@ -106,6 +118,8 @@ float readBias(uint i)
     return typeP == DTYPE_F32 ? bufferBias_f32[i] : float(bufferBias_f16[i]);
 }
 float readScale(uint i) { return typeP == DTYPE_F32 ? bufferScale_f32[i] : float(bufferScale_f16[i]); }
+float readResidual(uint i) { i += imageOutputBase; return typeI == DTYPE_F32 ? bufferRes_f32[i] : float(bufferRes_f16[i]); }
+vec4 readResidual4(uint i) { return vec4(readResidual(i), readResidual(i + 1u), readResidual(i + 2u), readResidual(i + 3u)); }
 
 vec4 readCs32(uint base, uint index)
 {
@@ -115,24 +129,37 @@ vec4 readCs32(uint base, uint index)
                 Cs32[base + index + 3u]);
 }
 
-float applyOutput(uint i, float value)
+// Output channel i, element index of O.
+float applyOutput(uint i, uint index, float value)
 {
     value = (hasScale == 0u)
         ? value + readBias(i)
         : fma(value, readScale(i), readBias(i));
-    return applyEpilogue(value);
+    if (shortcut && residualOrder == 1u)
+        value += readResidual(index);
+    value = applyEpilogue(value);
+    if (shortcut && residualOrder == 0u)
+        value += readResidual(index);
+    return value;
 }
 
-vec4 applyOutputVec4(uint m, vec4 value)
+// Output channel m, elements [base, base + 4) of O.
+vec4 applyOutputVec4(uint m, uint base, vec4 value)
 {
     value = (hasScale == 0u)
         ? value + vec4(readBias(m))
         : fma(value, vec4(readScale(m)), vec4(readBias(m)));
-    return applyEpilogue(value);
+    if (shortcut && residualOrder == 1u)
+        value += readResidual4(base);
+    value = applyEpilogue(value);
+    if (shortcut && residualOrder == 0u)
+        value += readResidual4(base);
+    return value;
 }
 
 void writeO(uint i, float value)
 {
+    i += imageOutputBase;
     if (typeO == DTYPE_F32)
         bufferO_f32[i] = value;
     else
@@ -141,6 +168,7 @@ void writeO(uint i, float value)
 
 void writeO4(uint i, vec4 value)
 {
+    i += imageOutputBase >> 2u;
     if (typeO == DTYPE_F32)
         bufferO_4f32[i] = value;
     else
@@ -160,13 +188,13 @@ void readBs(uint subgroup, uint nt, uint k0, uint n0, uint effectiveN)
         f16vec4 value;
         if (alignN)
         {
-            value = f16vec4(readI4(globalIndex >> 2u));
+            value = f16vec4(readI4(globalIndex));
         }
         else
         {
-            if (globalCol + 3u < effectiveN && (globalIndex & 3u) == 0u)
+            if (globalCol + 3u < effectiveN && ((imageInputBase + globalIndex) & 3u) == 0u)
             {
-                value = f16vec4(readI4(globalIndex >> 2u));
+                value = f16vec4(readI4(globalIndex));
             }
             else
             {
@@ -194,8 +222,9 @@ void writeOutputTile(uint base, uint slot, uint m0, uint n0, uint effectiveN)
             const uint n = n0 + col;
             if (alignN || n + 3u < effectiveN)
             {
-                vec4 value = applyOutputVec4(m0 + row, readCs32(tileBase, index));
-                writeO4(((m0 + row) * effectiveN + n) >> 2u, value);
+                const uint outputIndex = (m0 + row) * effectiveN + n;
+                vec4 value = applyOutputVec4(m0 + row, outputIndex, readCs32(tileBase, index));
+                writeO4(outputIndex >> 2u, value);
             }
         }
     }
@@ -208,8 +237,9 @@ void writeOutputTile(uint base, uint slot, uint m0, uint n0, uint effectiveN)
             const uint n = n0 + col;
             if (alignN || n < effectiveN)
             {
-                float value = applyOutput(m0 + row, Cs32[tileBase + index]);
-                writeO((m0 + row) * effectiveN + n, value);
+                const uint outputIndex = (m0 + row) * effectiveN + n;
+                float value = applyOutput(m0 + row, outputIndex, Cs32[tileBase + index]);
+                writeO(outputIndex, value);
             }
         }
     }
@@ -254,16 +284,38 @@ void writeOutputFragmentDirect(
         }
     }
 
+    const uint outputBase = imageOutputBase + m0 * effectiveN + n0;
+    accMatF32 residualValues = accMatF32(0.0);
+    if (shortcut)
+    {
+        if (typeI == DTYPE_F32)
+            coopMatLoad(
+                residualValues, bufferRes_f32, outputBase, effectiveN,
+                gl_CooperativeMatrixLayoutRowMajor);
+        else
+        {
+            accMatF16 residualValuesF16;
+            coopMatLoad(
+                residualValuesF16, bufferRes_f16, outputBase, effectiveN,
+                gl_CooperativeMatrixLayoutRowMajor);
+            residualValues = accMatF32(residualValuesF16);
+        }
+    }
+
     [[unroll]]
     for (int element = 0; element < acc.length(); ++element)
     {
-        const float value = hasScale == 0u
+        float value = hasScale == 0u
             ? acc[element] + biasValues[element]
             : fma(acc[element], scaleValues[element], biasValues[element]);
-        acc[element] = applyEpilogue(value);
+        if (shortcut && residualOrder == 1u)
+            value += residualValues[element];
+        value = applyEpilogue(value);
+        if (shortcut && residualOrder == 0u)
+            value += residualValues[element];
+        acc[element] = value;
     }
 
-    const uint outputBase = m0 * effectiveN + n0;
     if (typeO == DTYPE_F32)
         coopMatStore(
             acc, bufferO_f32, outputBase, effectiveN,
@@ -291,13 +343,18 @@ void main()
     const uint subgroupM = rawM + subgroupIdM * sgM;
     const uint subgroupN = rawN + subgroupIdN * sgN;
     const uint scratchBase = subgroup * accStoreBatchSize * tM * tN;
+    const uint image = convImage(pc.batch);
+    imageInputBase = image * effectiveCi * effectiveN;
+    imageOutputBase = image * pc.co * effectiveN;
+    // I through the vec4 view, in vec4s.
+    const uint imageInputBase4 = imageInputBase >> 2u;
 
     if ((!alignN || reorder) &&
         subgroupN >= effectiveN)
         return;
 
     const uint kStart = splitK != 0u
-        ? gl_WorkGroupID.z * splitK
+        ? convImageZ(pc.batch) * splitK
         : 0u;
     const uint kEnd = splitK != 0u
         ? min(kStart + splitK, effectiveCi)
@@ -325,7 +382,7 @@ void main()
                         const uint index = index4 << 2u;
                         const uint row = index / B_STRIDE;
                         const uint col = index % B_STRIDE;
-                        Bs[bBase4 + index4] = f16vec4(readI4(((k0 + row) * effectiveN + subgroupN + col) >> 2u));
+                        Bs[bBase4 + index4] = f16vec4(readI4((k0 + row) * effectiveN + subgroupN + col));
                     }
                 }
                 else
@@ -349,7 +406,7 @@ void main()
                 matB b;
                 if (loadMode == 0u)
                 {
-                    coopMatLoad( b, bufferI_4f16, (k0 * effectiveN + subgroupN + nt * tN) >> 2u, effectiveN >> 2u, gl_CooperativeMatrixLayoutRowMajor);
+                    coopMatLoad( b, bufferI_4f16, imageInputBase4 + ((k0 * effectiveN + subgroupN + nt * tN) >> 2u), effectiveN >> 2u, gl_CooperativeMatrixLayoutRowMajor);
                 }
                 else
                 {
@@ -372,6 +429,7 @@ void main()
         subgroupMemoryBarrierShared();
         subgroupBarrier();
 
+        // Image-major partials: [image][split][Co * N].
         const uint partialBase = gl_WorkGroupID.z * pc.co * effectiveN;
         if (storeMode)
         {
@@ -402,10 +460,8 @@ void main()
                     }
                     else
                     {
-                        const vec4 result = hasScale == 0u
-                            ? value + vec4(readBias(m))
-                            : fma(value, vec4(readScale(m)), vec4(readBias(m)));
-                        writeO4((m * effectiveN + col) >> 2u, applyEpilogue(result));
+                        const uint outputIndex = m * effectiveN + col;
+                        writeO4(outputIndex >> 2u, applyOutputVec4(m, outputIndex, value));
                     }
                 }
             }
@@ -425,7 +481,7 @@ void main()
                     if (splitK != 0u)
                         bufferO_f16[partialBase + m * effectiveN + col] = float16_t(value);
                     else
-                        writeO(m * effectiveN + col, applyOutput(m, value));
+                        writeO(m * effectiveN + col, applyOutput(m, m * effectiveN + col, value));
                 }
             }
         }
@@ -444,7 +500,7 @@ void main()
                 if (loadMode == 0u)
                 {
                     for (uint nt = 0u; nt < sgpNIter; ++nt)
-                        coopMatLoad(b[nt], bufferI_4f16, (k0 * effectiveN + subgroupN + nt * tN) >> 2u, effectiveN >> 2u, gl_CooperativeMatrixLayoutRowMajor);
+                        coopMatLoad(b[nt], bufferI_4f16, imageInputBase4 + ((k0 * effectiveN + subgroupN + nt * tN) >> 2u), effectiveN >> 2u, gl_CooperativeMatrixLayoutRowMajor);
                 }
                 else
                 {
@@ -553,7 +609,7 @@ void main()
                 }
                 if (loadMode == 0u)
                 {
-                    coopMatLoad(b, bufferI_4f16, (k0 * effectiveN + subgroupN) >> 2u, effectiveN >> 2u, gl_CooperativeMatrixLayoutRowMajor);
+                    coopMatLoad(b, bufferI_4f16, imageInputBase4 + ((k0 * effectiveN + subgroupN) >> 2u), effectiveN >> 2u, gl_CooperativeMatrixLayoutRowMajor);
                 }
                 else
                 {

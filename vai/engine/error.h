@@ -1,5 +1,5 @@
-#ifndef VAI_ERROR_H
-#define VAI_ERROR_H
+#ifndef VAI_ENGINE_ERROR_H
+#define VAI_ENGINE_ERROR_H
 
 #include <cstdlib>
 #include <cstdio>
@@ -33,6 +33,4 @@ inline void vai_assert_impl(
 #endif
 
 
-
-
-#endif // VAI_ERROR_H
+#endif   // VAI_ENGINE_ERROR_H

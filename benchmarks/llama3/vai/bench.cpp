@@ -1,4 +1,4 @@
-#include "model.h"
+#include "net.h"
 #include "meta-weights.h"
 #include "vai/utils/tokenizer.h"
 #include "eva-runtime.h"
@@ -14,10 +14,12 @@
 #include <vector>
 
 using namespace vai;
+using namespace vai::utils;
+namespace llama3 = model::production::llama3;
 
 
 // Checkpoint sizes this bench can run. The name is the folder under
-// data/llama3/, so --size picks the config and the weights together.
+// data/ckpts/llama3/meta/, so --size picks the config and the weights together.
 struct SizeOption { const char* name; llama3::ModelConfig (*config)(); };
 
 static constexpr SizeOption modelSizes[] = {
@@ -95,7 +97,7 @@ int main(int argc, char** argv)
 
     // Arguments are prompt lengths in tokens, one table row each: the first N
     // tokens of the essay in bench-prompts.h (146 = the prompt of
-    // examples/llama3/demo.cpp). No argument runs the default set.
+    // models/production/llama3/demo.cpp). No argument runs the default set.
     // --showText: decode and print one generated sequence per run (off by default,
     // so the bench output stays just the table).
     // --size: which checkpoint to load; see modelSizes.
@@ -141,14 +143,17 @@ int main(int argc, char** argv)
     auto modelCfg = size->config();
     printf("model: llama3 %s\n", modelCfg.variant);
 
-    llama3::Model model({
-        .device = device,
-        .wDefaultDtype = Dtype::Fp16,
-    }, modelCfg, {
-        .maxRuntimeContext = 4096,      // = the llama.cpp bench's n_ctx
-    });
+    llama3::Net net(
+        {
+            .device = device,
+            .wDefaultDtype = Dtype::Fp16,
+        },
+        modelCfg,
+        {
+            .maxRuntimeContext = 4096,   // = the llama.cpp bench's n_ctx
+        });
 
-    loadWeights<"meta">(model);
+    loadWeights<"meta">(net);
 
     Tokenizer tokenizer(VAI_DATA_DIR "/llama3/tokenizer.json");
 
@@ -162,9 +167,10 @@ int main(int argc, char** argv)
             fprintf(stderr, "error: the prompt has %zu tokens, %d requested\n", essayTokens.size(), n);
             return 1;
         }
-        if (n + nGen > (int)model.runtimeCfg.maxRuntimeContext)
+        if (n + nGen > (int)net.runtimeCfg.maxRuntimeContext)
         {
-            fprintf(stderr, "error: prompt %d + generation exceeds the %u-token context\n", n, model.runtimeCfg.maxRuntimeContext);
+            fprintf(stderr, "error: prompt %d + generation exceeds the %u-token context\n", n,
+                    net.runtimeCfg.maxRuntimeContext);
             return 1;
         }
     }
@@ -183,12 +189,12 @@ int main(int argc, char** argv)
         const int nMax = *std::max_element(lengths.begin(), lengths.end());
         const std::vector<int> maxPrompt(essayTokens.begin(), essayTokens.begin() + nMax);
 
-        model.resetCache();
+        net.resetCache();
         inDict["inTokenIds"] = Tensor({(uint32_t)nMax}).setData(maxPrompt.data());
-        model.prefill(inDict["inTokenIds"], &outToken);
+        net.prefill(inDict["inTokenIds"], &outToken);
 
         for (int i = 0; i < nWarmGen; ++i)
-            model.decode(&outToken);
+            net.decode(&outToken);
     }
 
     printHeader(nGen, nReps, nPPReps);
@@ -199,9 +205,9 @@ int main(int argc, char** argv)
 
         // Feeds the whole prompt as one forward and returns the sampled next token.
         auto prefill = [&]() -> int {
-            model.resetCache();
+            net.resetCache();
             inDict["inTokenIds"] = Tensor({(uint32_t)nPrompt}).setData(promptTokens.data());
-            model.prefill(inDict["inTokenIds"], &outToken);
+            net.prefill(inDict["inTokenIds"], &outToken);
             return (int)outToken.getData<uint32_t>()[0];
         };
 
@@ -212,7 +218,7 @@ int main(int argc, char** argv)
             for (int i = 0; i < nWarmPre; ++i) prefill();
 
             for (int i = 0; i < nWarmGen; ++i)
-                model.decode(&outToken);
+                net.decode(&outToken);
         }
 
         std::vector<double> ppTps, tgTps;
@@ -238,7 +244,7 @@ int main(int argc, char** argv)
             double t1 = nowSec();
             for (int gen = 0; gen < nGen; ++gen)
             {
-                model.decode(&outToken);
+                net.decode(&outToken);
                 tok = (int)outToken.getData<uint32_t>()[0];
                 if (keep) generated.push_back(tok);
             }

@@ -2,7 +2,7 @@
 #define VAI_NODES_ARGMAX_H
 
 // Argmax - row-wise argmax (greedy decode) over a logits tensor.
-#include "vai/nodes/node-common.h"
+#include "node-common.h"
 
 namespace vai::node {
 

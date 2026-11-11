@@ -1,0 +1,272 @@
+// =============================================================================
+// group-norm.comp: group normalization over a CHW feature map
+//     O[c, p] = (I[c, p] - mean(G(c))) * rsqrt(var(G(c)) + eps) * scale[c] + shift[c]
+//
+// A workgroup normalizes one group: its wgSize threads accumulate strided
+// partials of the shifted 1-pass statistics (Chan–Golub–LeVeque: with
+// s = I[group, 0], sum = Σ(x−s) and sumSq = Σ(x−s)² give mean = s + sum/F and
+// Σ(x−mean)² = sumSq − sum²/F), reduce them, then normalize + affine in
+// parallel — the same two-phase shape as layer-norm.comp. What differs is
+// the reduction unit (a group of chPerGroup channels, F = chPerGroup * HW
+// elements) and that scale / shift are indexed per channel, not per element.
+//
+// - O (typeO), I (typeI), scale / shift (typeW) are fp32 or fp16 via same-binding
+//   buffer aliases; accumulation is always fp32.
+// - chPerGroup / HW are specialization constants, not push constants: the
+//   channel of an element is j / HW, one integer division per element, and
+//   only a compile-time HW turns that into the shift (HW a power of two, which
+//   is every UNet1D block) or the multiply-high the group count never was.
+//   The host knows both in prepare(), so the pipeline is keyed on them.
+// - aligned == 1 (typeO == typeI == fp32, HW % 4 == 0): vec4 I/O. HW % 4 == 0
+//   is what makes a vec4 sit inside one channel, so it also collapses the four
+//   scale / shift lookups of a quad to one.
+// - cached == 1 (aligned, and the group is at most one quad per thread): that
+//   quad stays in a register between the two phases, so the input is read once
+//   instead of twice. Every UNet1D block lands here.
+// - reduction: subgroupAdd two-level (sgReduce == 1, host pins the subgroup
+//   size, so numSubgroups is exact) or shared-memory tree fallback. Both end
+//   with every thread reducing the partials itself out of shared memory
+//   instead of thread 0 broadcasting through it — one barrier, not three, and
+//   these groups are small enough that the barriers, not the arithmetic, are
+//   what the kernel spends its time on.
+// - residual (hasResidual, input dtype) and the epilogue apply after the
+//   affine: the residual after the epilogue, or before it with residualOrder 1.
+// - Dispatch (host): one workgroup per group of each sample ->
+//   .dispatch(samples * groups). The samples (the axes before C) lie one after
+//   another, so a workgroup's group is still one contiguous run of F elements;
+//   only its first channel wraps at `groups`.
+// =============================================================================
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_KHR_shader_subgroup_basic : enable
+#extension GL_KHR_shader_subgroup_arithmetic : enable
+#include "common/activation.h"
+
+layout(constant_id = 0) const uint wgSize   = 256;             // threads per workgroup (host gnTuning())
+layout(constant_id = 1) const uint sgReduce = 0;               // 1: subgroupAdd reduction, 0: shared tree
+layout(constant_id = 2) const uint hasShift  = 1;               // 0: no shift, 1: shift[C]
+layout(constant_id = 3) const uint chPerGroup = 1;             // channels per group (C / groups)
+layout(constant_id = 4) const uint HW       = 1;               // spatial elements per channel
+layout(constant_id = 5) const uint numSubgroups = 1;           // wgSize / subgroup size (sgReduce == 1)
+layout(constant_id = 6) const uint cached   = 0;               // 1: one quad per thread, kept in a register
+layout(constant_id = 7) const uint groups   = 1;               // groups per sample (C / chPerGroup)
+layout(constant_id = 8) const uint hasResidual = 0;            // 1: residual[...] of in0's shape
+layout(constant_id = 9) const uint residualOrder = 0;          // 0: after the epilogue, 1: before it
+layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0;     // O (output) dtype
+layout(constant_id = SPEC_ID_TYPE_I) const uint typeI = 0;     // I (input) dtype
+layout(constant_id = SPEC_ID_TYPE_W) const uint typeW = 0;     // scale / shift dtype
+layout(constant_id = SPEC_ID_ALIGNED) const uint aligned = 0;  // 1: vec4 I/O, one scale / shift per quad
+
+layout(local_size_x_id = 0) in;
+
+layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_F32 { float bufferO_f32[]; };
+layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_F16 { float16_t bufferO_f16[]; };
+layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_4F32 { vec4 bufferO_4f32[]; };
+//////////////////////////////////////////////////////////////////////////////
+layout(set = 0, binding = 1) restrict readonly buffer I_BUF_F32 { float bufferI_f32[]; };
+layout(set = 0, binding = 1) restrict readonly buffer I_BUF_F16 { float16_t bufferI_f16[]; };
+layout(set = 0, binding = 1) restrict readonly buffer I_BUF_4F32 { vec4 bufferI_4f32[]; };
+//////////////////////////////////////////////////////////////////////////////
+layout(set = 0, binding = 2) restrict readonly buffer SCALE_BUF_F32 { float bufferScale_f32[]; };
+layout(set = 0, binding = 2) restrict readonly buffer SCALE_BUF_F16 { float16_t bufferScale_f16[]; };
+//////////////////////////////////////////////////////////////////////////////
+layout(set = 0, binding = 3) restrict readonly buffer SHIFT_BUF_F32 { float bufferShift_f32[]; };
+layout(set = 0, binding = 3) restrict readonly buffer SHIFT_BUF_F16 { float16_t bufferShift_f16[]; };
+//////////////////////////////////////////////////////////////////////////////
+layout(set = 0, binding = 4) restrict readonly buffer RES_BUF_F32 { float bufferRes_f32[]; };
+layout(set = 0, binding = 4) restrict readonly buffer RES_BUF_F16 { float16_t bufferRes_f16[]; };
+layout(set = 0, binding = 4) restrict readonly buffer RES_BUF_4F32 { vec4 bufferRes_4f32[]; };
+
+layout(push_constant) uniform PushConstants {
+    float eps;
+};
+
+float readI(uint i)     { return (typeI == DTYPE_F32) ? bufferI_f32[i] : float(bufferI_f16[i]); }
+float readScale(uint c) { return (typeW == DTYPE_F32) ? bufferScale_f32[c] : float(bufferScale_f16[c]); }
+float readShift(uint c)  { return (hasShift == 0u) ? 0.0 : ((typeW == DTYPE_F32) ? bufferShift_f32[c] : float(bufferShift_f16[c])); }
+float readResidual(uint i) { return (typeI == DTYPE_F32) ? bufferRes_f32[i] : float(bufferRes_f16[i]); }
+void writeO(uint i, float v) { if (typeO == DTYPE_F32) bufferO_f32[i] = v; else bufferO_f16[i] = float16_t(v); }
+
+// The residual and the epilogue on an affine result, element i of O.
+float finishOutput(float value, uint i)
+{
+    if (hasResidual != 0u && residualOrder == 1u) value += readResidual(i);
+    value = applyEpilogue(value);
+    if (hasResidual != 0u && residualOrder == 0u) value += readResidual(i);
+    return value;
+}
+
+// The same for quad i4 of O; aligned keeps the residual fp32 too.
+vec4 finishOutput4(vec4 value, uint i4)
+{
+    if (hasResidual != 0u && residualOrder == 1u) value += bufferRes_4f32[i4];
+    value = applyEpilogue(value);
+    if (hasResidual != 0u && residualOrder == 0u) value += bufferRes_4f32[i4];
+    return value;
+}
+
+// Per-thread partial sums (spec-constant-sized) — with sgReduce == 1 only
+// the first numSubgroups slots are used.
+shared float sSum  [wgSize];
+shared float sSumSq[wgSize];
+
+// Phase 1: per-thread shifted 1-pass accumulation over a strided slice
+// (independent accumulators — ILP). Returns (Σ(x−s), Σ(x−s)²) of its elements.
+vec2 accumAligned(uint base4, uint F4, float sh)
+{
+    vec4 sh4 = vec4(sh);
+    vec4 s4  = vec4(0.0);
+    vec4 q4  = vec4(0.0);
+    for (uint j = gl_LocalInvocationID.x; j < F4; j += wgSize)
+    {
+        vec4 d = bufferI_4f32[base4 + j] - sh4;
+        s4 += d;
+        q4 += d * d;
+    }
+    return vec2(s4.x + s4.y + s4.z + s4.w, q4.x + q4.y + q4.z + q4.w);
+}
+
+vec2 accumScalar(uint base, uint F, float sh)
+{
+    float sum   = 0.0;
+    float sumSq = 0.0;
+    for (uint j = gl_LocalInvocationID.x; j < F; j += wgSize)
+    {
+        float d = readI(base + j) - sh;
+        sum   += d;
+        sumSq += d * d;
+    }
+    return vec2(sum, sumSq);
+}
+
+// Phase 3: normalize + per-channel affine over the same strided slice.
+// aligned guarantees HW % 4 == 0, so a quad never straddles two channels and
+// the channel index is j / (HW / 4).
+void normalizeAligned(uint base4, uint cBase, uint F4, float mean, float invStd)
+{
+    uint HW4 = HW / 4u;
+    for (uint j = gl_LocalInvocationID.x; j < F4; j += wgSize)
+    {
+        uint c = cBase + j / HW4;
+        vec4 x = bufferI_4f32[base4 + j];
+        bufferO_4f32[base4 + j] = finishOutput4((x - vec4(mean)) * invStd * readScale(c) + readShift(c), base4 + j);
+    }
+}
+
+void normalizeScalar(uint base, uint cBase, uint F, float mean, float invStd)
+{
+    for (uint j = gl_LocalInvocationID.x; j < F; j += wgSize)
+    {
+        uint c = cBase + j / HW;
+        writeO(base + j, finishOutput((readI(base + j) - mean) * invStd * readScale(c) + readShift(c), base + j));
+    }
+}
+
+void main()
+{
+    uint g   = gl_WorkGroupID.x;        // one workgroup per group of each sample
+    uint tid = gl_LocalInvocationID.x;
+
+    uint F     = chPerGroup * HW;       // elements this workgroup reduces
+    uint base  = g * F;                 // first element of the group ([..., C, H, W] layout)
+    uint cBase = (g % groups) * chPerGroup;   // first channel of the group
+
+    // shift = the group's first element — keeps the accumulated sums at spread
+    // (σ) scale instead of mean scale.
+    float sh = readI(base);
+
+    // Phase 1. cached: the whole group fits in one quad per thread, so that
+    // quad stays in a register and phase 3 does not read the input a second
+    // time. These groups are small and only `groups` workgroups deep, so the
+    // kernel is waiting on memory rather than saturating it, and dropping a
+    // round trip out of the dependency chain is worth more than the bandwidth.
+    const uint base4 = base / 4u;
+    const uint F4    = F / 4u;
+    const bool mine  = (tid < F4);      // cached only; wgSize >= F4 there
+
+    vec4 quad = vec4(sh);               // a non-participating thread adds nothing
+    vec2 partial;
+    if (cached != 0u)
+    {
+        if (mine) quad = bufferI_4f32[base4 + tid];
+        vec4 d = quad - vec4(sh);
+        partial = vec2(d.x + d.y + d.z + d.w, d.x * d.x + d.y * d.y + d.z * d.z + d.w * d.w);
+    }
+    else
+    {
+        partial = (aligned != 0u) ? accumAligned(base4, F4, sh)
+                                  : accumScalar(base, F, sh);
+    }
+
+    // Phase 2: reduction — subgroupAdd two-level or shared-memory tree
+    // (spec-selected). Both leave the group's (Σ, Σ²) in (s, q) on every
+    // thread, so nothing has to be broadcast back afterwards.
+    float s, q;
+    if (sgReduce != 0u)
+    {
+        float sum   = subgroupAdd(partial.x);
+        float sumSq = subgroupAdd(partial.y);
+        if (numSubgroups == 1u)
+        {
+            // The workgroup is one subgroup and every thread is active, so the
+            // subgroupAdd already returned the group total to all of them —
+            // no shared memory and no barrier on this path at all.
+            s = sum;
+            q = sumSq;
+        }
+        else
+        {
+            if (subgroupElect())
+            {
+                sSum  [gl_SubgroupID] = sum;
+                sSumSq[gl_SubgroupID] = sumSq;
+            }
+            barrier();
+            // Every thread folds the numSubgroups partials itself. Redundant
+            // arithmetic, but it is a handful of broadcast shared reads against
+            // the second barrier a thread-0 fold would need to publish through.
+            s = 0.0; q = 0.0;
+            for (uint i = 0u; i < numSubgroups; ++i)
+            {
+                s += sSum[i];
+                q += sSumSq[i];
+            }
+        }
+    }
+    else
+    {
+        sSum  [tid] = partial.x;
+        sSumSq[tid] = partial.y;
+        barrier();
+        for (uint stride = wgSize / 2u; stride > 0u; stride >>= 1)
+        {
+            if (tid < stride)
+            {
+                sSum  [tid] += sSum  [tid + stride];
+                sSumSq[tid] += sSumSq[tid + stride];
+            }
+            barrier();
+        }
+        s = sSum[0];
+        q = sSumSq[0];
+    }
+
+    // Shifted identity: Σ(x−mean)² = Σ(x−s)² − (Σ(x−s))²/F; fp32 rounding
+    // can drive it slightly negative, so clamp to 0.
+    float m2     = max(q - s * s / float(F), 0.0);
+    float mean   = sh + s / float(F);
+    float invStd = inversesqrt(m2 / float(F) + eps);
+
+    // Phase 3
+    if (cached != 0u)
+    {
+        if (mine)
+        {
+            uint c = cBase + tid / (HW / 4u);
+            bufferO_4f32[base4 + tid] = finishOutput4((quad - vec4(mean)) * invStd * readScale(c) + readShift(c), base4 + tid);
+        }
+    }
+    else if (aligned != 0u) normalizeAligned(base4, cBase, F4, mean, invStd);
+    else                    normalizeScalar(base, cBase, F, mean, invStd);
+}

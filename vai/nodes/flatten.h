@@ -1,7 +1,7 @@
 #ifndef VAI_NODES_FLATTEN_H
 #define VAI_NODES_FLATTEN_H
 
-#include "vai/nodes/node-common.h"
+#include "node-common.h"
 
 namespace vai::node {
 

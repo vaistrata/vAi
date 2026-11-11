@@ -28,8 +28,8 @@ for (uint32_t i = 0; i < net.modelCfg.numLayers; ++i)
 태그에 `.`을 넣으면 계층으로 묶을 수 있습니다.
 
 ```cpp
-b.mhAttn.toQKV.setProfileTag("Linear.[768x2304]");
-b.mhAttn.toOut.setProfileTag("Linear.[768x768]");
+b.mhAttn.projQKV.setProfileTag("Linear.[768x2304]");
+b.mhAttn.projOut.setProfileTag("Linear.[768x768]");
 ```
 
 이 경우 `Linear` 아래에 형상별 시간이 나뉘며, 부모에는 그 아래 항목들의 시간이 합산됩니다.
@@ -40,14 +40,14 @@ forward가 끝날 때마다 측정값이 누적되고, `printProfile()`은 지�
 
 ```cpp
 for (int i = 0; i < 5; ++i)   // 워밍업
-    model(inDict);
+    net(inDict);
 
-model.resetProfileRecords();   // 워밍업 기록을 버린다
+net.resetProfileRecords();   // 워밍업 기록을 버린다
 
 for (int i = 0; i < 10; ++i)
-    model(inDict);
+    net(inDict);
 
-model.printProfile();          // 10회 평균
+net.printProfile();          // 10회 평균
 ```
 
 초기 실행에는 셰이더 컴파일이나 버퍼 준비 같은 일회성 비용이 섞일 수 있으므로, 워밍업 뒤에 측정하는 편이 좋습니다. `resetProfileRecords()`는 지금까지 누적된 기록을 모두 지우고 다시 측정할 때 사용합니다.
@@ -78,13 +78,13 @@ model.printProfile();          // 10회 평균
 기본 동작을 이용하면 prefill과 decode처럼 같은 태그 구성의 두 구간을 간단히 나눠 측정할 수 있습니다.
 
 ```cpp
-model(inDict);
-model.printProfile();          // prefill 출력 후 기록 초기화
+net(inDict);
+net.printProfile();          // prefill 출력 후 기록 초기화
 
 for (int i = 0; i < maxNewTokens; ++i)
-    model(inDict);
+    net(inDict);
 
-model.printProfile();          // decode 구간만 출력
+net.printProfile();          // decode 구간만 출력
 ```
 
 첫 번째 출력과 함께 기록이 초기화되므로, 두 번째 출력에는 decode에서 새로 누적된 기록만 포함됩니다.
@@ -96,16 +96,16 @@ model.printProfile();          // decode 구간만 출력
 전체 프로파일을 확인한 뒤 특정 병목만 자세히 보고 싶다면 기존 태그를 지우고 원하는 노드에 다시 달 수 있습니다.
 
 ```cpp
-model.clearProfileTags();
+net.clearProfileTags();
 
-model.layers[0].ffn.fc1.setProfileTag("fc1");
-model.layers[0].ffn.fc2.setProfileTag("fc2");
+net.layers[0].ffn.fc1.setProfileTag("fc1");
+net.layers[0].ffn.fc2.setProfileTag("fc2");
 ```
 
 특정 노드의 태그만 제거하려면 빈 문자열을 줍니다.
 
 ```cpp
-model.lmHead.setProfileTag("");
+net.lmHead.setProfileTag("");
 ```
 
 태그 구성이 바뀌면 기존 기록은 초기화됩니다. 측정 대상이 서로 다른 값을 하나의 평균에 섞지 않기 위해서입니다.
@@ -115,7 +115,7 @@ model.lmHead.setProfileTag("");
 출력하지 않고 특정 태그의 평균 GPU 시간만 숫자로 읽을 수도 있습니다.
 
 ```cpp
-double ms = model.getGpuTimeMs("Linear.[768x2304]");
+double ms = net.getGpuTimeMs("Linear.[768x2304]");
 ```
 
 `getGpuTimeMs()`는 `.`을 계층으로 해석하지 않고 **태그 전체를 하나의 이름으로 찾습니다**. 따라서 계층형 태그를 사용했다면 `"Linear"`이 아니라 `"Linear.[768x2304]"`처럼 정확한 전체 태그를 넘겨야 합니다.

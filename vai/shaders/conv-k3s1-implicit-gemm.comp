@@ -1,7 +1,7 @@
 /*=============================================================================
  K=3/S=1 non-cooperative implicit-GEMM variant.
  Bindings: O=0, I=1, W=2, BIAS=3, SCALE=4, RESIDUAL=5.
- Dispatch: x=pc.n tiles, y=pc.co tiles.
+ Dispatch: x=pc.n tiles, y=pc.co tiles, z=pc.batch images.
  Push constants: PushConstants.
 =============================================================================*/
 #version 460
@@ -25,6 +25,7 @@ layout(constant_id = 8) const bool shortcut = false;
 layout(constant_id = 9) const bool structuredInputLoad = false;
 layout(constant_id = 10) const bool padA = true;
 layout(constant_id = 11) const bool wideFp32Tile = false;
+layout(constant_id = 12) const uint residualOrder = 0u;  // 0: after the epilogue, 1: before it
 layout(constant_id = SPEC_ID_TYPE_CI) const uint CI_SPEC = 0u;
 layout(constant_id = SPEC_ID_TYPE_CO) const uint CO_SPEC = 0u;
 layout(constant_id = SPEC_ID_TYPE_HI) const uint HI_SPEC = 0u;
@@ -65,7 +66,10 @@ layout(push_constant) uniform PushConstants {
     uint splitCount;
     uint kernel;
     uint stride;
+    uint batch;             // images, stacked on the dispatch z axis
 } pc;
+
+#include "common/conv_batch.h"
 
 const uint tN = 4u;
 const uint WIDE_A_LOAD_SLOTS =
@@ -82,7 +86,11 @@ shared float16_t Bs16[typeW == DTYPE_F16 ? B_ELEMS : 1u];
 shared float AsWide[wideFp32Tile ? 2u * wgK * wgM : 1u];
 shared vec4 BsWide[wideFp32Tile ? 2u * wgK * (wgN / 4u) : 1u];
 
-float readI(uint index) { return typeI == DTYPE_F32 ? bufferI_f32[index] : float(bufferI_f16[index]); }
+// The workgroup's image within I, and within O and the residual.
+uint imageInputBase = 0u;
+uint imageOutputBase = 0u;
+
+float readI(uint index) { index += imageInputBase; return typeI == DTYPE_F32 ? bufferI_f32[index] : float(bufferI_f16[index]); }
 float readW(uint index) { return typeW == DTYPE_F32 ? bufferW_f32[index] : float(bufferW_f16[index]); }
 float readBias(uint channel)
 {
@@ -90,10 +98,11 @@ float readBias(uint channel)
     return typeP == DTYPE_F32 ? bufferBias_f32[channel] : float(bufferBias_f16[channel]);
 }
 float readScale(uint channel) { return typeP == DTYPE_F32 ? bufferScale_f32[channel] : float(bufferScale_f16[channel]); }
-float readResidual(uint index) { return typeI == DTYPE_F32 ? bufferRes_f32[index] : float(bufferRes_f16[index]); }
+float readResidual(uint index) { index += imageOutputBase; return typeI == DTYPE_F32 ? bufferRes_f32[index] : float(bufferRes_f16[index]); }
 
 void writeO(uint index, float value)
 {
+    index += imageOutputBase;
     if (typeO == DTYPE_F32)
         bufferO_f32[index] = value;
     else
@@ -134,8 +143,10 @@ float finishOutput(uint channel, uint index, float value)
     value = hasScale == 0u
         ? value + readBias(channel)
         : fma(value, readScale(channel), readBias(channel));
+    if (shortcut && residualOrder == 1u)
+        value += readResidual(index);
     value = applyEpilogue(value);
-    if (shortcut)
+    if (shortcut && residualOrder == 0u)
         value += readResidual(index);
     return value;
 }
@@ -158,7 +169,7 @@ float readWideInput(
     const uint safeChannel = min(channel, Ci - 1u);
     const uint safeH = min(hIn, Hi - 1u);
     const uint safeW = min(wIn, Wi - 1u);
-    const float value = bufferI_f32[(safeChannel * Hi + safeH) * Wi + safeW];
+    const float value = bufferI_f32[imageInputBase + (safeChannel * Hi + safeH) * Wi + safeW];
     return valid ? value : 0.0;
 }
 
@@ -247,9 +258,11 @@ vec4 finishWideOutput(uint channel, uint outputIndex, vec4 value)
     value = hasScale == 0u
         ? value + vec4(bias)
         : fma(value, vec4(bufferScale_f32[channel]), vec4(bias));
+    if (shortcut && residualOrder == 1u)
+        value += bufferRes_4f32[(imageOutputBase + outputIndex) / 4u];
     value = applyEpilogue(value);
-    if (shortcut)
-        value += bufferRes_4f32[outputIndex / 4u];
+    if (shortcut && residualOrder == 0u)
+        value += bufferRes_4f32[(imageOutputBase + outputIndex) / 4u];
     return value;
 }
 
@@ -324,7 +337,7 @@ void runWideFp32(uint Hi, uint Wi, uint Ho, uint Wo, uint Ci, uint Co)
             if (channel < Co && n < N)
             {
                 const uint outputIndex = channel * N + n;
-                bufferO_4f32[outputIndex / 4u] = finishWideOutput(
+                bufferO_4f32[(imageOutputBase + outputIndex) / 4u] = finishWideOutput(
                     channel, outputIndex, acc[tm * 2u + group]);
             }
         }
@@ -341,6 +354,9 @@ void main()
     const uint Co = CO_SPEC != 0u ? CO_SPEC : pc.co;
     const uint N = Ho * Wo;
     const uint KK = Ci * 9u;
+    const uint image = convImage(pc.batch);
+    imageInputBase = image * Ci * Hi * Wi;
+    imageOutputBase = image * Co * N;
     const uint localId = gl_LocalInvocationID.x;
     const uint threadsN = wgN / tN;
     const uint threadN = localId % threadsN;

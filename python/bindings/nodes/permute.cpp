@@ -1,4 +1,4 @@
-#include "python/bindings/nodes/bind-node.h"
+#include "nodes.h"
 #include "vai/nodes/permute.h"
 #include <cstdint>
 #include <optional>
@@ -7,7 +7,7 @@
 
 namespace pyvai {
 
-static void bindPermute(nb::module_& m)
+void bindPermute(nb::module_& m)
 {
     nb::class_<vai::node::Permute, vai::Node>(m, "PermuteNode")
         .def(
@@ -32,11 +32,8 @@ static void bindPermute(nb::module_& m)
                             "PermuteNode: perms must be a permutation of (0, .., len(perms) - 1)");
                     seen[axis] = true;
                 }
-                new (self) vai::node::Permute(
-                    std::move(perms),
-                    vai::node::Permute::Config{
-                        .oDtype = o_dtype.value_or(vai::Dtype::None),
-                    });
+                new (self) vai::node::Permute(std::move(perms), vai::node::Permute::Config{});
+                self->setODtype(o_dtype.value_or(vai::Dtype::None), dtypeKey());
             },
             nb::arg("perms"),
             nb::arg("o_dtype") = nb::none(),
@@ -45,6 +42,5 @@ static void bindPermute(nb::module_& m)
             "order and the dtype is unchanged."
         );
 }
-PYVAI_NODE_BINDING(bindPermute);
 
 }   // namespace pyvai

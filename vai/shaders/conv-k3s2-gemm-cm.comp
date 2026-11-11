@@ -1,8 +1,8 @@
 /*=============================================================================
  Unified FP16 cooperative-matrix K=3/S=2 GEMM convolution.
  packedLayout selects transformed packed weights; false uses direct weights.
- Bindings: O=0, I=1, W=2, BIAS=3, SCALE=4.
- Dispatch: x=N tiles, y=M tiles, z=split count for both layouts.
+ Bindings: O=0, I=1, W=2, BIAS=3, SCALE=4, RESIDUAL=5.
+ Dispatch: x=N tiles, y=M tiles, z=pc.batch images x split count for both layouts.
  Push constants: PushConstants.
 =============================================================================*/
 #version 460
@@ -29,6 +29,8 @@ layout(constant_id = 7) const bool alignN = false;
 layout(constant_id = 8) const bool alignK = true;
 layout(constant_id = 9) const bool packedLayout = false;
 layout(constant_id = 10) const bool directOutput = false;
+layout(constant_id = 11) const bool shortcut = false;
+layout(constant_id = 12) const uint residualOrder = 0u;  // 0: after the epilogue, 1: before it
 layout(constant_id = SPEC_ID_TYPE_CI) const uint CI_SPEC = 0u;
 layout(constant_id = SPEC_ID_TYPE_CO) const uint CO_SPEC = 0u;
 layout(constant_id = SPEC_ID_TYPE_HI) const uint HI_SPEC = 0u;
@@ -53,6 +55,8 @@ layout(set = 0, binding = 3) restrict readonly buffer BIAS_BUF_F32 { float buffe
 layout(set = 0, binding = 3) restrict readonly buffer BIAS_BUF_F16 { float16_t bufferBias_f16[]; };
 layout(set = 0, binding = 4) restrict readonly buffer SCALE_BUF_F32 { float bufferScale_f32[]; };
 layout(set = 0, binding = 4) restrict readonly buffer SCALE_BUF_F16 { float16_t bufferScale_f16[]; };
+layout(set = 0, binding = 5) restrict readonly buffer RES_BUF_F32 { float bufferRes_f32[]; };
+layout(set = 0, binding = 5) restrict readonly buffer RES_BUF_F16 { float16_t bufferRes_f16[]; };
 
 layout(push_constant) uniform PushConstants {
     uint hi;
@@ -65,7 +69,10 @@ layout(push_constant) uniform PushConstants {
     uint splitCount;
     uint kernel;
     uint stride;
+    uint batch;             // images, stacked on the dispatch z axis
 } pc;
+
+#include "common/conv_batch.h"
 
 const uint tM = 16u, tN = 16u, tK = 16u;
 const uint sgSize = 32u;
@@ -104,13 +111,28 @@ shared float16_t Cs[CS_SIZE];
 #define accMat16 coopmat<float16_t, gl_ScopeSubgroup, tM, tN, gl_MatrixUseAccumulator>
 #define accMat32 coopmat<float, gl_ScopeSubgroup, tM, tN, gl_MatrixUseAccumulator>
 
-float16_t readI(uint i) { return typeI == DTYPE_F32 ? float16_t(bufferI_f32[i]) : bufferI_f16[i]; }
+// The workgroup's image within I, and within O and the residual. The output
+// writers take whole indices: a split-K partial has its own image-major layout.
+uint imageInputBase = 0u;
+uint imageOutputBase = 0u;
+
+float16_t readI(uint i) { i += imageInputBase; return typeI == DTYPE_F32 ? float16_t(bufferI_f32[i]) : bufferI_f16[i]; }
 float readBias(uint m)
 {
     if (hasBias == 0u) return 0.0;
     return typeP == DTYPE_F32 ? bufferBias_f32[m] : float(bufferBias_f16[m]);
 }
 float readScale(uint m) { return typeP == DTYPE_F32 ? bufferScale_f32[m] : float(bufferScale_f16[m]); }
+float readResidual(uint i) { i += imageOutputBase; return typeI == DTYPE_F32 ? bufferRes_f32[i] : float(bufferRes_f16[i]); }
+
+// The residual's first `count` elements from i; the rest read as 0.
+vec4 readResidual4(uint i, uint count)
+{
+    return vec4(count > 0u ? readResidual(i) : 0.0,
+                count > 1u ? readResidual(i + 1u) : 0.0,
+                count > 2u ? readResidual(i + 2u) : 0.0,
+                count > 3u ? readResidual(i + 3u) : 0.0);
+}
 
 void writeO(uint i, float value)
 {
@@ -128,12 +150,19 @@ void writeO4(uint i, vec4 value)
         bufferO_4f16[i] = f16vec4(value);
 }
 
-vec4 applyOutput(uint m, vec4 value)
+// Output channel m, elements [base, base + count) of O.
+vec4 applyOutput(uint m, uint base, uint count, vec4 value)
 {
     value = hasScale == 0u
         ? value + vec4(readBias(m))
         : fma(value, vec4(readScale(m)), vec4(readBias(m)));
-    return applyEpilogue(value);
+    const vec4 residual = shortcut ? readResidual4(base, count) : vec4(0.0);
+    if (shortcut && residualOrder == 1u)
+        value += residual;
+    value = applyEpilogue(value);
+    if (shortcut && residualOrder == 0u)
+        value += residual;
+    return value;
 }
 
 void writeOutputRow4(uint base, uint n0, uint N, vec4 value)
@@ -176,6 +205,7 @@ void directWriteTilePair(
     subgroupBarrier();
 
     const uint vecsPerRow = tN >> 2u;
+    // splitId is the partial's image-major slot, image * splits + split.
     uint partialOffset = splitId * Co * N;
     for (uint vecIdx = lane;
          vecIdx < CM_TILE_ELEMS / 4u;
@@ -240,10 +270,10 @@ void directWriteTile(accMat32 acc, uint m0, uint n0, uint N)
             Cs[base + 2u],
             Cs[base + 3u]);
         writeOutputRow4(
-            m * N + n,
+            imageOutputBase + m * N + n,
             n,
             N,
-            applyOutput(m, v));
+            applyOutput(m, m * N + n, n < N ? min(4u, N - n) : 0u, v));
     }
 
     subgroupMemoryBarrierShared();
@@ -294,7 +324,7 @@ void runDirect(uint Hi, uint Wi, uint Ho, uint Wo, uint Ci, uint Co, uint N, uin
     uint tileCol = gl_WorkGroupID.x;
     uint tileRow = gl_WorkGroupID.y;
     uint subgroup = gl_SubgroupID;
-    uint splitId = gl_WorkGroupID.z;
+    uint splitId = convImageZ(pc.batch);
     uint nBase = tileCol * wgN;
     uint m0;
     uint bTileBase = 0u;
@@ -401,11 +431,11 @@ void runDirect(uint Hi, uint Wi, uint Ho, uint Wo, uint Ci, uint Co, uint N, uin
         directWriteTilePair(
             acc[0], acc[1], m0,
             nBase, nBase + tN,
-            splitId, false, Co, N);
+            gl_WorkGroupID.z, false, Co, N);
         directWriteTilePair(
             acc[2], acc[3], m0,
             nBase + 2u * tN, nBase + 3u * tN,
-            splitId, true, Co, N);
+            gl_WorkGroupID.z, true, Co, N);
         return;
     }
 
@@ -526,6 +556,7 @@ void packedWriteFragmentDirect16(
         return;
 
     const uint mBase = m0 + (lane >> 4u) * 8u;
+    // splitId is the partial's image-major slot, image * splits + split.
     const uint partialOffset = splitId * Co * N;
     [[unroll]]
     for (uint element = 0u; element < 8u; ++element)
@@ -535,7 +566,7 @@ void packedWriteFragmentDirect16(
         if (SPLIT)
             bufferO_f16[partialOffset + m * N + n] = float16_t(value);
         else
-            writeO(m * N + n, applyOutput(m, vec4(value)).x);
+            writeO(imageOutputBase + m * N + n, applyOutput(m, m * N + n, 1u, vec4(value)).x);
     }
 }
 
@@ -585,18 +616,40 @@ void packedWriteFragmentDirect32(
             }
         }
 
+        accMat32 residualValues = accMat32(0.0);
+        if (shortcut)
+        {
+            if (typeI == DTYPE_F32)
+                coopMatLoad(
+                    residualValues, bufferRes_f32, imageOutputBase + m0 * N + n0, N,
+                    gl_CooperativeMatrixLayoutRowMajor);
+            else
+            {
+                accMat16 residualValuesF16;
+                coopMatLoad(
+                    residualValuesF16, bufferRes_f16, imageOutputBase + m0 * N + n0, N,
+                    gl_CooperativeMatrixLayoutRowMajor);
+                residualValues = accMat32(residualValuesF16);
+            }
+        }
+
         [[unroll]]
         for (int element = 0; element < acc.length(); ++element)
         {
-            const float value = hasScale == 0u
+            float value = hasScale == 0u
                 ? acc[element] + biasValues[element]
                 : fma(acc[element], scaleValues[element], biasValues[element]);
-            acc[element] = applyEpilogue(value);
+            if (shortcut && residualOrder == 1u)
+                value += residualValues[element];
+            value = applyEpilogue(value);
+            if (shortcut && residualOrder == 0u)
+                value += residualValues[element];
+            acc[element] = value;
         }
     }
 
     const uint outputBase =
-        (SPLIT ? splitId * Co * N : 0u) + m0 * N + n0;
+        (SPLIT ? splitId * Co * N : imageOutputBase) + m0 * N + n0;
     if (!SPLIT && typeO == DTYPE_F32)
         coopMatStore(
             acc, bufferO_f32, outputBase, N,
@@ -629,7 +682,7 @@ void runPacked(uint Hi, uint Wi, uint Ho, uint Wo, uint Ci, uint Co, uint N)
     }
     uint subgroupM   = workgroupM + subgroup * sgM;
 
-    uint tapStart = SPLIT ? gl_WorkGroupID.z * PACKED_TAPS_PER_SPLIT : 0u;
+    uint tapStart = SPLIT ? convImageZ(pc.batch) * PACKED_TAPS_PER_SPLIT : 0u;
     uint tapEnd   = SPLIT ? min(tapStart + PACKED_TAPS_PER_SPLIT, 9u) : 9u;
 
     accMat16 acc16[accFrags];
@@ -790,7 +843,7 @@ void runPacked(uint Hi, uint Wi, uint Ho, uint Wo, uint Ci, uint Co, uint N)
                 continue;
             vec4 v = vec4(float(Cs[cs]), float(Cs[cs + 1u]),
                           float(Cs[cs + 2u]), float(Cs[cs + 3u]));
-            writeO4((m * N + col) >> 2u, applyOutput(m, v));
+            writeO4((imageOutputBase + m * N + col) >> 2u, applyOutput(m, m * N + col, 4u, v));
         }
     }
 }
@@ -804,6 +857,9 @@ void main()
     uint Co = CO_SPEC != 0u ? CO_SPEC : pc.co;
     uint N = Ho * Wo;
     uint KK = Ci * 9u;
+    const uint image = convImage(pc.batch);
+    imageInputBase = image * Ci * Hi * Wi;
+    imageOutputBase = image * Co * N;
 
     if (packedLayout)
         runPacked(Hi, Wi, Ho, Wo, Ci, Co, N);

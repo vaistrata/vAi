@@ -1,5 +1,5 @@
-#include "python/bindings/nodes/bind-node.h"
-#include "python/bindings/nodes/kvcache-counter.h"
+#include "nodes.h"
+#include "kvcache-counter.h"
 #include "vai/nodes/rope.h"
 #include <cstdint>
 #include <optional>
@@ -86,25 +86,28 @@ void bindRopeConfig(nb::module_& m)
 }   // namespace
 
 
-static void bindRope(nb::module_& m)
+void bindRope(nb::module_& m)
 {
     bindRopeConfig(m);
 
-    using C = vai::node::Rope::Config;
-    bindNode<vai::node::Rope>(m, "RopeNode",
-                              "Rotary position embedding of Q or K [..., H, Tq, head_dim], head_dim "
-                              "even and >= 2. out0 has in0's shape.",
-                              required("head_dim", &C::headDim)
-                                  .check([](uint32_t d) { return d >= 2 && d % 2 == 0; }, "must be even and >= 2"),
-                              // checkRopeConfig raises its own error, naming the field it rejects.
-                              field("rope", &C::cfg, plainRope)
-                                  .check(
-                                      [](const vai::RopeConfig& rope) {
-                                          checkRopeConfig(rope, "RopeNode", "rope");
-                                          return true;
-                                      },
-                                      ""),
-                              field("o_dtype", &C::oDtype))
+    nb::class_<vai::node::Rope, vai::Node>(m, "RopeNode")
+        .def(
+            "__init__",
+            [](vai::node::Rope* self, uint32_t head_dim, const vai::RopeConfig& rope,
+               std::optional<vai::Dtype> o_dtype) {
+                requireCurrentNet("RopeNode");
+                if (head_dim < 2 || head_dim % 2 != 0)
+                    throw nb::value_error("RopeNode: head_dim must be even and >= 2");
+                checkRopeConfig(rope, "RopeNode", "rope");
+                new (self) vai::node::Rope(vai::node::Rope::Config{
+                    .cfg = rope,
+                    .headDim = head_dim,
+                });
+                self->setODtype(o_dtype.value_or(vai::Dtype::None), dtypeKey());
+            },
+            nb::arg("head_dim"), nb::arg("rope") = plainRope, nb::arg("o_dtype") = nb::none(),
+            "Rotary position embedding of Q or K [..., H, Tq, head_dim], head_dim "
+            "even and >= 2. out0 has in0's shape.")
         .def(
             "set_kv_cache_counter",
             [](vai::node::Rope& self, KVCacheCounter& counter) { self.setKvCacheCounter(counter.buf); },
@@ -114,6 +117,5 @@ static void bindRope(nb::module_& m)
             "Bind the KV-cache token counter that supplies this forward's "
             "starting position. Required before the first forward.");
 }
-PYVAI_NODE_BINDING(bindRope);
 
 }   // namespace pyvai

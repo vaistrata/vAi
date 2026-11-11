@@ -30,7 +30,6 @@ def test_linear(m, k, n, has_bias, epilogue, split_size, tol, alt_m):
         lambda: nodes.LinearNode(
             in_dim=k,
             out_dim=n,
-            has_bias=has_bias,
             epilogue=getattr(pyvai.Epilogue, epilogue),
             split_size=split_size,
         ),

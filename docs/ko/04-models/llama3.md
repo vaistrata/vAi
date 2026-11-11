@@ -7,9 +7,11 @@ Llama 3(Grattafiori et al., 2024)는 Meta에서 개발한 디코더 전용 트�
 ## 설정
 
 ```cpp
+namespace llama3 = model::production::llama3;
+
 auto modelCfg = llama3::ModelConfig::_3_2_1B();
 
-llama3::Model model({
+llama3::Net net({
     .device       = device,
     .defaultDtype = Dtype::Fp16,
     .ioDtypeHint  = Dtype::Fp32,
@@ -20,7 +22,7 @@ llama3::Model model({
 
 ### NeuralNetConfig
 
-Llama 3는 기본값을 그대로 쓰되 각 `RmsNorm`만 `wDtype = fp32`로 강제합니다.
+Llama 3는 기본값을 그대로 쓰고, 로더가 각 `RmsNorm`의 scale만 fp32로 읽습니다.
 세부사항은 [신경망](../03-usage/neural-net.md) 참조.
 
 ### ModelConfig
@@ -74,12 +76,12 @@ input         - "residual"/mhAttn         - "residual"/ffn;
 GQA를 쓰기 때문에 K와 V는 쿼리보다 적은 수의 헤드로 투영됩니다(`H == 32`, `Hkv == 8`). RoPE는 Q와 K에만 적용되고 V는 그대로 통과합니다.
 
 ```cpp
-input - toQ - splitQ - perQ - ropeQ - "Q"/attn - mergeOut - toOut;
-input - toK - splitK - perK - ropeK - "K"/attn;
-input - toV - splitV - perV         - "V"/attn;
+input - projQ - splitQ - perQ - ropeQ - "Q"/attn - mergeOut - projOut;
+input - projK - splitK - perK - ropeK - "K"/attn;
+input - projV - splitV - perV         - "V"/attn;
 ```
 
-`toOut`이 `acceptResidual = true`라 블록의 잔차를 `residual`로 받아 투영 결과에 더합니다.
+`projOut`이 `acceptResidual = true`라 블록의 잔차를 `residual`로 받아 투영 결과에 더합니다.
 
 `Rope`는 KV 캐시 토큰 카운터를 공유해서, decode 스텝에서도 이번 forward 안의 오프셋이 아니라 누적 절대 위치로 회전합니다.
 
@@ -109,25 +111,27 @@ gateValue - gatedMul - out;   // 2048 -> 16384 -> 8192 -> 2048
 
 ## 체크포인트
 
-체크포인트는 사이즈별 폴더(`ModelConfig::variant`)에, 토크나이저는 그 위에 둡니다.
+체크포인트는 `data/ckpts/llama3/meta/` 아래 사이즈별 폴더(`ModelConfig::variant`)에, 토크나이저는 `data/tokenizers/llama3/`에 둡니다.
 `tokenizer.json`은 두 크기가 함께 씁니다.
 
 ```
-data/llama3/
-├── tokenizer.json
-├── 3.2-1B/
-│   └── model.safetensors
-├── 3.2-3B/
-│   └── model.safetensors
-└── ...
+data/
+├── ckpts/llama3/meta/
+│   ├── 3.2-1B/
+│   │   └── model.safetensors
+│   ├── 3.2-3B/
+│   │   └── model.safetensors
+│   └── ...
+└── tokenizers/llama3/
+    └── tokenizer.json
 ```
 
 해당 HuggingFace 저장소에서 받아 별도 변환 없이 그대로 씁니다. 가중치는 [Llama 3.2 Community License](https://github.com/meta-llama/llama-models/blob/main/models/llama3_2/LICENSE)를 따릅니다.
 
 ```bash
-mkdir -p data/llama3/3.2-1B && cd data/llama3
-curl -LO https://huggingface.co/unsloth/Llama-3.2-1B-Instruct/resolve/main/tokenizer.json
-curl -L -o 3.2-1B/model.safetensors \
+mkdir -p data/ckpts/llama3/meta/3.2-1B data/tokenizers/llama3
+curl -L -o data/tokenizers/llama3/tokenizer.json https://huggingface.co/unsloth/Llama-3.2-1B-Instruct/resolve/main/tokenizer.json
+curl -L -o data/ckpts/llama3/meta/3.2-1B/model.safetensors \
   https://huggingface.co/unsloth/Llama-3.2-1B-Instruct/resolve/main/model.safetensors
 ```
 
@@ -137,11 +141,11 @@ HuggingFace 저장소의 **Files and versions** 탭에서 `model.safetensors`와
 
 ### 가중치 로딩
 
-체크포인트를 그래프 슬롯에 매핑하는 코드는 [`models/llama3/meta-weights.h`](../../../models/llama3/meta-weights.h)에 있습니다.
-실행하는 쪽은 한 줄이면 됩니다. 경로는 특수화가 조립하므로(`VAI_DATA_DIR "/llama3/" + modelCfg.variant`) 사이즈만 정하면 됩니다. 배포명 태그의 원리는 [커스텀 모델 작성의 `배포명-weights.h`](../05-contributing-models.md#배포명-weightsh) 참조.
+체크포인트를 그래프 슬롯에 매핑하는 코드는 [`models/production/llama3/meta-weights.h`](../../../models/production/llama3/meta-weights.h)에 있습니다.
+실행하는 쪽은 한 줄이면 됩니다. 경로는 특수화가 조립하므로(`VAI_DATA_DIR "/ckpts/llama3/meta/" + modelCfg.variant`) 사이즈만 정하면 됩니다. 배포명 태그의 원리는 [커스텀 모델 작성의 `배포명-weights.h`](../05-contributing-models.md#배포명-weightsh) 참조.
 
 ```cpp
-loadWeights<"meta">(model);
+loadWeights<"meta">(net);
 ```
 
 ## 실행
@@ -149,19 +153,22 @@ loadWeights<"meta">(model);
 ### 폴더 구조
 
 ```
-models/llama3/
-├── model.h                       모델 정의 및 NodeGroup 정의
-└── meta-weights.h                Meta(HuggingFace `meta-llama/*`) 체크포인트 매핑
-
-examples/llama3/
+models/production/llama3/
+├── net.h                         모델 정의 및 NodeGroup 정의
+├── meta-weights.h                Meta(HuggingFace `meta-llama/*`) 체크포인트 매핑
 ├── demo.cpp                      demo-llama3, 한 프롬프트 완성 + 시간 측정
-├── chat.cpp                      chat-llama3, 다중 턴 대화
 └── CMakeLists.txt
 
-data/llama3/
-├── tokenizer.json
-└── <variant>/                    ModelConfig::variant (3.2-1B, 3.2-3B)
-    └── model.safetensors
+examples/chat-llama3/
+├── main.cpp                      chat-llama3, 다중 턴 대화
+└── CMakeLists.txt
+
+data/
+├── ckpts/llama3/meta/
+│   └── <variant>/                    ModelConfig::variant (3.2-1B, 3.2-3B)
+│       └── model.safetensors
+└── tokenizers/llama3/
+    └── tokenizer.json
 ```
 
 ### 빌드 및 실행
@@ -177,7 +184,7 @@ cmake --build build --config RelWithDebInfo
 ./build/bin/demo-llama3
 ```
 
-[`demo.cpp`](../../../examples/llama3/demo.cpp)의 `prompt`에 적은 문장을 이어 새 문장을 생성합니다. `prefill`과 `decode` 시간을 각각 측정해 생성된 문장과 함께 출력합니다.
+[`demo.cpp`](../../../models/production/llama3/demo.cpp)의 `prompt`에 적은 문장을 이어 새 문장을 생성합니다. `prefill`과 `decode` 시간을 각각 측정해 생성된 문장과 함께 출력합니다.
 
 ### chat-llama3
 
@@ -185,7 +192,7 @@ cmake --build build --config RelWithDebInfo
 ./build/bin/chat-llama3
 ```
 
-[`chat.cpp`](../../../examples/llama3/chat.cpp)의 다중 턴 대화입니다. 대화 이력이 KV 캐시에 남고 빈 줄을 넣거나 캐시가 차면 끝납니다.
+[`main.cpp`](../../../examples/chat-llama3/main.cpp)의 다중 턴 대화입니다. 대화 이력이 KV 캐시에 남고 빈 줄을 넣거나 캐시가 차면 끝납니다.
 
 ## 벤치마크 요약
 

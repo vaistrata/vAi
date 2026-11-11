@@ -1,14 +1,14 @@
 #ifndef VAI_NODES_CYCLIC_TABLE_READER_H
 #define VAI_NODES_CYCLIC_TABLE_READER_H
 
-#include "vai/nodes/node-common.h"
+#include "node-common.h"
 
 namespace vai::node {
 
 /*=============================================================================
   CyclicTableReader - read successive table rows, wrapping at the end
   Input:  in0    [*]                   only scheduling: the node runs when it is fed
-  Params: table  [numRows, ...]       rows read in cyclic order, at tableDtype
+  Params: table  [numRows, ...]       rows read in cyclic order, at the loader's dtype
   Output: out0   table's shape without the leading axis, at oDtype
 
   Run k after rewind() copies row k % numRows, so a loop whose per-step
@@ -29,9 +29,7 @@ public:
     };
 
     struct Config {
-        uint32_t numRows;                         // number of rows in the table
-        vai::Dtype tableDtype = vai::Dtype::Fp32;   // None: wDefaultDtype
-        vai::Dtype oDtype = vai::Dtype::None;       // None: oDefaultDtype
+        uint32_t numRows;   // number of rows in the table
     } config_;
 
     CyclicTableReader(Config config);
@@ -54,8 +52,6 @@ inline CyclicTableReader::CyclicTableReader(Config config)
 
     VAI_ASSERT(config_.numRows >= 1);
 
-    config_.tableDtype = (config_.tableDtype == Dtype::None) ? wDefaultDtype() : config_.tableDtype;
-    config_.oDtype = (config_.oDtype == Dtype::None) ? oDefaultDtype() : config_.oDtype;
 
     // Device-local, so the atomics stay in VRAM; host-visible, so rewind() can write it.
     workgroupCounterBuffer = device().createBuffer({
@@ -69,25 +65,26 @@ inline CyclicTableReader::CyclicTableReader(Config config)
 
 inline void CyclicTableReader::prepare()
 {
+    const Dtype oDtype = (oDtype_ == Dtype::None) ? oDefaultDtype() : oDtype_;
     const Tensor& table = (*this)["table"];
     VAI_ASSERT(table.shape().size() >= 2 && table.shape()[0] == config_.numRows);
-    VAI_ASSERT(table.dtype() == config_.tableDtype);
 
     std::vector<uint32_t> rowShape(table.shape().begin() + 1, table.shape().end());
     const PipeParams p = { .aligned = outerSize(rowShape, 0) % 4 == 0 };
     if (!pipe || p != pipeParams)
     {
         pipeParams = p;
-        pipe = pipelinePool().request("cyclic-table-reader", {
-            eva::constant_id<SPEC_ID_TYPE_O>(config_.oDtype),       // typeO
-            eva::constant_id<SPEC_ID_TYPE_I>(config_.tableDtype),   // typeI (table)
-            eva::constant_id<SPEC_ID_ALIGNED>(p.aligned ? 1u : 0u)  // aligned (vec4)
-        });
+        pipe = pipelinePool().request("cyclic-table-reader",
+                                      {
+                                          eva::constant_id<SPEC_ID_TYPE_O>(oDtype),                // typeO
+                                          eva::constant_id<SPEC_ID_TYPE_I>(table.dtype()),         // typeI (table)
+                                          eva::constant_id<SPEC_ID_ALIGNED>(p.aligned ? 1u : 0u)   // aligned (vec4)
+                                      });
         if (!descSet)
             descSet = gVaiDestSetPool(pipe.descSetLayout(0));
     }
 
-    (*this)["out0"] = Tensor(std::move(rowShape), config_.oDtype);
+    (*this)["out0"] = Tensor(std::move(rowShape), oDtype);
 }
 
 inline void CyclicTableReader::run(eva::CommandBuffer cmdBuff)

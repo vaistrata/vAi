@@ -1,4 +1,4 @@
-#include "python/bindings/nodes/bind-node.h"
+#include "nodes.h"
 #include "vai/nodes/index-copy.h"
 #include <cstdint>
 #include <cstring>
@@ -44,16 +44,23 @@ struct PyIndexCopy : vai::node::IndexCopy
 }   // namespace
 
 
-static void bindIndexCopy(nb::module_& m)
+void bindIndexCopy(nb::module_& m)
 {
-    using C = vai::node::IndexCopy::Config;
-    bindNode<PyIndexCopy>(m, "IndexCopyNode",
-                          "torch.index_copy along `axis`: out0 is in0 with slice index[n] taken from "
-                          "slice n of in1, which is in0's shape with that axis replaced by len(index). "
-                          "Both inputs share a dtype. out0 aliases in0, so no other node may read in0 "
-                          "after this one; a forward without in1 passes in0 through. An index past "
-                          "in0's axis leaves its slice unwritten.",
-                          field("axis", &C::axis))
+    nb::class_<PyIndexCopy, vai::Node>(m, "IndexCopyNode")
+        .def(
+            "__init__",
+            [](PyIndexCopy* self, uint32_t axis) {
+                requireCurrentNet("IndexCopyNode");
+                new (self) PyIndexCopy(vai::node::IndexCopy::Config{
+                    .axis = axis,
+                });
+            },
+            nb::arg("axis") = 0u,
+            "torch.index_copy along `axis`: out0 is in0 with slice index[n] taken from "
+            "slice n of in1, which is in0's shape with that axis replaced by len(index). "
+            "Both inputs share a dtype. out0 aliases in0, so no other node may read in0 "
+            "after this one; a forward without in1 passes in0 through. An index past "
+            "in0's axis leaves its slice unwritten.")
         .def(
             "set_index",
             [](PyIndexCopy& self, const std::vector<uint32_t>& index) {
@@ -67,6 +74,5 @@ static void bindIndexCopy(nb::module_& m)
             "no longer than any before it re-records nothing. A length other than in1's "
             "size along the axis is the next forward's error.");
 }
-PYVAI_NODE_BINDING(bindIndexCopy);
 
 }   // namespace pyvai

@@ -1,4 +1,4 @@
-#include "model.h"
+#include "net.h"
 #include "google-weights.h"
 #include "vai/utils/tokenizer.h"
 #include "eva-runtime.h"
@@ -12,7 +12,9 @@
 #include <vector>
 
 using namespace vai;
+using namespace vai::utils;
 using namespace gemma3_bench;
+namespace gemma3 = model::production::gemma3;
 
 struct SizeOption { const char* name; gemma3::ModelConfig (*config)(); };
 
@@ -116,15 +118,14 @@ int main(int argc, char** argv)
     printf("model: gemma3 %s (%s)\n",
            modelCfg.variant, args.precision.c_str());
 
-    gemma3::Model model({
-        .device = device,
-        .wDefaultDtype = precision,
-    }, modelCfg,{
-        .kvCacheDtype = precision,
-        .maxRuntimeContext = gemma3_bench::runtimeContext
-    });
+    gemma3::Net net(
+        {
+            .device = device,
+            .wDefaultDtype = precision,
+        },
+        modelCfg, {.kvCacheDtype = precision, .maxRuntimeContext = gemma3_bench::runtimeContext});
 
-    loadWeights<"google">(model);
+    loadWeights<"google">(net);
 
     const std::string tokenizerPath = std::string(VAI_DATA_DIR "/gemma3/") + modelCfg.variant + "/tokenizer.json";
 
@@ -175,14 +176,10 @@ int main(int argc, char** argv)
 
         const int nPrompt = static_cast<int>(promptTokens.size());
 
-        if (nPrompt + nGen >
-            static_cast<int>(model.runtimeCfg.maxRuntimeContext)) {
-            fprintf(
-                stderr,
-                "error: prompt %d + generation exceeds the %u-token context\n",
-                nPrompt,
-                model.runtimeCfg.maxRuntimeContext
-            );
+        if (nPrompt + nGen > static_cast<int>(net.runtimeCfg.maxRuntimeContext))
+        {
+            fprintf(stderr, "error: prompt %d + generation exceeds the %u-token context\n", nPrompt,
+                    net.runtimeCfg.maxRuntimeContext);
             return 1;
         }
 
@@ -190,10 +187,10 @@ int main(int argc, char** argv)
         Tensor outToken;
 
         auto prefill = [&]() -> int {
-            model.resetCache();
+            net.resetCache();
             inTokens.setData(promptTokens.data());
 
-            model.prefill(inImage, inTokens, &outToken);
+            net.prefill(inImage, inTokens, &outToken);
 
             return static_cast<int>(
                 outToken.getData<uint32_t>()[0]
@@ -205,7 +202,7 @@ int main(int argc, char** argv)
         for (int i = 0; i < nWarmPre; ++i) tok = prefill();
 
         for (int i = 0; i < nWarmGen; ++i) {
-            model.decode(&outToken);
+            net.decode(&outToken);
             tok = static_cast<int>(outToken.getData<uint32_t>()[0]);
         }
 
@@ -234,7 +231,7 @@ int main(int argc, char** argv)
 
             for (int gen = 0; gen < nGen; ++gen)
             {
-                model.decode(&outToken);
+                net.decode(&outToken);
                 tok = static_cast<int>(outToken.getData<uint32_t>()[0]);
 
                 if (keep) generated.push_back(tok);

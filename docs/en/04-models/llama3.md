@@ -7,9 +7,11 @@ Llama 3 (Grattafiori et al., 2024) is a decoder-only Transformer-based language 
 ## Configuration
 
 ```cpp
+namespace llama3 = model::production::llama3;
+
 auto modelCfg = llama3::ModelConfig::_3_2_1B();
 
-llama3::Model model({
+llama3::Net net({
     .device       = device,
     .defaultDtype = Dtype::Fp16,
     .ioDtypeHint  = Dtype::Fp32,
@@ -20,7 +22,7 @@ llama3::Model model({
 
 ### NeuralNetConfig
 
-Llama 3 uses the defaults as they are, but forces `wDtype = fp32` for every `RmsNorm`.
+Llama 3 uses the defaults as they are; the loader reads every `RmsNorm`'s scale at fp32.
 See [NeuralNet](../03-usage/neural-net.md) for details.
 
 ### ModelConfig
@@ -74,12 +76,12 @@ Instead of using a separate `Add`, the final projection of each sublayer accepts
 Because GQA is used, K and V are projected to fewer heads than the queries (`H == 32`, `Hkv == 8`). RoPE is applied only to Q and K, while V passes through unchanged.
 
 ```cpp
-input - toQ - splitQ - perQ - ropeQ - "Q"/attn - mergeOut - toOut;
-input - toK - splitK - perK - ropeK - "K"/attn;
-input - toV - splitV - perV         - "V"/attn;
+input - projQ - splitQ - perQ - ropeQ - "Q"/attn - mergeOut - projOut;
+input - projK - splitK - perK - ropeK - "K"/attn;
+input - projV - splitV - perV         - "V"/attn;
 ```
 
-Because `toOut` has `acceptResidual = true`, it accepts the block residual as `residual` and adds it to the projection result.
+Because `projOut` has `acceptResidual = true`, it accepts the block residual as `residual` and adds it to the projection result.
 
 `Rope` shares the KV cache token counter, so even during a decode step, it rotates using the accumulated absolute position rather than the offset within the current forward.
 
@@ -109,25 +111,27 @@ gateValue - gatedMul - out;   // 2048 -> 16384 -> 8192 -> 2048
 
 ## Checkpoint
 
-Checkpoints are placed in a folder for each size (`ModelConfig::variant`), with the tokenizer one level above them.
+Checkpoints are placed in a folder for each size (`ModelConfig::variant`) under `data/ckpts/llama3/meta/`, and the tokenizer in `data/tokenizers/llama3/`.
 Both sizes share `tokenizer.json`.
 
 ```
-data/llama3/
-├── tokenizer.json
-├── 3.2-1B/
-│   └── model.safetensors
-├── 3.2-3B/
-│   └── model.safetensors
-└── ...
+data/
+├── ckpts/llama3/meta/
+│   ├── 3.2-1B/
+│   │   └── model.safetensors
+│   ├── 3.2-3B/
+│   │   └── model.safetensors
+│   └── ...
+└── tokenizers/llama3/
+    └── tokenizer.json
 ```
 
 Download the files from the corresponding HuggingFace repository and use them as is without a separate conversion. The weights are licensed under the [Llama 3.2 Community License](https://github.com/meta-llama/llama-models/blob/main/models/llama3_2/LICENSE).
 
 ```bash
-mkdir -p data/llama3/3.2-1B && cd data/llama3
-curl -LO https://huggingface.co/unsloth/Llama-3.2-1B-Instruct/resolve/main/tokenizer.json
-curl -L -o 3.2-1B/model.safetensors \
+mkdir -p data/ckpts/llama3/meta/3.2-1B data/tokenizers/llama3
+curl -L -o data/tokenizers/llama3/tokenizer.json https://huggingface.co/unsloth/Llama-3.2-1B-Instruct/resolve/main/tokenizer.json
+curl -L -o data/ckpts/llama3/meta/3.2-1B/model.safetensors \
   https://huggingface.co/unsloth/Llama-3.2-1B-Instruct/resolve/main/model.safetensors
 ```
 
@@ -137,11 +141,11 @@ Download `model.safetensors` and `tokenizer.json` directly from the **Files and 
 
 ### Weight loading
 
-The code that maps checkpoints to graph slots is in [`models/llama3/meta-weights.h`](../../../models/llama3/meta-weights.h).
-Only one line is needed at the call site. The specialization assembles the path (`VAI_DATA_DIR "/llama3/" + modelCfg.variant`), so only the size needs to be set. For how the distribution-name tag works, see [`distribution-name-weights.h` in Writing custom models](../05-contributing-models.md#distribution-name-weightsh).
+The code that maps checkpoints to graph slots is in [`models/production/llama3/meta-weights.h`](../../../models/production/llama3/meta-weights.h).
+Only one line is needed at the call site. The specialization assembles the path (`VAI_DATA_DIR "/ckpts/llama3/meta/" + modelCfg.variant`), so only the size needs to be set. For how the distribution-name tag works, see [`distribution-name-weights.h` in Writing custom models](../05-contributing-models.md#distribution-name-weightsh).
 
 ```cpp
-loadWeights<"meta">(model);
+loadWeights<"meta">(net);
 ```
 
 ## Execution
@@ -149,19 +153,22 @@ loadWeights<"meta">(model);
 ### Folder structure
 
 ```
-models/llama3/
-├── model.h                       Model definition and NodeGroup definitions
-└── meta-weights.h                Mapping for Meta (HuggingFace `meta-llama/*`) checkpoints
-
-examples/llama3/
+models/production/llama3/
+├── net.h                         Model definition and NodeGroup definitions
+├── meta-weights.h                Mapping for Meta (HuggingFace `meta-llama/*`) checkpoints
 ├── demo.cpp                      demo-llama3: complete one prompt + timing
-├── chat.cpp                      chat-llama3: multi-turn conversation
 └── CMakeLists.txt
 
-data/llama3/
-├── tokenizer.json
-└── <variant>/                    ModelConfig::variant (3.2-1B, 3.2-3B)
-    └── model.safetensors
+examples/chat-llama3/
+├── main.cpp                      chat-llama3: multi-turn conversation
+└── CMakeLists.txt
+
+data/
+├── ckpts/llama3/meta/
+│   └── <variant>/                    ModelConfig::variant (3.2-1B, 3.2-3B)
+│       └── model.safetensors
+└── tokenizers/llama3/
+    └── tokenizer.json
 ```
 
 ### Build and run
@@ -177,7 +184,7 @@ cmake --build build --config RelWithDebInfo
 ./build/bin/demo-llama3
 ```
 
-[`demo.cpp`](../../../examples/llama3/demo.cpp) continues the sentence in `prompt` to generate a new sentence. It measures the `prefill` and `decode` times separately and prints them together with the generated sentence.
+[`demo.cpp`](../../../models/production/llama3/demo.cpp) continues the sentence in `prompt` to generate a new sentence. It measures the `prefill` and `decode` times separately and prints them together with the generated sentence.
 
 ### chat-llama3
 
@@ -185,7 +192,7 @@ cmake --build build --config RelWithDebInfo
 ./build/bin/chat-llama3
 ```
 
-This is the multi-turn conversation in [`chat.cpp`](../../../examples/llama3/chat.cpp). The conversation history remains in the KV cache, and the conversation ends when an empty line is entered or the cache fills up.
+This is the multi-turn conversation in [`main.cpp`](../../../examples/chat-llama3/main.cpp). The conversation history remains in the KV cache, and the conversation ends when an empty line is entered or the cache fills up.
 
 ## Benchmark summary
 

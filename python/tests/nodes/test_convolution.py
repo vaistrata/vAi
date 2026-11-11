@@ -38,7 +38,6 @@ def test_convolution(ci, co, k, stride, hw, epilogue, has_scale):
             out_channels=co,
             kernel_size=k,
             stride=stride,
-            has_scale=has_scale,
             epilogue=getattr(pyvai.Epilogue, epilogue),
         ),
         {"in0": (ci, hw, hw)},

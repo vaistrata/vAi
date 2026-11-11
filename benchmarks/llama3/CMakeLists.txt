@@ -2,10 +2,10 @@ cmake_minimum_required(VERSION 3.21)
 
 project(bench-llama3)
 
-# The model owns its definition (model.h) and its checkpoint loader
-# (meta-weights.h, which resolves data/llama3/...), so the bench and examples/llama3
+# The model owns its definition (net.h) and its checkpoint loader
+# (meta-weights.h, which resolves data/ckpts/llama3/meta/...), so the bench and models/production/llama3/demo.cpp
 # can never end up on different weights.
-set(MODEL_DIR ${CMAKE_SOURCE_DIR}/models/llama3)
+set(MODEL_DIR ${CMAKE_SOURCE_DIR}/models/production/llama3)
 
 ################################################################################
 # vai
@@ -15,7 +15,7 @@ add_executable(bench-llama3-vai
 )
 
 target_include_directories(bench-llama3-vai PRIVATE
-    ${MODEL_DIR}                           # model.h, meta-weights.h
+    ${MODEL_DIR}                           # net.h, meta-weights.h
     ${CMAKE_CURRENT_SOURCE_DIR}/common            # bench-prompts.h
 )
 

@@ -1,4 +1,4 @@
-#include "python/bindings/nodes/kvcache-counter.h"
+#include "kvcache-counter.h"
 #include "vai/groups/transformer.h"   // createKvCacheCounter
 #include <cstdint>
 #include <optional>

@@ -3,7 +3,7 @@
   Configs      The base configs every model builds on, and the backbones more
                than one model reads: SigLIP and Gemma.
 
-  A model's own checkpoints are its ModelConfig, in its model.h. Nothing the
+  A model's own checkpoints are its ModelConfig, in its net.h. Nothing the
   caller chooses is here: RuntimeConfig and the graph stay with the model.
 =============================================================================*/
 
@@ -43,7 +43,7 @@ struct LanguageModelConfig : public vai::TransformerConfig
 /////////////////////////////////////////////////////////////////////////////////////////
 // SigLIP - the vision tower PaliGemma and pi0 read images with
 /////////////////////////////////////////////////////////////////////////////////////////
-namespace siglip {
+namespace model::siglip {
 
 // The "/14" of So400m/14: the patch projection is [1152, 3*14*14]. imageSize is
 // asked for because position_embedding.weight holds one row per patch, so 224
@@ -52,33 +52,27 @@ inline VisionModelConfig so400m14(uint32_t imageSize = 0)
 {
     // A base cannot be named in a designated list, so the encoder comes first, in order.
     return {
-        vai::TransformerConfig{
-            .numLayers = 27,
-            .layerCfg = {
-                .embedDim = 1152,
-                .headDim = 72,
-                .numQHeads = 16,
-                .numKVHeads = 16,
-                .qkvBias = true,
-                .outBias = true,
-                .ffnHiddenDim = 4304,
-                .ffnActivation = vai::Epilogue::GeluTanh,
-                .ffnBias = true,
-                .normEps = 1e-6f}
-        },
+        vai::TransformerConfig{.numLayers = 27,
+                               .layerCfg = {.embedDim = 1152,
+                                            .headDim = 72,
+                                            .numQHeads = 16,
+                                            .numKVHeads = 16,
+                                            .ffnHiddenDim = 4304,
+                                            .ffnActivation = vai::Epilogue::GeluTanh,
+                                            .normEps = 1e-6f}},
         imageSize,
-        3,      // imageChannels
-        14      // patchSize
-    };    
+        3,   // imageChannels
+        14   // patchSize
+    };
 }
 
-}   // namespace siglip
+}   // namespace model::siglip
 
 
 /////////////////////////////////////////////////////////////////////////////////////////
 // Gemma (2B / 300M)
 /////////////////////////////////////////////////////////////////////////////////////////
-namespace gemma {
+namespace model::gemma {
 
 struct ModelConfig
 {
@@ -120,7 +114,7 @@ private:
     }
 };
 
-}   // namespace gemma
+}   // namespace model::gemma
 
 
 #endif // MODELS_CONFIG_BASE_H

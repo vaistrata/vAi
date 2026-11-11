@@ -1,7 +1,7 @@
 #ifndef VAI_NODES_MUL_H
 #define VAI_NODES_MUL_H
 
-#include "vai/nodes/node-common.h"
+#include "node-common.h"
 
 namespace vai::node {
 
@@ -25,8 +25,8 @@ public:
         bool operator==(const PipeParams&) const = default;
     };
 
-    struct Config {
-        vai::Dtype oDtype = vai::Dtype::None;   // None: oDefaultDtype
+    struct Config
+    {
     } config_;
 
     Mul();
@@ -47,12 +47,11 @@ inline Mul::Mul(Config config)
     addSlot("out0", NodeSlot::output);
     addSlot("in0", NodeSlot::input);
     addSlot("in1", NodeSlot::input);
-
-    config_.oDtype = (config_.oDtype == Dtype::None) ? oDefaultDtype() : config_.oDtype;
 }
 
 inline void Mul::prepare()
 {
+    const Dtype oDtype = (oDtype_ == Dtype::None) ? oDefaultDtype() : oDtype_;
     const Tensor& in0Ten = (*this)["in0"];
     const Tensor& in1Ten = (*this)["in1"];
 
@@ -63,9 +62,9 @@ inline void Mul::prepare()
     {
         pipeParams = p;
         pipe = pipelinePool().request("mul", {
-            eva::constant_id<SPEC_ID_TYPE_O>(config_.oDtype),   // typeO
-            eva::constant_id<SPEC_ID_TYPE_I>(iDtype)            // typeI (in0 & in1)
-        });
+                                                 eva::constant_id<SPEC_ID_TYPE_O>(oDtype),   // typeO
+                                                 eva::constant_id<SPEC_ID_TYPE_I>(iDtype)    // typeI (in0 & in1)
+                                             });
         if (!descSet)
             descSet = gVaiDestSetPool(pipe.descSetLayout(0));
     }
@@ -73,7 +72,7 @@ inline void Mul::prepare()
     VAI_ASSERT(in1Ten.dtype() == in0Ten.dtype());
     VAI_ASSERT(in1Ten.shape() == in0Ten.shape());
 
-    (*this)["out0"] = Tensor(in0Ten.shape(), config_.oDtype);
+    (*this)["out0"] = Tensor(in0Ten.shape(), oDtype);
 }
 
 inline void Mul::run(eva::CommandBuffer cmdBuff)

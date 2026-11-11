@@ -3,7 +3,7 @@
 
 // What a YOLO family (YOLOX) binds on its tier enum: a tier's size letter, the
 // one-letter suffix its checkpoints are named by on command lines.
-#include "python/bindings/models/models.h"
+#include "models.h"
 #include <cstring>
 #include <string>
 

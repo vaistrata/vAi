@@ -1,16 +1,22 @@
-#include "python/bindings/nodes/bind-node.h"
+#include "nodes.h"
 #include "vai/nodes/mul.h"
+#include <optional>
 
 namespace pyvai {
 
-static void bindMul(nb::module_& m)
+void bindMul(nb::module_& m)
 {
-    using C = vai::node::Mul::Config;
-    bindNode<vai::node::Mul>(m, "MulNode",
-                             "Element-wise out0 = in0 * in1. Both inputs share one shape and "
-                             "dtype; there is no broadcasting.",
-                             field("o_dtype", &C::oDtype));
+    nb::class_<vai::node::Mul, vai::Node>(m, "MulNode")
+        .def(
+            "__init__",
+            [](vai::node::Mul* self, std::optional<vai::Dtype> o_dtype) {
+                requireCurrentNet("MulNode");
+                new (self) vai::node::Mul(vai::node::Mul::Config{});
+                self->setODtype(o_dtype.value_or(vai::Dtype::None), dtypeKey());
+            },
+            nb::arg("o_dtype") = nb::none(),
+            "Element-wise out0 = in0 * in1. Both inputs share one shape and "
+            "dtype; there is no broadcasting.");
 }
-PYVAI_NODE_BINDING(bindMul);
 
 }   // namespace pyvai

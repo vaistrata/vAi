@@ -24,7 +24,8 @@ Linear::Linear(Config options)
     addSlot("in0", NodeSlot::input);
     addSlot("weight", NodeSlot::persistent);
     addSlot("partial", NodeSlot::temporary);   // Assigned only when in the reduce path.
-    if (config_.hasBias) addSlot("bias", NodeSlot::persistent);
+    addSlot("bias", NodeSlot::persistent);
+    if (config_.acceptResidual) addSlot("residual", NodeSlot::input);
 
     // ... dtype determination, pipeline request
 }
@@ -47,7 +48,7 @@ Attention::Attention(Config options)
 }
 ```
 
-Slot composition could vary depending on the options. The `bias` of `Linear` only exists when `hasBias` is enabled, and the `partial` not shown in the figure is an internal buffer that is not exposed externally.
+Slot composition could vary depending on the options. The `residual` of `Linear` only exists when `acceptResidual` is enabled. Its `bias` always exists and applies only when the weight loader fills it. The `partial` not shown in the figure is an internal buffer that is not exposed externally.
 
 ## Slot
 
@@ -75,7 +76,7 @@ A slot that retains the value between executions. There are two paths.
 **1. The user provides the weights**: The slot where learned parameter values such as `weight` and `bias` of `Linear` are provided. If not provided, it will be caught during the shape validation in `Node::prepare()`.
 
 ```cpp
-SafetensorsParser parser(VAI_DATA_DIR "/mnist/model.safetensors");
+SafetensorsParser parser(VAI_DATA_DIR "/ckpts/mnist/jroot/model.safetensors");
 linear["weight"] = Tensor(parser["fc.weight"]);
 linear["bias"]   = Tensor(parser["fc.bias"]);
 ```
@@ -101,7 +102,7 @@ Slots are created only with `Node::addSlot` in the constructor. A new name canno
 
 ```cpp
 linear.slot("weight");   // OK
-linear.slot("gamma");    // Slot that does not exist in Linear (Exception)
+linear.slot("scale");    // Slot that does not exist in Linear (Exception)
 ```
 
 Which slots are available can be found in the slot table of the [provided nodes](../06-nodes.md).
@@ -167,9 +168,9 @@ This is a residual connection. When the output of `input` splits into two paths,
 There are also nodes with completely different slot names. `Attention` receives `Q`, `K`, and `V`, so all of them need to be specified.
 
 ```cpp
-input - toQ - splitQ - perQ - "Q"/attn - mergeOut - toOut;
-input - toK - splitK - perK - "K"/attn;
-input - toV - splitV - perV - "V"/attn;
+input - projQ - splitQ - perQ - "Q"/attn - mergeOut - projOut;
+input - projK - splitK - perK - "K"/attn;
+input - projV - splitV - perV - "V"/attn;
 ```
 
 ## Node::prepare() and Node::run()

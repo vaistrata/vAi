@@ -2,7 +2,7 @@
 #define PYVAI_CHECKS_H
 
 // Pre-checks shared across areas (node-only ones live in nodes/nodes.h).
-#include "python/bindings/common.h"
+#include "common.h"
 #include <filesystem>
 #include <string>
 

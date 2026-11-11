@@ -1,5 +1,5 @@
-#ifndef VAI_GRAPH_FLOW_H
-#define VAI_GRAPH_FLOW_H
+#ifndef VAI_ENGINE_GRAPH_FLOW_H
+#define VAI_ENGINE_GRAPH_FLOW_H
 
 #include "neural-net.h"
 #include <map>
@@ -13,7 +13,7 @@ namespace vai {
 /////////////////////////////////////////////////////////////////////////////////////////
 // Graph wiring DSL - connects slots with `-` and picks them with `/`
 //
-//   input - toQ - splitQ - "Q"/attn - toOut;
+//   input - projQ - splitQ - "Q"/attn - projOut;
 //
 // `/` names the slot on the side it faces, so `"Q"/attn` is attn's input Q and
 // `attn/"out1"` is its second output. `-` connects the left flow's output slot
@@ -148,7 +148,7 @@ inline NodeFlow&& operator-(GroupFlow&& inflow, NodeFlow&& outflow)
 // spells a wiring whose stops are configuration, instead of one chain per
 // combination of them.
 //
-//     input - toQ - splitQ - normQ - perQ - ropeQ - "Q"/attn;
+//     input - projQ - splitQ - normQ - perQ - ropeQ - "Q"/attn;
 //
 // Slot naming works the same ("in1"/stop, stop/"then"), and an optional may sit
 // anywhere: first, last, or beside another optional.
@@ -244,4 +244,4 @@ inline std::optional<FlowLink> operator/(std::optional<T>& stop, std::string nam
 
 } // namespace vai
 
-#endif // VAI_GRAPH_FLOW_H
+#endif   // VAI_ENGINE_GRAPH_FLOW_H

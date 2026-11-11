@@ -1,7 +1,7 @@
 #include "benchmark.hpp"
 #include "processing.hpp"
 
-#include "model.h"
+#include "net.h"
 #include "megvii-weights.h"
 #include "vai/engine/weights.h"
 
@@ -10,6 +10,8 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+
+namespace yolox = model::experimental::yolox;
 
 #ifndef YOLOX_WEIGHTS_DIR
 #define YOLOX_WEIGHTS_DIR ""
@@ -54,18 +56,15 @@ std::vector<float> outputToFloats(vai::Tensor& output)
     throw std::runtime_error("vAi returned an unsupported output dtype.");
 }
 
-BenchmarkResult runInference(
-    yolox::Model& model,
-    vai::Tensor& input,
-    const BenchmarkConfig& config,
-    std::vector<float>& lastOutput)
+BenchmarkResult runInference(yolox::Net& net, vai::Tensor& input, const BenchmarkConfig& config,
+                             std::vector<float>& lastOutput)
 {
     std::cout << "[" << config.runtime_name
               << "] Measurement: Vulkan GPU timestamp around the complete forward command buffer; "
                  "input upload, output download, CPU postprocess, and NMS are excluded"
               << std::endl;
 
-    eva::Device device = model.device();
+    eva::Device device = net.device();
     eva::QueryPool timingPool = device.createTimestampQueryPool(2);
     eva::CommandBuffer timingStart = device.newCommandBuffer(eva::queue_compute)
         .begin()
@@ -79,17 +78,17 @@ BenchmarkResult runInference(
 
     vai::Tensor output;
     for (int index = 0; index < config.warmup; ++index) {
-        model({{"in0", input}}, {{"out0", &output}});
-        model.sync();
+        net({{"in0", input}}, {{"out0", &output}});
+        net.sync();
     }
 
     std::vector<double> elapsedTimes;
     elapsedTimes.reserve(config.iterations);
     for (int index = 0; index < config.iterations; ++index) {
         timingStart.submit();
-        model({{"in0", input}}, {{"out0", &output}});
+        net({{"in0", input}}, {{"out0", &output}});
         timingStop.submit().wait();
-        model.sync();
+        net.sync();
         elapsedTimes.push_back(timingPool.getElapsedMs(0, 1));
     }
 
@@ -146,7 +145,7 @@ try
     }
 
     vai::initVAIEngine();
-    yolox::Model model(
+    yolox::Net net(
         {
             .device = vai::getVaiDevice(),
             .wDefaultDtype = toDType(options.precision),
@@ -161,7 +160,7 @@ try
 
     const std::string modelPath = weightsPath(options.variant);
     std::cout << "[vAi] Loading weights: " << modelPath << std::endl;
-    yolox::megvii::loadWeights(model, vai::Checkpoint(modelPath.c_str()));
+    yolox::megvii::loadWeights(net, vai::Checkpoint(modelPath.c_str()));
 
     const std::string runtimeName = "vAi_Vulkan_"
         + yolox_benchmark::precisionDisplayName(options.precision)
@@ -179,7 +178,7 @@ try
     input.setFloats(std::move(inputData));
 
     std::vector<float> lastOutput;
-    BenchmarkResult result = runInference(model, input, config, lastOutput);
+    BenchmarkResult result = runInference(net, input, config, lastOutput);
     std::vector<Detection> detections = yolox_benchmark::postprocessOutput(lastOutput);
 
     result.print();

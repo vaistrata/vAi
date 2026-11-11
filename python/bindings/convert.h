@@ -2,7 +2,7 @@
 #define PYVAI_CONVERT_H
 
 // Conversions shared across areas: C++ values on their way to Python.
-#include "python/bindings/common.h"
+#include "common.h"
 #include <cstdint>
 #include <memory>
 #include <utility>

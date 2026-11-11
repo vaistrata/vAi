@@ -2,16 +2,32 @@
 presets, setup errors, YOLOX postprocessing, and the completion / chat logic
 on a stub model and a byte-level stub tokenizer.
 """
+
 import numpy as np
 import pytest
 
 import pyvai
 from pyvai.models import (
-    GPT2, GPT2Config, GPT2Model, Llama3Config, Llama3Model,
-    Gemma3Config, Gemma3Model, PaliGemmaConfig, PaliGemmaModel, Pi0Config, Pi0Model,
-    Pi05Config, Pi05Model,
-    YOLOX, YOLOXModel, YOLOXTier, YOLOXDetection, yolox_postprocess,
-    ChatSession, LLAMA3_CHAT_TEMPLATE,
+    GPT2,
+    GPT2Config,
+    GPT2Net,
+    Llama3Config,
+    Llama3Net,
+    Gemma3Config,
+    Gemma3Net,
+    PaliGemmaConfig,
+    PaliGemmaNet,
+    Pi0Config,
+    Pi0Net,
+    Pi05Config,
+    Pi05Net,
+    YOLOX,
+    YOLOXNet,
+    YOLOXTier,
+    YOLOXDetection,
+    yolox_postprocess,
+    ChatSession,
+    LLAMA3_CHAT_TEMPLATE,
 )
 from pyvai.models._causal_lm import _CausalLM
 
@@ -20,36 +36,49 @@ from pyvai.models._causal_lm import _CausalLM
 # Bound models — what the bindings declare about them
 # ---------------------------------------------------------------------------
 
+
 def test_all_models_declare_boundaries():
     """A bound NeuralNet subclass builds its graph in C++, out of sight of the
     Python input()/output() wrappers, so its binding must declare the names."""
-    bound = [cls for name, cls in vars(pyvai._pyvai).items()
-             if isinstance(cls, type) and issubclass(cls, pyvai.NeuralNet)
-             and cls is not pyvai.NeuralNet]
-    assert {c.__name__ for c in bound} >= {"GPT2Model", "Llama3Model",
-                                           "Gemma3Model", "PaliGemmaModel", "Pi0Model",
-                                           "Pi05Model", "YOLOXModel"}
+    bound = [
+        cls
+        for name, cls in vars(pyvai._pyvai).items()
+        if isinstance(cls, type) and issubclass(cls, pyvai.NeuralNet) and cls is not pyvai.NeuralNet
+    ]
+    assert {c.__name__ for c in bound} >= {
+        "GPT2Net",
+        "Llama3Net",
+        "Gemma3Net",
+        "PaliGemmaNet",
+        "Pi0Net",
+        "Pi05Net",
+        "YOLOXNet",
+    }
     for cls in bound:
         ins, outs = cls._pyvai_io
         assert ins and outs, f"{cls.__name__} declares no boundaries"
-    for cls in (GPT2Model, Llama3Model):
+    for cls in (GPT2Net, Llama3Net):
         assert cls._pyvai_io == (("inTokenIds",), ("nextTokenId",))
-    assert Gemma3Model._pyvai_io == (("inImages", "inTokenIds"), ("nextTokenId",))
-    assert PaliGemmaModel._pyvai_io == (("inImage", "inTokenIds"), ("nextTokenId",))
-    assert Pi0Model._pyvai_io == (
+    assert Gemma3Net._pyvai_io == (("inImages", "inTokenIds"), ("nextTokenId",))
+    assert PaliGemmaNet._pyvai_io == (("inImage", "inTokenIds"), ("nextTokenId",))
+    assert Pi0Net._pyvai_io == (
         ("inImages", "inPromptTokens", "inState", "inStateToken", "inActions"),
-        ("outStateToken", "outActions"))
-    assert Pi05Model._pyvai_io == (("inImages", "inPromptTokens", "inActions"), ("outActions",))
+        ("outStateToken", "outActions"),
+    )
+    assert Pi05Net._pyvai_io == (("inImages", "inPromptTokens", "inActions"), ("outActions",))
 
 
-@pytest.mark.parametrize("cls, expected", [
-    (GPT2Config,   ["124M", "355M", "774M", "1.5B"]),
-    (Llama3Config, ["3.2-1B", "3.2-3B"]),
-    (Gemma3Config, ["270M", "1B", "4B", "12B"]),
-    (PaliGemmaConfig, ["3B-224", "3B-448"]),
-    (Pi0Config, ["3B"]),
-    (Pi05Config, ["3B"]),
-])
+@pytest.mark.parametrize(
+    "cls, expected",
+    [
+        (GPT2Config, ["124M", "355M", "774M", "1.5B"]),
+        (Llama3Config, ["3.2-1B", "3.2-3B"]),
+        (Gemma3Config, ["270M", "1B", "4B", "12B"]),
+        (PaliGemmaConfig, ["3B-224", "3B-448"]),
+        (Pi0Config, ["3B"]),
+        (Pi05Config, ["3B"]),
+    ],
+)
 def test_config_presets(cls, expected):
     """preset(variant) covers exactly the variants `presets` lists and returns a
     fresh object each call, nested configs included; other names raise."""
@@ -58,7 +87,7 @@ def test_config_presets(cls, expected):
         assert cls.preset(variant).variant == variant
     a, b = cls.preset(expected[0]), cls.preset(expected[0])
     a.language_cfg.layer_cfg.embed_dim = 1
-    assert a.language_cfg.layer_cfg.embed_dim == 1      # nested edits land in place
+    assert a.language_cfg.layer_cfg.embed_dim == 1  # nested edits land in place
     assert b.language_cfg.layer_cfg.embed_dim != 1
     with pytest.raises(ValueError, match="unknown variant"):
         cls.preset("nope")
@@ -68,7 +97,7 @@ def test_model_setup_errors():
     """A missing checkpoint is a FileNotFoundError; the wrappers refuse a forward
     before load_weights(), which would die in the driver."""
     with pytest.raises(FileNotFoundError):
-        YOLOXModel(YOLOXTier.SMALL).load_weights("does-not-exist")
+        YOLOXNet(YOLOXTier.SMALL).load_weights("does-not-exist")
     with pytest.raises(RuntimeError, match="load_weights"):
         YOLOX(tier=YOLOXTier.SMALL).detect(np.zeros((8, 8, 3), dtype=np.uint8))
     with pytest.raises(RuntimeError, match="load_tokenizer"):
@@ -79,8 +108,8 @@ def test_yolox_postprocess_maps_boxes_back_and_checks_size():
     """One anchor: confidence = objectness * class score, the box mapped back to
     the source through the geometry and clipped; a bad row width is refused."""
     data = np.zeros(85, dtype=np.float32)
-    data[:5] = [100.0, 60.0, 40.0, 20.0, 0.9]     # cx, cy, w, h, objectness
-    data[5 + 16] = 0.8                             # dog
+    data[:5] = [100.0, 60.0, 40.0, 20.0, 0.9]  # cx, cy, w, h, objectness
+    data[5 + 16] = 0.8  # dog
     geometry = pyvai.ImageGeometry(source_width=100, source_height=50, scale_x=2.0, scale_y=2.0)
     dets = yolox_postprocess(data, geometry, 0.25, 0.45)
     assert len(dets) == 1
@@ -88,11 +117,11 @@ def test_yolox_postprocess_maps_boxes_back_and_checks_size():
     assert (d.x1, d.y1, d.x2, d.y2) == (40.0, 25.0, 60.0, 35.0)
     assert d.class_id == 16 and d.class_name == "dog" and abs(d.confidence - 0.72) < 1e-6
     assert isinstance(d, YOLOXDetection)
-    assert yolox_postprocess(data, geometry, 0.75, 0.45) == []              # below threshold
+    assert yolox_postprocess(data, geometry, 0.75, 0.45) == []  # below threshold
     geometry.source_width = 45
-    assert yolox_postprocess(data, geometry, 0.25, 0.45)[0].x2 == 45.0      # clipped to width
+    assert yolox_postprocess(data, geometry, 0.25, 0.45)[0].x2 == 45.0  # clipped to width
     geometry.pad_x = 20.0
-    assert yolox_postprocess(data, geometry, 0.25, 0.45)[0].x1 == 30.0      # (80 - 20) / 2
+    assert yolox_postprocess(data, geometry, 0.25, 0.45)[0].x1 == 30.0  # (80 - 20) / 2
     for bad in (np.zeros(84, dtype=np.float32), np.zeros(0, dtype=np.float32)):
         with pytest.raises(ValueError, match="multiple of 85"):
             yolox_postprocess(bad, geometry, 0.25, 0.45)
@@ -108,8 +137,13 @@ def test_yolox_postprocess_maps_boxes_back_and_checks_size():
 # and special pieces get ids from 256 up, concatenative like the real BPE ones.
 # ---------------------------------------------------------------------------
 
-_SPECIAL = {"<|begin_of_text|>": 256, "<|eot_id|>": 257, "<|end_of_text|>": 258,
-            "<|eom_id|>": 259, "<|endoftext|>": 260}
+_SPECIAL = {
+    "<|begin_of_text|>": 256,
+    "<|eot_id|>": 257,
+    "<|end_of_text|>": 258,
+    "<|eom_id|>": 259,
+    "<|endoftext|>": 260,
+}
 
 
 class _StubTokenizer:
@@ -139,6 +173,7 @@ class _StubTokenizer:
 class _StubModel:
     """Replays `script`, one id per prefill / decode, counting cached tokens as
     the C++ models do and logging every call's ids in `calls`."""
+
     def __init__(self, script, budget=64):
         self.script = list(script)
         self.max_runtime_context = budget
@@ -184,18 +219,18 @@ def test_iter_tokens_semantics():
     continues the context without a BOS; a stop id ends the run unyielded."""
     lm = _lm(list(b"abc") + [_SPECIAL["<|eot_id|>"], *b"xyz"])
     assert list(lm.iter_tokens("hi", max_new_tokens=2)) == list(b"ab")
-    assert lm.model.calls == [[256, *b"hi"], [ord("a")]]        # BOS + prompt, then one token
+    assert lm.net.calls == [[256, *b"hi"], [ord("a")]]  # BOS + prompt, then one token
     assert lm.tokens_so_far == 3 + 1
 
-    lm.model.calls.clear()
+    lm.net.calls.clear()
     assert list(lm.iter_tokens("!", max_new_tokens=0, reset_cache=False)) == []
-    assert lm.model.calls == [[ord("!")]] and lm.tokens_so_far == 5   # continued, no BOS
+    assert lm.net.calls == [[ord("!")]] and lm.tokens_so_far == 5  # continued, no BOS
 
-    assert list(lm.iter_tokens("?", max_new_tokens=None, reset_cache=False)) == []   # eot first
-    assert lm.tokens_so_far == 6   # the stop id was not cached
+    assert list(lm.iter_tokens("?", max_new_tokens=None, reset_cache=False)) == []  # eot first
+    assert lm.tokens_so_far == 6  # the stop id was not cached
 
     assert list(lm.iter_tokens("!", max_new_tokens=3)) == list(b"xyz")
-    assert lm.model.calls[-1] == [ord("y")]                   # no forward after the last yield
+    assert lm.net.calls[-1] == [ord("y")]  # no forward after the last yield
 
 
 def test_chat_session_turns():
@@ -207,13 +242,13 @@ def test_chat_session_turns():
     assert chat.max_new_tokens is None and chat.messages == []
 
     assert chat.send("capital of France?") == "Paris"
-    first_prefill = lm.model.calls[0]
-    assert first_prefill[0] == 256 and first_prefill.count(256) == 1   # BOS once, from the template
+    first_prefill = lm.net.calls[0]
+    assert first_prefill[0] == 256 and first_prefill.count(256) == 1  # BOS once, from the template
     assert [m["role"] for m in chat.messages] == ["user", "assistant"]
     after_first = lm.tokens_so_far
 
     assert "".join(chat.stream("and Spain?", max_new_tokens=3)) == "Mad"
-    assert lm.model.calls[-3][0] == eot   # the turn opened by closing the reply
+    assert lm.net.calls[-3][0] == eot  # the turn opened by closing the reply
     assert lm.tokens_so_far > after_first and chat.messages[-1]["content"] == "Mad"
     assert chat.context_left == 512 - lm.tokens_so_far
 

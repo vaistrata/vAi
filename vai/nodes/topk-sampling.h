@@ -2,7 +2,7 @@
 #define VAI_NODES_TOPK_SAMPLING_H
 
 // Token sampling from a logits distribution: TopKSampling.
-#include "vai/nodes/node-common.h"
+#include "node-common.h"
 
 namespace vai::node {
 
@@ -96,7 +96,7 @@ inline TopKSampling::PipeParams topkTuning(uint32_t M, uint32_t N, uint32_t k, D
     // slice = wgSize * perThread) and opens no new occupancy wave — a shorter
     // list means more workgroups, and each carries a whole k-round merge.
     // An unknown core count has no wave to reason about, so it keeps maxPerThread.
-    const uint32_t cores = device.coreClusterCount();
+    const uint32_t cores = device.computeBlockCount();
 
     t.perThread = TopKSampling::maxPerThread;
     if (cores)

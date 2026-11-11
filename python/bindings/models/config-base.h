@@ -55,9 +55,8 @@ void bindPresets(Cls& cls, const char* pyName, const Presets<Config>& presets)
 {
     bindPresetLookup(cls, pyName, presets);
     cls.def_prop_ro(
-        "variant",
-        [](const Config& self) -> std::string { return self.variant; },
-        "The variant from preset(), also its folder under data/<family>/ckpts/.");
+        "variant", [](const Config& self) -> std::string { return self.variant; },
+        "The variant from preset(), also its folder under data/ckpts/<family>/<source>/.");
 }
 
 [[noreturn]] inline void configError(const std::string& who, const std::string& msg)

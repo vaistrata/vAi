@@ -2,10 +2,10 @@ cmake_minimum_required(VERSION 3.21)
 
 project(bench-gpt2)
 
-# The model owns its definition (model.h) and its checkpoint loader
-# (openai-weights.h, which resolves data/gpt2/...), so the bench and examples/gpt2
+# The model owns its definition (net.h) and its checkpoint loader
+# (openai-weights.h, which resolves data/ckpts/gpt2/openai/...), so the bench and models/production/gpt2/demo.cpp
 # can never end up on different weights.
-set(MODEL_DIR ${CMAKE_SOURCE_DIR}/models/gpt2)
+set(MODEL_DIR ${CMAKE_SOURCE_DIR}/models/production/gpt2)
 
 ################################################################################
 # vai
@@ -15,7 +15,7 @@ add_executable(bench-gpt2-vai
 )
 
 target_include_directories(bench-gpt2-vai PRIVATE
-    ${MODEL_DIR}                           # model.h, openai-weights.h
+    ${MODEL_DIR}                           # net.h, openai-weights.h
     ${CMAKE_CURRENT_SOURCE_DIR}/common            # bench-prompts.h
 )
 

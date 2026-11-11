@@ -2,7 +2,7 @@
 #define VAI_NODES_TYPE_CAST_H
 
 // TypeCast - element-wise dtype cast.
-#include "vai/nodes/node-common.h"
+#include "node-common.h"
 
 namespace vai::node {
 

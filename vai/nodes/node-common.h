@@ -1,5 +1,5 @@
-#ifndef VAI_NODES_COMMON_H
-#define VAI_NODES_COMMON_H
+#ifndef VAI_NODES_NODE_COMMON_H
+#define VAI_NODES_NODE_COMMON_H
 
 // Shared base for every builtin-node header: the Node/Tensor engine API, the
 // std headers the node implementations use, the Epilogue enum, and the build
@@ -37,6 +37,12 @@ enum class Epilogue : uint32_t {
     Max
 };
 
+// Where Linear and Convolution fold their "residual" in, relative to the epilogue.
+enum class ResidualOrder : uint32_t {
+    AfterEpilogue = 0,    // a following Add (e.g. YOLO's bottleneck)
+    BeforeEpilogue = 1,   // an Add ahead of the activation (e.g. ResNet's block, pi0's time MLP)
+};
+
 enum class RopeType {
     Default,   // reads base
     Linear,    // ... and factor
@@ -67,4 +73,4 @@ inline uint32_t outerSize(const std::vector<uint32_t>& shape, size_t innerAxes =
 
 } // namespace vai
 
-#endif // VAI_NODES_COMMON_H
+#endif   // VAI_NODES_NODE_COMMON_H

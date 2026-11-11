@@ -1,4 +1,4 @@
-#include "python/bindings/module.h"
+#include "module.h"
 
 
 NB_MODULE(_pyvai, m)

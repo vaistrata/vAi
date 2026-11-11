@@ -12,7 +12,7 @@ vai/shaders/vai-<name>.comp   kernel
 ```
 
 A node used only by a specific model may be placed in the model folder.
-[`models/yolov8/nodes/`](../../models/yolov8/nodes/) is an example.
+[`models/internal/yolov8/nodes/`](../../models/internal/yolov8/nodes/) is an example.
 
 ## Code conventions
 

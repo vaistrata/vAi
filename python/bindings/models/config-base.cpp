@@ -1,5 +1,5 @@
-#include "python/bindings/models/models.h"
-#include "python/bindings/models/config-base.h"
+#include "models.h"
+#include "config-base.h"
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -80,69 +80,49 @@ nb::object fromPerLayer(const vai::TransformerPerLayer& f)
 // (vai/groups/transformer.h), and models/config-base.h's vision and language bases.
 void bindModelConfigs(nb::module_& m)
 {
-    nb::class_<vai::TransformerLayerConfig>(m, "TransformerLayerConfig",
+    nb::class_<vai::TransformerLayerConfig>(
+        m, "TransformerLayerConfig",
         "One transformer layer as a checkpoint states it. Run-time choices (K/V "
         "dtype, cache depth, a batch axis) are the model's, set from its arguments.")
         .def(
             "__init__",
-            [](vai::TransformerLayerConfig* self,
-               uint32_t embed_dim, uint32_t head_dim,
-               uint32_t num_q_heads, uint32_t num_kv_heads,
-               uint32_t ffn_hidden_dim, vai::Epilogue ffn_activation,
-               uint32_t window_size, bool qkv_bias, bool out_bias, bool with_qk_norm,
-               std::optional<vai::RopeConfig> rope_cfg, bool ffn_bias, float norm_eps)
-            {
+            [](vai::TransformerLayerConfig* self, uint32_t embed_dim, uint32_t head_dim, uint32_t num_q_heads,
+               uint32_t num_kv_heads, uint32_t ffn_hidden_dim, vai::Epilogue ffn_activation, bool kv_cache_ring,
+               bool with_qk_norm, std::optional<vai::RopeConfig> rope_cfg, float norm_eps) {
                 new (self) vai::TransformerLayerConfig{
-                    .embedDim      = embed_dim,
-                    .headDim       = head_dim,
-                    .numQHeads     = num_q_heads,
-                    .numKVHeads    = num_kv_heads,
-                    .kvCacheDtype  = vai::Dtype::Fp16,   // the model sets its own
-                    .windowSize    = window_size,
-                    .qkvBias       = qkv_bias,
-                    .outBias       = out_bias,
-                    .withQkNorm    = with_qk_norm,
-                    .ropeCfg       = rope_cfg,
-                    .ffnHiddenDim  = ffn_hidden_dim,
+                    .embedDim = embed_dim,
+                    .headDim = head_dim,
+                    .numQHeads = num_q_heads,
+                    .numKVHeads = num_kv_heads,
+                    .kvCacheDtype = vai::Dtype::Fp16,   // the model sets its own
+                    .kvCacheRing = kv_cache_ring,
+                    .withQkNorm = with_qk_norm,
+                    .ropeCfg = rope_cfg,
+                    .ffnHiddenDim = ffn_hidden_dim,
                     .ffnActivation = ffn_activation,
-                    .ffnBias       = ffn_bias,
-                    .normEps       = norm_eps,
+                    .normEps = norm_eps,
                 };
             },
-            nb::kw_only(),
-            nb::arg("embed_dim"),
-            nb::arg("head_dim"),
-            nb::arg("num_q_heads"),
-            nb::arg("num_kv_heads"),
-            nb::arg("ffn_hidden_dim"),
-            nb::arg("ffn_activation"),
-            nb::arg("window_size")  = 0u,
-            nb::arg("qkv_bias")     = false,
-            nb::arg("out_bias")     = false,
-            nb::arg("with_qk_norm") = false,
-            nb::arg("rope_cfg")     = nb::none(),
-            nb::arg("ffn_bias")     = false,
-            nb::arg("norm_eps")     = 1e-5f,
+            nb::kw_only(), nb::arg("embed_dim"), nb::arg("head_dim"), nb::arg("num_q_heads"), nb::arg("num_kv_heads"),
+            nb::arg("ffn_hidden_dim"), nb::arg("ffn_activation"), nb::arg("kv_cache_ring") = false,
+            nb::arg("with_qk_norm") = false, nb::arg("rope_cfg") = nb::none(), nb::arg("norm_eps") = 1e-5f,
             "Keyword-only, the defaults the C++ struct has.")
-        .def_rw("embed_dim",      &vai::TransformerLayerConfig::embedDim)
-        .def_rw("head_dim",       &vai::TransformerLayerConfig::headDim)
-        .def_rw("num_q_heads",    &vai::TransformerLayerConfig::numQHeads)
-        .def_rw("num_kv_heads",   &vai::TransformerLayerConfig::numKVHeads,
+        .def_rw("embed_dim", &vai::TransformerLayerConfig::embedDim)
+        .def_rw("head_dim", &vai::TransformerLayerConfig::headDim)
+        .def_rw("num_q_heads", &vai::TransformerLayerConfig::numQHeads)
+        .def_rw("num_kv_heads", &vai::TransformerLayerConfig::numKVHeads,
                 "Fewer than num_q_heads for GQA; it must divide them.")
-        .def_rw("window_size",    &vai::TransformerLayerConfig::windowSize,
-                "Sliding-window span of a causal layer; 0 attends the whole prefix.")
-        .def_rw("qkv_bias",       &vai::TransformerLayerConfig::qkvBias)
-        .def_rw("out_bias",       &vai::TransformerLayerConfig::outBias)
-        .def_rw("with_qk_norm",   &vai::TransformerLayerConfig::withQkNorm,
-                "Per-head RMS norm on Q and K, before RoPE.")
-        .def_rw("rope_cfg",       &vai::TransformerLayerConfig::ropeCfg,
+        .def_rw("kv_cache_ring", &vai::TransformerLayerConfig::kvCacheRing,
+                "The layer's cache keeps only the last positions its sliding window reads; "
+                "the model sets the window and the ring's size.")
+        .def_rw("with_qk_norm", &vai::TransformerLayerConfig::withQkNorm, "Per-head RMS norm on Q and K, before RoPE.")
+        .def_rw("rope_cfg", &vai::TransformerLayerConfig::ropeCfg,
                 "RoPE frequencies (RopeConfig), or None for no position encoding. "
                 "Edits through the property land in place.")
         .def_rw("ffn_hidden_dim", &vai::TransformerLayerConfig::ffnHiddenDim)
         .def_rw("ffn_activation", &vai::TransformerLayerConfig::ffnActivation,
                 "The FFN's activation (its GLU variant when the FFN is gated).")
-        .def_rw("ffn_bias",       &vai::TransformerLayerConfig::ffnBias)
-        .def_rw("norm_eps",       &vai::TransformerLayerConfig::normEps,
+        .def_rw("norm_eps", &vai::TransformerLayerConfig::normEps,
                 "Epsilon of every norm the layer owns, the QK norm included.");
 
     nb::class_<vai::TransformerConfig>(m, "TransformerConfig",

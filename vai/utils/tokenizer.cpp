@@ -13,6 +13,8 @@
 #include <unordered_map>
 
 
+namespace vai::utils {
+
 namespace tokenizer_detail {
 
 
@@ -1961,3 +1963,5 @@ std::string Tokenizer::idToPiece(int id) const { return impl_->idToPiece(id); }
 bool Tokenizer::isSpecial(int id) const { return impl_->isSpecial(id); }
 const std::vector<int>& Tokenizer::prefixIds() const { return impl_->prefixIds(); }
 const std::vector<int>& Tokenizer::suffixIds() const { return impl_->suffixIds(); }
+
+}   // namespace vai::utils

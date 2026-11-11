@@ -12,7 +12,7 @@ vai/shaders/vai-<name>.comp   커널
 ```
 
 특정 모델에서만 쓰는 노드라면 모델 폴더에 두어도 됩니다.
-[`models/yolov8/nodes/`](../../models/yolov8/nodes/)이 그 사례입니다.
+[`models/internal/yolov8/nodes/`](../../models/internal/yolov8/nodes/)이 그 사례입니다.
 
 ## 코드 컨벤션
 

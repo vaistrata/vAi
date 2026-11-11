@@ -44,6 +44,7 @@ layout(push_constant) uniform PushConstants {
     uint splitCount;
     uint kernel;
     uint stride;
+    uint batch;             // the convolution's images; a weight transform ignores it
 } pc;
 
 float16_t readI(uint index)

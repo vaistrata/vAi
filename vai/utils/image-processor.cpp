@@ -8,6 +8,8 @@
 #include <thread>
 
 
+namespace vai::utils {
+
 namespace {
 
 // Element offsets of one step along each axis.
@@ -31,22 +33,34 @@ struct Emit
     float* base;
     Strides d;
     bool normalize = false;
-    float mean = 0.0f;
-    float std = 1.0f;
+    std::array<float, 4> mean{};   // by output channel
+    std::array<float, 4> std{};
     bool swapRB = false;
 
-    float value(float v) const
-    {
-        return normalize ? (v - mean) / std : v;
-    }
+    float value(uint32_t c, float v) const { return normalize ? (v - mean[c]) / std[c] : v; }
 
     void operator()(uint32_t c, uint32_t y, uint32_t x, float v) const
     {
         if (swapRB && c != 1)
             c = 2 - c;
-        base[c * d.c + y * d.y + x * d.x] = value(v);
+        base[c * d.c + y * d.y + x * d.x] = value(c, v);
     }
 };
+
+// Calls f(c, v) on every value of a held image, with its channel.
+template <class F>
+void forEachValue(std::vector<float>& pixels, bool chw, uint32_t channels, F f)
+{
+    const size_t plane = pixels.size() / channels;
+    if (chw)
+        for (uint32_t c = 0; c < channels; ++c)
+            for (size_t i = 0; i < plane; ++i)
+                f(c, pixels[c * plane + i]);
+    else
+        for (size_t i = 0; i < plane; ++i)
+            for (uint32_t c = 0; c < channels; ++c)
+                f(c, pixels[i * channels + c]);
+}
 
 inline int64_t asInt(uint8_t v) { return v; }
 inline int64_t asInt(float v) { return std::lround(v); }
@@ -278,8 +292,8 @@ ImageProcessor::ImageProcessor(const uint8_t* pixels, uint32_t width, uint32_t h
       width(width), height(height), channels(channels),
       imageGeometry{.sourceWidth = width, .sourceHeight = height}
 {
-    if (width == 0 || height == 0 || channels == 0)
-        throw std::invalid_argument("image dimensions must be non-zero");
+    if (width == 0 || height == 0 || channels == 0 || channels > 4)
+        throw std::invalid_argument("image dimensions must be non-zero, with at most 4 channels");
 }
 
 void ImageProcessor::recordResize(uint32_t size, Resize mode)
@@ -319,16 +333,24 @@ void ImageProcessor::recordLetterbox(uint32_t size, Align align, float padValue,
     height = size;
 }
 
-// Kept as (v - mean) / std so [-1, 1] is (v - 127.5) / 127.5 and [0, 1] is v / 255,
-// bit for bit what the reference processors compute.
 void ImageProcessor::recordNormalize(float min, float max)
 {
     if (!(min < max))
         throw std::invalid_argument("normalize needs min < max");
 
     normalized = true;
-    normMean = -min * 255.0f / (max - min);
-    normStd = 255.0f / (max - min);
+    rangeMin = min;
+    rangeMax = max;
+}
+
+void ImageProcessor::recordStandardize(const std::array<float, 3>& mean, const std::array<float, 3>& std)
+{
+    if (channels != 3)
+        throw std::logic_error("standardize() needs 3 channels");
+
+    normalized = true;
+    std::copy(mean.begin(), mean.end(), statMean.begin());
+    std::copy(std.begin(), std.end(), statStd.begin());
 }
 
 void ImageProcessor::recordBgr()
@@ -361,7 +383,12 @@ void ImageProcessor::resample(const Resample& step, bool last)
         emit.swapRB = storedBgr != outputBgr;
     }
     if (step.canvas)
-        std::fill(dst.begin(), dst.end(), emit.value(step.padValue));
+    {
+        std::array<float, 4> pad;
+        for (uint32_t c = 0; c < channels; ++c)
+            pad[c] = emit.value(c, step.padValue);
+        forEachValue(dst, outputChw, channels, [&](uint32_t c, float& v) { v = pad[c]; });
+    }
 
     if (isFloat)
         resampleImage(pixels.data(), strides(storedChw, bufWidth, bufHeight, channels), bufWidth, bufHeight,
@@ -404,8 +431,7 @@ void ImageProcessor::finish()
                 for (uint32_t x = 0; x < bufWidth; ++x)
                     std::swap(pixels[y * s.y + x * s.x], pixels[y * s.y + x * s.x + 2 * s.c]);
         if (emit.normalize)
-            for (float& v : pixels)
-                v = emit.value(v);
+            forEachValue(pixels, storedChw, channels, [&](uint32_t c, float& v) { v = emit.value(c, v); });
     }
     else
     {
@@ -428,13 +454,21 @@ void ImageProcessor::finish()
 
 void ImageProcessor::run()
 {
+    // normalize() and standardize() fold into one (v - mean) / std, so [-1, 1] is
+    // (v - 127.5) / 127.5 and [0, 1] is v / 255, bit for bit what the reference
+    // processors compute.
+    for (uint32_t c = 0; c < 4; ++c)
+    {
+        normMean[c] = 255.0f * (statMean[c] - rangeMin) / (rangeMax - rangeMin);
+        normStd[c] = 255.0f * statStd[c] / (rangeMax - rangeMin);
+    }
+
     // A run after an earlier one starts from that output; back to 0~255 when it
     // resamples or normalizes differently, so every pass sees pixel values.
     if (storedNormalized &&
         (!steps.empty() || !normalized || storedMean != normMean || storedStd != normStd))
     {
-        for (float& v : pixels)
-            v = v * storedStd + storedMean;
+        forEachValue(pixels, storedChw, channels, [&](uint32_t c, float& v) { v = v * storedStd[c] + storedMean[c]; });
         storedNormalized = false;
     }
 
@@ -456,3 +490,5 @@ ImageProcessor::operator std::vector<float>() &&
     run();
     return std::move(pixels);
 }
+
+}   // namespace vai::utils

@@ -7,6 +7,8 @@
 
 namespace pyvai {
 
+using vai::utils::Tokenizer;
+
 void bindTokenizer(nb::module_& m)
 {
     nb::class_<Tokenizer>(m, "Tokenizer")

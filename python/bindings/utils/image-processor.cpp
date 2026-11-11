@@ -12,6 +12,11 @@
 
 namespace pyvai {
 
+using vai::utils::Align;
+using vai::utils::ImageGeometry;
+using vai::utils::ImageProcessor;
+using vai::utils::Resize;
+
 namespace {
 
 // The C++ class hands its pixels over flat and keeps their layout private, so

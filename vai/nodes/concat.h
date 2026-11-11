@@ -1,7 +1,7 @@
 #ifndef VAI_NODES_CONCAT_H
 #define VAI_NODES_CONCAT_H
 
-#include "vai/nodes/node-common.h"
+#include "node-common.h"
 
 namespace vai::node {
 
@@ -50,7 +50,6 @@ public:
         // a recording that cannot supply one drops this node instead.
         bool allowPartialInputs = false;
 
-        vai::Dtype oDtype = vai::Dtype::None;   // None: oDefaultDtype
     } config_;
 
     Concat();
@@ -75,12 +74,11 @@ inline Concat::Concat(Config config)
 
     if (config_.allowPartialInputs)
         flags_ |= partialInputs;
-
-    config_.oDtype = (config_.oDtype == Dtype::None) ? oDefaultDtype() : config_.oDtype;
 }
 
 inline void Concat::prepare()
 {
+    const Dtype oDtype = (oDtype_ == Dtype::None) ? oDefaultDtype() : oDtype_;
     const Tensor* first = nullptr;
     uint32_t concatDim = 0;
 
@@ -117,7 +115,7 @@ inline void Concat::prepare()
     uint32_t outer = 1;
     for (uint32_t d = 0; d < axisIdx; ++d)
         outer *= first->shape()[d];
-    contiguous = (outer == 1 && iDtype == config_.oDtype);
+    contiguous = (outer == 1 && iDtype == oDtype);
 
     std::vector<uint32_t> outShape = first->shape();
     outShape[axisIdx] = concatDim;
@@ -126,7 +124,7 @@ inline void Concat::prepare()
     if (skip)
         (*this)["out0"] = *first;
     else
-        (*this)["out0"] = Tensor(outShape, config_.oDtype);
+        (*this)["out0"] = Tensor(outShape, oDtype);
 
     if (contiguous)
         return;
@@ -138,9 +136,9 @@ inline void Concat::prepare()
     {
         pipeParams = p;
         pipe = pipelinePool().request("concat", {
-            eva::constant_id<SPEC_ID_TYPE_O>(config_.oDtype),   // typeO
-            eva::constant_id<SPEC_ID_TYPE_I>(iDtype)            // typeI (all inputs)
-        });
+                                                    eva::constant_id<SPEC_ID_TYPE_O>(oDtype),   // typeO
+                                                    eva::constant_id<SPEC_ID_TYPE_I>(iDtype)    // typeI (all inputs)
+                                                });
         if (!descSet)
             descSet = gVaiDestSetPool(pipe.descSetLayout(0));
     }

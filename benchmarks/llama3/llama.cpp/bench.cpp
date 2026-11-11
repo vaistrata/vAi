@@ -116,7 +116,7 @@ int main(int argc, char** argv)
 
     // Arguments are prompt lengths in tokens, one table row each: the first N
     // tokens of the essay in bench-prompts.h (146 = the prompt of
-    // examples/llama3/demo.cpp). No argument runs the default set.
+    // models/production/llama3/demo.cpp). No argument runs the default set.
     // --showText: decode and print one generated sequence per run (off by default,
     // so the bench output stays just the table).
     bool        showText = false;
@@ -290,7 +290,7 @@ int main(int argc, char** argv)
 
         // Feeds the whole prompt as one batch and returns the sampled next token.
         // data=false resets the cache metadata without memsetting the KV buffers,
-        // matching what vai's Model::resetCache() does on its side of the bench.
+        // matching what vai's Net::resetCache() does on its side of the bench.
         auto prefill = [&]() -> llama_token {
             llama_memory_clear(llama_get_memory(ctx), /*data=*/false);
             llama_batch batch = llama_batch_get_one(promptTokens.data(), nPrompt);

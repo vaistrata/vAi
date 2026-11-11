@@ -18,30 +18,30 @@
 
 !models/
 !models/**
-models/yolov8/
+models/internal/
 
 !examples/
 !examples/**
-examples/yolov8/
 
-!tests/
-!tests/**
+# !tests/
+# !tests/**
 
 !benchmarks/
 !benchmarks/**
 benchmarks/yolov8/
 
 !data/
-!data/mnist/
-!data/mnist/0.png
-!data/mnist/ckpts/
-!data/mnist/ckpts/model.safetensors
-!data/pi0/
-!data/pi0/cam_high.jpg
-!data/pi0/cam_left_wrist.jpg
-!data/pi0/cam_right_wrist.jpg
-!data/yolox/
-!data/yolox/dog.jpg
+!data/ckpts/
+!data/ckpts/mnist/
+!data/ckpts/mnist/jroot/
+!data/ckpts/mnist/jroot/model.safetensors
+!data/images/
+!data/images/0.png
+!data/images/cam_high.jpg
+!data/images/cam_left_wrist.jpg
+!data/images/cam_right_wrist.jpg
+!data/images/paper_captured0.jpg
+!data/images/dog.jpg
 
 !docs/
 !docs/**

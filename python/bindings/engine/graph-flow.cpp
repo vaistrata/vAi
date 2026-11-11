@@ -247,60 +247,39 @@ void bindGraphFlow(nb::module_& m)
 
     // dynamic_attr: carries the `_pyvai_net` anchor.
     nb::class_<vai::Node>(m, "Node", nb::dynamic_attr())
-        .def_prop_rw(
-            "profile_tag",
-            [](const vai::Node& self) -> const std::string& { return self.getProfileTag(); },
-            [](vai::Node& self, const std::string& tag) { self.setProfileTag(tag); },
-            "Profile tag; an empty one untags the node. Tagging any node turns "
-            "per-node GPU timing on for its net, and changing a tag resets the "
-            "running averages."
-        )
-
         .def(
             "slot",
             [](vai::Node& self, const std::string& name) -> vai::NodeSlot& {
                 checkSlotExists(self, name);
                 return self.slot(name);
             },
-            nb::arg("name"),
-            nb::rv_policy::reference_internal
-        )
+            nb::arg("name"), nb::rv_policy::reference_internal)
 
-        .def(
-            "__getitem__",
-            [](vai::Node& self, const std::string& name) -> vai::Tensor {
-                checkSlotExists(self, name);
-                return self[name];
-            }
-        )
+        .def("__getitem__",
+             [](vai::Node& self, const std::string& name) -> vai::Tensor {
+                 checkSlotExists(self, name);
+                 return self[name];
+             })
 
-        .def(
-            "__setitem__",
-            [](vai::Node& self, const std::string& name, const vai::Tensor& t) {
-                checkSlotExists(self, name);
-                self[name] = t;
-            }
-        )
+        .def("__setitem__",
+             [](vai::Node& self, const std::string& name, const vai::Tensor& t) {
+                 checkSlotExists(self, name);
+                 self[name] = t;
+             })
 
         // a - b: connect a.out0 to b.in0, return b's flow for chaining.
-        .def(
-            "__sub__",
-            [](nb::handle_t<vai::Node> a, nb::handle_t<vai::Node> b) -> PyNodeFlow {
-                return connectFlowToFlow(flowOf(a), flowOf(b));
-            }
-        )
-        .def(
-            "__sub__",
-            [](nb::handle_t<vai::Node> a, nb::handle_t<vai::NodeGroup> b) -> PyNodeFlow {
-                return connectFlowToFlow(flowOf(a), flowOf(b));
-            }
-        )
-        .def(
-            "__sub__",
-            [](nb::handle_t<vai::Node> a, const PyNodeFlow& b) -> PyNodeFlow {
-                return connectFlowToFlow(flowOf(a), b);
-            }
-        )
+        .def("__sub__",
+             [](nb::handle_t<vai::Node> a, nb::handle_t<vai::Node> b) -> PyNodeFlow {
+                 return connectFlowToFlow(flowOf(a), flowOf(b));
+             })
+        .def("__sub__",
+             [](nb::handle_t<vai::Node> a, nb::handle_t<vai::NodeGroup> b) -> PyNodeFlow {
+                 return connectFlowToFlow(flowOf(a), flowOf(b));
+             })
+        .def("__sub__",
+             [](nb::handle_t<vai::Node> a, const PyNodeFlow& b) -> PyNodeFlow {
+                 return connectFlowToFlow(flowOf(a), b);
+             })
 
         // Call-style wiring: y = linear(relu(x))
         .def(
@@ -309,40 +288,25 @@ void bindGraphFlow(nb::module_& m)
                 return connectCall(flowOf(self), args, kwargs);
             },
             "Wire nodes or flows into this node and return its flow: positional "
-            "args go to in0, in1, ...; keywords to the named slots."
-        )
+            "args go to in0, in1, ...; keywords to the named slots.")
 
         // node / "name": out-slot spec
-        .def(
-            "__truediv__",
-            [](nb::handle_t<vai::Node> self, const std::string& name) -> PyNodeFlow {
-                PyNodeFlow f = flowOf(self);
-                f.outSlotName = name;
-                return f;
-            }
-        )
+        .def("__truediv__",
+             [](nb::handle_t<vai::Node> self, const std::string& name) -> PyNodeFlow {
+                 PyNodeFlow f = flowOf(self);
+                 f.outSlotName = name;
+                 return f;
+             })
         // "name" / node: in-slot spec
-        .def(
-            "__rtruediv__",
-            [](nb::handle_t<vai::Node> self, const std::string& name) -> PyNodeFlow {
-                PyNodeFlow f = flowOf(self);
-                f.inSlotName = name;
-                return f;
-            }
-        )
+        .def("__rtruediv__",
+             [](nb::handle_t<vai::Node> self, const std::string& name) -> PyNodeFlow {
+                 PyNodeFlow f = flowOf(self);
+                 f.inSlotName = name;
+                 return f;
+             })
 
-        .def(
-            "__repr__",
-            [](nb::handle self) -> std::string {
-                auto& n = nb::cast<vai::Node&>(self);
-                std::string typeName = nb::cast<std::string>(
-                    self.type().attr("__name__"));
-                const auto& tag = n.getProfileTag();
-                if (tag.empty())
-                    return typeName + "()";
-                return typeName + "(profile_tag='" + tag + "')";
-            }
-        );
+        .def("__repr__",
+             [](nb::handle self) -> std::string { return nb::cast<std::string>(self.type().attr("__name__")) + "()"; });
 
     nb::class_<vai::InputNode,  vai::Node>(m, "InputNode",
         "A net's input boundary, from NeuralNet.input(name). The tensor passed "
@@ -465,12 +429,7 @@ void bindGraphFlow(nb::module_& m)
             [](const PyNodeFlow& f) -> std::string {
                 std::string target;
                 if (f.node)
-                {
-                    const auto& tag = f.node->getProfileTag();
-                    target = "node=<Node" +
-                             (tag.empty() ? std::string() : " '" + tag + "'") +
-                             ">";
-                }
+                    target = "node=<Node>";
                 else if (f.group)
                     target = "group=<NodeGroup>";
                 return "NodeFlow(" + target +

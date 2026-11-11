@@ -1,7 +1,7 @@
 #ifndef VAI_NODES_NEAREST_UPSAMPLE_H
 #define VAI_NODES_NEAREST_UPSAMPLE_H
 
-#include "vai/nodes/node-common.h"
+#include "node-common.h"
 
 namespace vai::node {
 
@@ -28,8 +28,8 @@ public:
         bool operator==(const PipeParams&) const = default;
     };
 
-    struct Config {
-        vai::Dtype oDtype = vai::Dtype::None;   // None: oDefaultDtype
+    struct Config
+    {
     } config_;
 
     NearestUpsample(uint32_t scaleFactor = 2);
@@ -51,13 +51,12 @@ inline NearestUpsample::NearestUpsample(uint32_t scaleFactor, Config config)
     VAI_ASSERT(scale > 1u);
 
     addSlot("out0", NodeSlot::output);
-    addSlot("in0",  NodeSlot::input);
-
-    config_.oDtype = (config_.oDtype == Dtype::None) ? oDefaultDtype() : config_.oDtype;
+    addSlot("in0", NodeSlot::input);
 }
 
 inline void NearestUpsample::prepare()
 {
+    const Dtype oDtype = (oDtype_ == Dtype::None) ? oDefaultDtype() : oDtype_;
     const Tensor& inTen = (*this)["in0"];
 
     const Dtype iDtype = inTen.dtype();
@@ -67,17 +66,17 @@ inline void NearestUpsample::prepare()
     {
         pipeParams = p;
         pipe = pipelinePool().request("upsample", {
-            eva::constant_id<0>(scale),
-            eva::constant_id<SPEC_ID_TYPE_O>(config_.oDtype),   // typeO
-            eva::constant_id<SPEC_ID_TYPE_I>(iDtype)            // typeI
-        });
+                                                      eva::constant_id<0>(scale),
+                                                      eva::constant_id<SPEC_ID_TYPE_O>(oDtype),   // typeO
+                                                      eva::constant_id<SPEC_ID_TYPE_I>(iDtype)    // typeI
+                                                  });
         if (!descSet)
             descSet = gVaiDestSetPool(pipe.descSetLayout(0));
     }
     VAI_ASSERT(inTen.shape().size() == 3);
 
     const auto& s = inTen.shape();
-    (*this)["out0"] = Tensor({s[0], s[1] * scale, s[2] * scale}, config_.oDtype);
+    (*this)["out0"] = Tensor({s[0], s[1] * scale, s[2] * scale}, oDtype);
 }
 
 inline void NearestUpsample::run(eva::CommandBuffer cmdBuff)

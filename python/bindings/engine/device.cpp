@@ -51,7 +51,7 @@ void bindDevice(nb::module_& m)
         "Idempotent.");
 
     // The built-in models draw their top-k sampling uniform from std::rand()
-    // (models/*/model.h), which nothing seeds; this is the only knob.
+    // (models/production/*/net.h), which nothing seeds; this is the only knob.
     m.def("seed",
         [](unsigned int value) { std::srand(value); },
         nb::arg("value"),

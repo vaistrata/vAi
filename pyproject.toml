@@ -54,8 +54,9 @@ wheel.packages     = ["python/pyvai"]
 install.components = ["python"]
 
 [tool.scikit-build.cmake.define]
-VAI_BUILD_PYTHON   = "ON"
-VAI_BUILD_EXAMPLES = "OFF"
+VAI_BUILD_PYTHON     = "ON"
+VAI_BUILD_MODEL_DEMO = "OFF"
+VAI_BUILD_EXAMPLES   = "OFF"
 
 [tool.scikit-build.metadata.version]
 provider = "scikit_build_core.metadata.regex"

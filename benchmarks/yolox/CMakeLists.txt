@@ -3,8 +3,8 @@ cmake_minimum_required(VERSION 3.21)  # for $<TARGET_RUNTIME_DLLS>
 project(bench-yolox)
 
 set(YOLOX_BENCH_DIR ${CMAKE_CURRENT_SOURCE_DIR})
-set(YOLOX_MODEL_DIR ${CMAKE_SOURCE_DIR}/models/yolox)
-set(YOLOX_WEIGHTS_DIR ${CMAKE_SOURCE_DIR}/data/yolox CACHE PATH
+set(YOLOX_MODEL_DIR ${CMAKE_SOURCE_DIR}/models/experimental/yolox)
+set(YOLOX_WEIGHTS_DIR ${CMAKE_SOURCE_DIR}/data/benchmarks/yolox CACHE PATH
     "Directory containing YOLOX benchmark artifacts")
 if(DEFINED ENV{ROCM_PATH})
     list(APPEND CMAKE_PREFIX_PATH "$ENV{ROCM_PATH}")
@@ -29,7 +29,7 @@ add_executable(bench-yolox-vai
     common/processing.cpp
 )
 
-add_dependencies(bench-yolox-vai yolox-shaders)
+add_dependencies(bench-yolox-vai experimental-yolox-shaders)
 
 bench_yolox_configure_target(bench-yolox-vai)
 
