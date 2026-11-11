@@ -22,14 +22,14 @@ void bindModels(nb::module_& m)
     // registers any (PYVAI_MODEL_NODE_BINDING). Private: python/tests checks
     // them as it checks the core ones.
     nb::module_ nodes = m.def_submodule("model_nodes", "Nodes of models/<model>/nodes/, one submodule per model.");
-    std::set<std::string> models;
+    std::set<std::string> modelNames;
     for (const NodeBinding& b : nodeBindings())
-        if (!b.model.empty())
-            models.insert(b.model);
-    for (const std::string& model : models)
+        if (!b.modelName.empty())
+            modelNames.insert(b.modelName);
+    for (const std::string& modelName : modelNames)
     {
-        nb::module_ sub = nodes.def_submodule(model.c_str(), ("models/" + model + "/nodes/").c_str());
-        bindRegisteredNodes(sub, model);
+        nb::module_ sub = nodes.def_submodule(modelName.c_str(), ("models/" + modelName + "/nodes/").c_str());
+        bindRegisteredNodes(sub, modelName);
     }
 }
 

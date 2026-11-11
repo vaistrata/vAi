@@ -12,15 +12,16 @@ std::vector<NodeBinding>& nodeBindings()
     return bindings;
 }
 
-void bindRegisteredNodes(nb::module_& m, const std::string& model)
+void bindRegisteredNodes(nb::module_& m, const std::string& modelName)
 {
     std::vector<NodeBinding> picked;
     for (const NodeBinding& b : nodeBindings())
-        if (b.model == model)
+        if (b.modelName == modelName)
             picked.push_back(b);
-    std::sort(picked.begin(), picked.end(), [](const auto& a, const auto& b) { return a.id < b.id; });
+    std::sort(picked.begin(), picked.end(),
+              [](const auto& a, const auto& b) { return a.bindFunctionName < b.bindFunctionName; });
     for (const NodeBinding& b : picked)
-        b.bind(m);
+        b.bindFunction(m);
 }
 
 void bindNodes(nb::module_& m)
