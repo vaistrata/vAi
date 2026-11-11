@@ -49,6 +49,12 @@ See [Writing custom models](../05-contributing-models.md) for information on wri
 | [GPT-2](gpt2.md) | 124M, 355M, 774M, 1.5B |
 | [Llama 3](llama3.md) | 3.2-1B, 3.2-3B |
 
+### Speech
+
+| Model | Supported model sizes |
+|---|---|
+| [Whisper](whisper.md) | tiny, base, small, medium, large-v3, large-v3-turbo |
+
 ## Aggregate benchmark
 
 ### Vision

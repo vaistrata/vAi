@@ -41,6 +41,8 @@ benchmarks/yolov8/
 !data/pi0/cam_right_wrist.jpg
 !data/yolox/
 !data/yolox/dog.jpg
+!data/whisper/
+!data/whisper/jfk.wav
 
 !docs/
 !docs/**

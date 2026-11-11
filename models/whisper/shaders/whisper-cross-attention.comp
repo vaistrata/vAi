@@ -1,0 +1,128 @@
+/*=============================================================================
+ whisper-cross-attention.comp:
+     O[tq, h, :] = softmax(Q[h, tq] · K[h, :]ᵀ * scale) · V[h, :, :]
+
+ Non-causal, uncached: every query reads all Tk keys (e.g. Whisper's encoder
+ states). Nothing is appended, so K / V stay valid across forwards.
+
+ - Q [B*H, Tq, Dh], K / V [B*H, Tk, Dh]; O token-major [B, Tq, H, Dh], so the
+   merge back to [B, Tq, H*Dh] is a reshape.
+ - One workgroup per (tq, b*H + h): dispatch(Tq, B*H, 1).
+ - The Tk scores sit in shared memory (maxTk = Tk); Dh <= WG_SIZE.
+ - Q / K / V (typeI) and O (typeO) are fp32 or fp16 through same-binding aliases.
+=============================================================================*/
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_shader_16bit_storage : require
+#include "common/spec_constants.h"
+
+#define WG_SIZE 128
+layout(local_size_x = WG_SIZE, local_size_y = 1, local_size_z = 1) in;
+
+layout(constant_id = 0) const uint maxTk = 1500;   // score buffer length
+layout(constant_id = 1) const uint Dh = 64;        // head dimension
+layout(constant_id = 2) const uint typeI = 0;      // Q / K / V dtype
+layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0;
+
+layout(set = 0, binding = 0) buffer O_BUF_F32 { float bufferO_f32[]; };
+layout(set = 0, binding = 0) buffer O_BUF_F16 { float16_t bufferO_f16[]; };
+layout(set = 0, binding = 1) buffer Q_BUF_F32 { float bufferQ_f32[]; };
+layout(set = 0, binding = 1) buffer Q_BUF_F16 { float16_t bufferQ_f16[]; };
+layout(set = 0, binding = 2) buffer K_BUF_F32 { float bufferK_f32[]; };
+layout(set = 0, binding = 2) buffer K_BUF_F16 { float16_t bufferK_f16[]; };
+layout(set = 0, binding = 3) buffer V_BUF_F32 { float bufferV_f32[]; };
+layout(set = 0, binding = 3) buffer V_BUF_F16 { float16_t bufferV_f16[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint Tq;
+    uint Tk;
+    uint H;
+    float scale;
+};
+
+float readQ(uint i) { return (typeI == DTYPE_F32) ? bufferQ_f32[i] : float(bufferQ_f16[i]); }
+float readK(uint i) { return (typeI == DTYPE_F32) ? bufferK_f32[i] : float(bufferK_f16[i]); }
+float readV(uint i) { return (typeI == DTYPE_F32) ? bufferV_f32[i] : float(bufferV_f16[i]); }
+void writeO(uint i, float v) { if (typeO == DTYPE_F32) bufferO_f32[i] = v; else bufferO_f16[i] = float16_t(v); }
+
+shared float sQ[Dh];
+shared float sScore[maxTk];
+shared float sRed[WG_SIZE];
+
+void main()
+{
+    const uint lane = gl_LocalInvocationID.x;
+    const uint tq   = gl_WorkGroupID.x;
+    const uint z    = gl_WorkGroupID.y;            // b * H + h
+    const uint kvBase = z * Tk * Dh;
+
+    // Query row, pre-scaled
+    for (uint d = lane; d < Dh; d += WG_SIZE)
+        sQ[d] = readQ((z * Tq + tq) * Dh + d) * scale;
+    barrier();
+
+    // Scores and their running max, one key per lane per pass
+    float m = -1e30;
+    for (uint j = lane; j < Tk; j += WG_SIZE)
+    {
+        float s = 0.0;
+        for (uint d = 0u; d < Dh; ++d)
+            s += sQ[d] * readK(kvBase + j * Dh + d);
+        sScore[j] = s;
+        m = max(m, s);
+    }
+
+    sRed[lane] = m;
+    barrier();
+    for (uint stride = WG_SIZE / 2u; stride > 0u; stride >>= 1u)
+    {
+        if (lane < stride)
+            sRed[lane] = max(sRed[lane], sRed[lane + stride]);
+        barrier();
+    }
+    m = sRed[0];
+    barrier();
+
+    // Exponentiate in place and sum
+    float l = 0.0;
+    for (uint j = lane; j < Tk; j += WG_SIZE)
+    {
+        float p = exp(sScore[j] - m);
+        sScore[j] = p;
+        l += p;
+    }
+
+    sRed[lane] = l;
+    barrier();
+    for (uint stride = WG_SIZE / 2u; stride > 0u; stride >>= 1u)
+    {
+        if (lane < stride)
+            sRed[lane] += sRed[lane + stride];
+        barrier();
+    }
+    l = sRed[0];
+    barrier();
+
+    // P · V: lanes split into `parts` groups of Dh, each sweeping every parts-th key
+    const uint parts = WG_SIZE / Dh;
+    const uint d     = lane % Dh;
+    const uint part  = lane / Dh;
+
+    float acc = 0.0;
+    if (part < parts)
+        for (uint j = part; j < Tk; j += parts)
+            acc += sScore[j] * readV(kvBase + j * Dh + d);
+
+    sRed[lane] = acc;
+    barrier();
+
+    if (lane < Dh)
+    {
+        float o = 0.0;
+        for (uint p = 0u; p < parts; ++p)
+            o += sRed[p * Dh + lane];
+
+        const uint b = z / H, h = z - b * H;
+        writeO(((b * Tq + tq) * H + h) * Dh + lane, o / l);   // token-major store
+    }
+}

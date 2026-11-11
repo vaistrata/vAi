@@ -133,6 +133,7 @@ plugins:
                 - YOLOX: en/04-models/yolox.md
                 - GPT-2: en/04-models/gpt2.md
                 - Llama 3: en/04-models/llama3.md
+                - Whisper: en/04-models/whisper.md
             - Writing custom models: en/05-contributing-models.md
             - Built-in nodes: en/06-nodes.md
             - Writing custom nodes and kernels: en/07-contributing-nodes.md
