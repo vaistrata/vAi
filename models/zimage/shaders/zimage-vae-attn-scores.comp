@@ -1,0 +1,6 @@
+// zimage-vae-attn-scores.comp: zimage-vae-attn-gemm.glsl with A k-major (the scores, K^T Q).
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_control_flow_attributes : enable
+#define A_KMAJOR 1
+#include "zimage-vae-attn-gemm.glsl"

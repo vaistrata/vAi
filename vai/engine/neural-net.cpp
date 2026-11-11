@@ -171,9 +171,9 @@ NeuralNet::NeuralNet(const NeuralNetConfig& config)
     else
         pipelinePool_ = std::make_shared<vai::PipelinePool>(device_);
 
-    cmdBuffer_ = device_.newCommandBuffer(
+    cmdBuffers_.push_back(device_.newCommandBuffer(
         eva::queue_compute,
-        eva::COMMAND_POOL_CREATE::RESET_COMMAND_BUFFER);
+        eva::COMMAND_POOL_CREATE::RESET_COMMAND_BUFFER));
 
     for (auto& uploadCmd : uploadCmds_)
         uploadCmd = device_.newCommandBuffer(
@@ -401,6 +401,30 @@ void NeuralNet::uploadModelParams()
     }
 }
 
+Tensor NeuralNet::paramTensor(const std::vector<uint32_t>& shape, Dtype dtype,
+                              const std::function<void(void*)>& fill)
+{
+    Tensor tensor(shape, dtype);
+    const size_t byteSize = tensor.numBytes();
+    if (device_.deviceType() != eva::DEVICE_TYPE::INTEGRATED_GPU)
+    {
+        tensor.data_->hostData_.resize(byteSize);
+        fill(tensor.data_->hostData_.data());
+        return tensor;
+    }
+
+    vai::PooledBuffer pooledBuffer = bufferPool_->requestBuffer(
+        eva::BUFFER_USAGE::STORAGE_BUFFER | eva::BUFFER_USAGE::TRANSFER_DST,
+        eva::MEMORY_PROPERTY::DEVICE_LOCAL | eva::MEMORY_PROPERTY::HOST_VISIBLE
+        | eva::MEMORY_PROPERTY::HOST_COHERENT,
+        byteSize,
+        byteSize);
+    fill(pooledBuffer.buffer.map());
+    pooledBuffer.buffer.unmap();
+    tensor.bindBuffer(std::move(pooledBuffer));
+    return tensor;
+}
+
 void NeuralNet::recordCommands(const TensorRefDict& outputs)
 {
     sync();
@@ -418,8 +442,12 @@ void NeuralNet::recordCommands(const TensorRefDict& outputs)
     for (auto& [name, node] : outputs_)
         node.reached_ = false;
 
-    cmdBuffer_.begin(eva::COMMAND_BUFFER_USAGE::SIMULTANEOUS_USE);
-    profiler_->beginRecord(cmdBuffer_);
+    recordedCmdBuffers_ = 1;
+    eva::CommandBuffer cmdBuffer = cmdBuffers_[0];
+    uint32_t nodesInCmdBuffer = 0;
+
+    cmdBuffer.begin(eva::COMMAND_BUFFER_USAGE::SIMULTANEOUS_USE);
+    profiler_->beginRecord(cmdBuffer);
 
     for (size_t nodeIdx = 0; nodeIdx < sortedNodes_.size(); ++nodeIdx)
     {
@@ -430,6 +458,19 @@ void NeuralNet::recordCommands(const TensorRefDict& outputs)
                     slot.getValueRef() = Tensor();
             continue;
         }
+
+        if (config_.nodesPerSubmit && nodesInCmdBuffer == config_.nodesPerSubmit)
+        {
+            cmdBuffer.end();
+            if (recordedCmdBuffers_ == cmdBuffers_.size())
+                cmdBuffers_.push_back(device_.newCommandBuffer(
+                    eva::queue_compute,
+                    eva::COMMAND_POOL_CREATE::RESET_COMMAND_BUFFER));
+            cmdBuffer = cmdBuffers_[recordedCmdBuffers_++];
+            cmdBuffer.begin(eva::COMMAND_BUFFER_USAGE::SIMULTANEOUS_USE);
+            nodesInCmdBuffer = 0;
+        }
+        ++nodesInCmdBuffer;
 
         Node* node = sortedNodes_[nodeIdx];
         const bool profileTarget = profiler_->isTagged(node);
@@ -495,12 +536,12 @@ void NeuralNet::recordCommands(const TensorRefDict& outputs)
 
         
         if (profileTarget)
-            profiler_->beginNode(cmdBuffer_, node);
+            profiler_->beginNode(cmdBuffer, node);
 
-        node->run(cmdBuffer_);
+        node->run(cmdBuffer);
 
         if (profileTarget)
-            profiler_->endNode(cmdBuffer_);
+            profiler_->endNode(cmdBuffer);
 
         // Release transient bindings so their pooled buffers can be reused.
         for (auto& [name, slot] : node->slots_)
@@ -512,8 +553,8 @@ void NeuralNet::recordCommands(const TensorRefDict& outputs)
         }
     }
 
-    profiler_->endRecord(cmdBuffer_);
-    cmdBuffer_.end();
+    profiler_->endRecord(cmdBuffer);
+    cmdBuffer.end();
 }
 
 

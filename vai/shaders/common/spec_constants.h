@@ -6,6 +6,7 @@
 #define DTYPE_F32 0u
 #define DTYPE_F16 1u
 #define DTYPE_NONE 2u
+#define DTYPE_Q4 3u     // weights only (layout at vai::Dtype::Q4)
 
 // Shape specialization constants: 30-36.
 #define SPEC_ID_TYPE_CI 30

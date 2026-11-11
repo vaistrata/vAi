@@ -1,0 +1,67 @@
+/*=============================================================================
+ group-norm-stats.comp: partial statistics of group normalization
+     for group g and chunk k of it, P[g, k] = (Σ(x−s), Σ(x−s)²)
+
+ The input is [C, S] (channel-major: C channels of S positions each), so
+ group g — channels [g·C/G, (g+1)·C/G) — is one contiguous run of
+ L = (C/G)·S elements. Each workgroup reduces chunkLen of it; every chunk of
+ a group subtracts the same shift s = the group's first element, so the
+ partials of a group add up exactly as they are (group-norm-apply.comp sums
+ them). The shift keeps the sums at spread (σ) scale rather than mean scale
+ (Chan–Golub–LeVeque), as layer-norm.comp does per row.
+
+ - I (typeI) is fp32 or fp16; accumulation is fp32.
+ - P: [G, numChunks, 2] fp32.
+ - Dispatch (host): .dispatch(numChunks, G).
+=============================================================================*/
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_shader_16bit_storage : require
+#include "common/spec_constants.h"
+
+const uint wgSize = 256u;
+layout(local_size_x = wgSize) in;
+
+layout(constant_id = SPEC_ID_TYPE_I) const uint typeI = 0;   // I (input) dtype
+
+layout(set = 0, binding = 0) restrict writeonly buffer P_BUF { vec2 bufferP[]; };
+layout(set = 0, binding = 1) restrict readonly buffer I_BUF_F32 { float bufferI_f32[]; };
+layout(set = 0, binding = 1) restrict readonly buffer I_BUF_F16 { float16_t bufferI_f16[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint groupLen;    // L = (C / G) * S
+    uint chunkLen;    // elements per workgroup (a multiple of wgSize)
+    uint numChunks;   // ceil(L / chunkLen)
+};
+
+float readI(uint i) { return (typeI == DTYPE_F32) ? bufferI_f32[i] : float(bufferI_f16[i]); }
+
+shared vec2 sPart[wgSize];
+
+void main()
+{
+    const uint g = gl_WorkGroupID.y, k = gl_WorkGroupID.x, tid = gl_LocalInvocationID.x;
+    const uint base = g * groupLen;
+    const float sh = readI(base);
+
+    const uint begin = k * chunkLen;
+    const uint end = min(begin + chunkLen, groupLen);
+    vec2 acc = vec2(0.0);
+    for (uint i = begin + tid; i < end; i += wgSize)
+    {
+        const float d = readI(base + i) - sh;
+        acc += vec2(d, d * d);
+    }
+
+    sPart[tid] = acc;
+    barrier();
+    for (uint stride = wgSize / 2u; stride > 0u; stride >>= 1)
+    {
+        if (tid < stride)
+            sPart[tid] += sPart[tid + stride];
+        barrier();
+    }
+
+    if (tid == 0u)
+        bufferP[g * numChunks + k] = sPart[0];
+}

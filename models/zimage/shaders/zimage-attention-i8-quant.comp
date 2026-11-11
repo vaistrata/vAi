@@ -1,0 +1,73 @@
+// =============================================================================
+// zimage-attention-i8-quant.comp: zimage-attention-i8's inputs
+//
+//   y = 0: Q [H, N, Dh] f16 -> int8 rows of q * scaleLog2 / d, d = max|.| / 127
+//   y = 1: K [H, N, Dh] f16 -> int8 rows of k / d
+//   y = 2: V [N, H*Dh] -> f16
+//
+// - QK8 holds the Q rows, then the K rows (4 dims per uint, x lowest);
+//   scales the d of each, in the same order.
+// - 32 invocations per 128-dim row, the row's max one butterfly over them:
+//   subgroups of at least 32 (host-checked).
+// - Dispatch (host): .dispatch(ceil(H * N / 8), 3).
+// =============================================================================
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_KHR_shader_subgroup_shuffle : require
+#include "common/spec_constants.h"
+
+const uint wgSize = 256u;
+const uint DH4    = 32u;                // Dh = 128, in vec4s
+const uint RPW    = wgSize / DH4;       // rows per workgroup
+
+layout(local_size_x = wgSize, local_size_y = 1, local_size_z = 1) in;
+
+layout(constant_id = 4) const uint typeV = 0;   // V dtype
+
+layout(set = 0, binding = 0) writeonly buffer QK8_BUF { uint bufferQK8[]; };
+layout(set = 0, binding = 1) writeonly buffer SCALE_BUF { float bufferScale[]; };
+layout(set = 0, binding = 2) readonly buffer Q_BUF { f16vec4 bufferQ[]; };
+layout(set = 0, binding = 3) readonly buffer K_BUF { f16vec4 bufferK[]; };
+layout(set = 0, binding = 4) readonly buffer V_BUF_F32 { vec4 bufferV_f32[]; };
+layout(set = 0, binding = 4) readonly buffer V_BUF_F16 { f16vec4 bufferV_f16[]; };
+layout(set = 0, binding = 5) writeonly buffer V16_BUF { f16vec4 bufferV16[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint rows;          // H * N
+    float scaleLog2;    // log2(e) / sqrt(Dh), folded into Q
+};
+
+vec4 readV4(uint i) { return (typeV == 0u) ? bufferV_f32[i] : vec4(bufferV_f16[i]); }
+
+void main()
+{
+    const uint which = gl_WorkGroupID.y;
+    const uint row = gl_WorkGroupID.x * RPW + gl_LocalInvocationIndex / DH4;
+    const uint c = gl_LocalInvocationIndex % DH4;
+    const bool inRange = row < rows;
+    const uint i = row * DH4 + c;
+
+    if (which == 2u)
+    {
+        if (inRange)
+            bufferV16[i] = f16vec4(readV4(i));
+        return;
+    }
+
+    vec4 x = vec4(0.0);
+    if (inRange)
+        x = (which == 0u) ? vec4(bufferQ[i]) * scaleLog2 : vec4(bufferK[i]);
+    const vec4 a = abs(x);
+    float mx = max(max(a.x, a.y), max(a.z, a.w));
+    for (uint s = 1u; s < DH4; s <<= 1)
+        mx = max(mx, subgroupShuffleXor(mx, s));
+    const float d = max(mx, 1e-30) / 127.0;
+    if (!inRange)
+        return;
+
+    const uvec4 b = uvec4(ivec4(round(x * (1.0 / d)))) & 0xFFu;
+    bufferQK8[which * rows * DH4 + i] = b.x | (b.y << 8) | (b.z << 16) | (b.w << 24);
+    if (c == 0u)
+        bufferScale[which * rows + row] = d;
+}
