@@ -1,16 +1,23 @@
 """The pre-commit hook: clang-tidy on the staged C++ lines.
 
-The check is LLVM's clang-tidy-diff, as in CI. This adds what a clone needs
-around it:
+Off until a clone turns it on, once:
 
-- the compile database. clang-tidy reads a file as the compiler does, and a
-  Visual Studio build has no compile_commands.json. The first run makes one in
-  build-tidy/ (a configure, not a build; VAI_TIDY_BUILD names another place).
-- on Windows, the diff's paths with `\\`: clang-tidy-diff matches git's `/`
-  paths against clang-tidy's `\\` ones and so would pass every change.
+    python .github/scripts/clang-tidy-staged.py --setup
 
-Exit codes: 0 clean, or no compile database could be made (the reason is
-printed; CI still checks the PR). 1 a finding on a staged line.
+clang-tidy reads a file as the compiler does, so it needs a compile database,
+and a Visual Studio build has none. --setup makes one in build-tidy/ (a
+configure with Ninja, not a build; on Windows inside the newest Visual Studio's
+environment). VAI_TIDY_BUILD names another place. While that directory has no
+compile_commands.json the hook does nothing: CI checks the PR, and an editor
+that reads .clang-tidy shows the findings as you type. Deleting the directory
+turns the hook off again.
+
+The check is LLVM's clang-tidy-diff, as in CI. On Windows the diff's paths go
+in with `\\`: clang-tidy-diff matches git's `/` paths against clang-tidy's
+`\\` ones and so would pass every change.
+
+Exit codes: 0 clean or off, 1 a finding on a staged line. --setup: 0 made,
+1 not.
 """
 
 from __future__ import annotations
@@ -73,26 +80,30 @@ def configure(root: str, build: str) -> str | None:
 
 
 def main() -> int:
-    import clang_tidy  # the wheel the hook installs; it carries clang-tidy-diff.py
-
     # pre-commit reads the hook's output as UTF-8, whatever the console's own is.
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    tools = os.path.join(os.path.dirname(clang_tidy.__file__), "data", "bin")
     root = os.path.normpath(git("rev-parse", "--show-toplevel").strip())
     os.chdir(root)
+    build = os.environ.get("VAI_TIDY_BUILD") or os.path.join(root, "build-tidy")
 
+    if sys.argv[1:] == ["--setup"]:
+        print(f"clang-tidy: making the compile database in {build} ...", flush=True)
+        if why := configure(root, build):
+            print(f"clang-tidy: not set up, {why}")
+            return 1
+        print("clang-tidy: the pre-commit hook is on for this clone")
+        return 0
+
+    if not os.path.exists(os.path.join(build, "compile_commands.json")):
+        print("clang-tidy: off for this clone (to turn it on: this script with --setup)")
+        return 0
+
+    import clang_tidy  # the wheel the hook installs; it carries clang-tidy-diff.py
+
+    tools = os.path.join(os.path.dirname(clang_tidy.__file__), "data", "bin")
     diff = git("diff", "-U0", "--staged", "--diff-filter=ACMR", "--", *DIRECTORIES, *NOT_OURS)
     if "+++ b/" not in diff:
         return 0
-
-    build = os.environ.get("VAI_TIDY_BUILD") or os.path.join(root, "build-tidy")
-    if not os.path.exists(os.path.join(build, "compile_commands.json")):
-        print(f"clang-tidy: making the compile database in {build} (once) ...", flush=True)
-        if why := configure(root, build):
-            print(f"clang-tidy: SKIPPED, {why}")
-            print("CI checks the PR all the same. To have it here, configure once:")
-            print(f"  cmake -S . -B build-tidy {' '.join(CONFIGURE)}")
-            return 0
 
     if os.name == "nt":
         rows = diff.splitlines(keepends=True)

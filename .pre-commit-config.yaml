@@ -20,9 +20,12 @@ repos:
         exclude: ^(external/|vai/shaders/|vai/utils/(stb_image|stb_image_write|tiny-json)\.h$)
         require_serial: true          # one temporary index at a time
 
-      # Reports and does not rewrite. Its first run configures build-tidy/ for
-      # the compile database, a Visual Studio build having none; after that it
-      # reads only the staged files. verbose: so a skipped run says why.
+      # Reports and does not rewrite. Off until the clone turns it on, since it
+      # needs a compile database and a Visual Studio build has none:
+      #
+      #   python .github/scripts/clang-tidy-staged.py --setup
+      #
+      # verbose: so a run that is off says so.
       - id: clang-tidy
         name: clang-tidy (staged lines)
         language: python
