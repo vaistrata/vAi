@@ -1,11 +1,11 @@
-#include "python/bindings/nodes/nodes.h"
+#include "python/bindings/nodes/bind-node.h"
 #include "vai/nodes/reshape.h"
 #include <cstdint>
 #include <vector>
 
 namespace pyvai {
 
-void bindReshape(nb::module_& m)
+static void bindReshape(nb::module_& m)
 {
     nb::class_<vai::node::Reshape, vai::Node>(m, "ReshapeNode")
         .def(
@@ -34,5 +34,6 @@ void bindReshape(nb::module_& m)
             "element count. out0 aliases in0's buffer."
         );
 }
+PYVAI_NODE_BINDING(bindReshape);
 
 }   // namespace pyvai

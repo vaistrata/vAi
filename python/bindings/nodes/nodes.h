@@ -45,49 +45,6 @@ inline void checkRopeConfig(const vai::RopeConfig& cfg, const char* who, const c
         fail("low_freq_factor and high_freq_factor must differ");
 }
 
-// One per vai/nodes/<node>.h; list order must match bindNodes()'s call order.
-
-// Shape / plumbing
-void bindIdentity(nb::module_&);
-void bindGate(nb::module_&);
-void bindReshape(nb::module_&);
-void bindFlatten(nb::module_&);
-void bindConcat(nb::module_&);
-void bindPermute(nb::module_&);
-void bindSlice(nb::module_&);
-void bindRowSliceScatter(nb::module_&);
-void bindIndexCopy(nb::module_&);
-void bindTypeCast(nb::module_&);
-
-// Element-wise
-void bindAdd(nb::module_&);
-void bindMul(nb::module_&);
-void bindGatedMul(nb::module_&);
-void bindEleAffine(nb::module_&);
-void bindActivation(nb::module_&);
-
-// Vision
-void bindConvolution(nb::module_&);
-void bindPool2d(nb::module_&);
-void bindNearestUpsample(nb::module_&);
-
-// Linear / normalization
-void bindLinear(nb::module_&);
-void bindLayerNorm(nb::module_&);
-void bindRmsNorm(nb::module_&);
-void bindBatchNorm(nb::module_&);
-
-// Transformer
-void bindTokenEmbedding(nb::module_&);
-void bindTimeEmbedding(nb::module_&);
-void bindCyclicTableReader(nb::module_&);
-void bindRope(nb::module_&);
-void bindAttention(nb::module_&);
-
-// Output heads
-void bindArgmax(nb::module_&);
-void bindTopKSampling(nb::module_&);
-
 }   // namespace pyvai
 
 #endif // PYVAI_NODES_NODES_H

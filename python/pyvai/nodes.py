@@ -4,10 +4,11 @@ Base classes (`Node`, `NodeGroup`, ...), `KVCacheCounter` and the config types
 (`Epilogue`, `ResidualOrder`, `RopeType`, `RopeConfig`) stay at the top level of
 `pyvai`.
 
-A new node is bound in bindings/nodes/<node>.cpp, declared in nodes.h, called
-from nodes.cpp and re-exported here (the import list and `__all__`;
-tests/test_nodes.py fails if one is missing).
+A new node is bound in bindings/nodes/<node>.cpp, through bindNode() and one
+PYVAI_NODE_BINDING line (bindings/nodes/bind-node.h), and re-exported here
+(the import list and `__all__`; tests/test_nodes.py fails if one is missing).
 """
+
 from ._pyvai import (
     # shape / plumbing
     IdentityNode,

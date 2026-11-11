@@ -1,4 +1,4 @@
-#include "python/bindings/nodes/nodes.h"
+#include "python/bindings/nodes/bind-node.h"
 #include "python/bindings/nodes/kvcache-counter.h"
 #include "vai/nodes/attention.h"
 #include "vai/groups/transformer.h"   // createCausalMask, writeCausalMask
@@ -36,7 +36,7 @@ struct PyAttention : vai::node::Attention
 }   // namespace
 
 
-void bindAttention(nb::module_& m)
+static void bindAttention(nb::module_& m)
 {
     nb::class_<PyAttention, vai::Node>(m, "AttentionNode")
         .def(
@@ -134,5 +134,6 @@ void bindAttention(nb::module_& m)
             "counter crashes the process. Rejected when kv_cache_size is 0."
         );
 }
+PYVAI_NODE_BINDING(bindAttention);
 
 }   // namespace pyvai

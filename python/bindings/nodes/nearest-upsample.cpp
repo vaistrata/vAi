@@ -1,11 +1,11 @@
-#include "python/bindings/nodes/nodes.h"
+#include "python/bindings/nodes/bind-node.h"
 #include "vai/nodes/nearest-upsample.h"
 #include <cstdint>
 #include <optional>
 
 namespace pyvai {
 
-void bindNearestUpsample(nb::module_& m)
+static void bindNearestUpsample(nb::module_& m)
 {
     nb::class_<vai::node::NearestUpsample, vai::Node>(m, "NearestUpsampleNode")
         .def(
@@ -28,5 +28,6 @@ void bindNearestUpsample(nb::module_& m)
             "Replicate every [C, H, W] pixel into a scale x scale block (scale >= 2)."
         );
 }
+PYVAI_NODE_BINDING(bindNearestUpsample);
 
 }   // namespace pyvai

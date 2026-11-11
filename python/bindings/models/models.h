@@ -42,10 +42,6 @@ void bindPi0(nb::module_&);
 void bindPi05(nb::module_&);
 void bindYOLOX(nb::module_&);
 
-// A model's own nodes (models/<model>/nodes/), bound into
-// pyvai._pyvai.model_nodes.<model> by bindModels(): one per model that has them.
-void bindYOLOXNodes(nb::module_&);
-
 }   // namespace pyvai
 
 #endif // PYVAI_MODELS_MODELS_H

@@ -1,4 +1,4 @@
-#include "python/bindings/nodes/nodes.h"
+#include "python/bindings/nodes/bind-node.h"
 #include "vai/nodes/index-copy.h"
 #include <cstdint>
 #include <cstring>
@@ -44,29 +44,19 @@ struct PyIndexCopy : vai::node::IndexCopy
 }   // namespace
 
 
-void bindIndexCopy(nb::module_& m)
+static void bindIndexCopy(nb::module_& m)
 {
-    nb::class_<PyIndexCopy, vai::Node>(m, "IndexCopyNode")
-        .def(
-            "__init__",
-            [](PyIndexCopy* self, uint32_t axis)
-            {
-                requireCurrentNet("IndexCopyNode");
-                new (self) PyIndexCopy(vai::node::IndexCopy::Config{
-                    .axis = axis,
-                });
-            },
-            nb::arg("axis") = 0u,
-            "torch.index_copy along `axis`: out0 is in0 with slice index[n] taken from "
-            "slice n of in1, which is in0's shape with that axis replaced by len(index). "
-            "Both inputs share a dtype. out0 aliases in0, so no other node may read in0 "
-            "after this one; a forward without in1 passes in0 through. An index past "
-            "in0's axis leaves its slice unwritten."
-        )
+    using C = vai::node::IndexCopy::Config;
+    bindNode<PyIndexCopy>(m, "IndexCopyNode",
+                          "torch.index_copy along `axis`: out0 is in0 with slice index[n] taken from "
+                          "slice n of in1, which is in0's shape with that axis replaced by len(index). "
+                          "Both inputs share a dtype. out0 aliases in0, so no other node may read in0 "
+                          "after this one; a forward without in1 passes in0 through. An index past "
+                          "in0's axis leaves its slice unwritten.",
+                          field("axis", &C::axis))
         .def(
             "set_index",
-            [](PyIndexCopy& self, const std::vector<uint32_t>& index)
-            {
+            [](PyIndexCopy& self, const std::vector<uint32_t>& index) {
                 if (index.empty())
                     throw nb::value_error("IndexCopyNode.set_index: index must not be empty");
                 self.writeIndex(index);
@@ -75,8 +65,8 @@ void bindIndexCopy(nb::module_& m)
             "Where each slice of in1 lands along the axis; required before a forward "
             "that feeds in1. It waits for the GPU and is read at dispatch, so a rewrite "
             "no longer than any before it re-records nothing. A length other than in1's "
-            "size along the axis is the next forward's error."
-        );
+            "size along the axis is the next forward's error.");
 }
+PYVAI_NODE_BINDING(bindIndexCopy);
 
 }   // namespace pyvai

@@ -1,4 +1,4 @@
-#include "python/bindings/nodes/nodes.h"
+#include "python/bindings/nodes/bind-node.h"
 #include "vai/nodes/permute.h"
 #include <cstdint>
 #include <optional>
@@ -7,7 +7,7 @@
 
 namespace pyvai {
 
-void bindPermute(nb::module_& m)
+static void bindPermute(nb::module_& m)
 {
     nb::class_<vai::node::Permute, vai::Node>(m, "PermuteNode")
         .def(
@@ -45,5 +45,6 @@ void bindPermute(nb::module_& m)
             "order and the dtype is unchanged."
         );
 }
+PYVAI_NODE_BINDING(bindPermute);
 
 }   // namespace pyvai

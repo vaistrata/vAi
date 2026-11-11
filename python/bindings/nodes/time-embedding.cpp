@@ -1,51 +1,29 @@
-#include "python/bindings/nodes/nodes.h"
+#include "python/bindings/nodes/bind-node.h"
 #include "vai/nodes/time-embedding.h"
 #include <cstdint>
-#include <optional>
 
 namespace pyvai {
 
-void bindTimeEmbedding(nb::module_& m)
+static void bindTimeEmbedding(nb::module_& m)
 {
-    nb::class_<vai::node::TimeEmbedding, vai::Node>(m, "TimeEmbeddingNode")
-        .def(
-            "__init__",
-            [](vai::node::TimeEmbedding* self, uint32_t embed_dim,
-               float min_period, float max_period, uint32_t num_steps,
-               std::optional<vai::Dtype> o_dtype)
-            {
-                requireCurrentNet("TimeEmbeddingNode");
-                if (embed_dim < 4 || embed_dim % 2 != 0)
-                    throw nb::value_error("TimeEmbeddingNode: embed_dim must be even and >= 4");
-                if (!(min_period > 0.0f) || !(max_period > min_period))
-                    throw nb::value_error("TimeEmbeddingNode: need 0 < min_period < max_period");
-                if (num_steps < 1)
-                    throw nb::value_error("TimeEmbeddingNode: num_steps must be >= 1");
-                new (self) vai::node::TimeEmbedding(vai::node::TimeEmbedding::Config{
-                    .embedDim  = embed_dim,
-                    .minPeriod = min_period,
-                    .maxPeriod = max_period,
-                    .numSteps  = num_steps,
-                    .oDtype    = o_dtype.value_or(vai::Dtype::None),
-                });
-            },
-            nb::arg("embed_dim"),
-            nb::arg("min_period"),
-            nb::arg("max_period"),
-            nb::arg("num_steps"),
-            nb::arg("o_dtype") = nb::none(),
-            "Sinusoidal embedding of a timestep the node counts down itself: forward "
-            "k after reset_time() embeds t = 1 - (k % num_steps) / num_steps. in0 "
-            "[..., rows, *] is read for its shape alone (rank >= 2). out0 [..., rows, "
-            "embed_dim] repeats one vector on every row: sin(2*pi*t/p_i) in the first "
-            "half, cos in the second, p_i geometric from min_period to max_period."
-        )
-        .def(
-            "reset_time",
-            &vai::node::TimeEmbedding::resetTime,
-            "Start the count over, so the next forward embeds t = 1. Not "
-            "synchronized: call net.sync() first if a forward may still be running."
-        );
+    using C = vai::node::TimeEmbedding::Config;
+    bindNode<vai::node::TimeEmbedding>(
+        m, "TimeEmbeddingNode",
+        "Sinusoidal embedding of a timestep the node counts down itself: forward "
+        "k after reset_time() embeds t = 1 - (k % num_steps) / num_steps. in0 "
+        "[..., rows, *] is read for its shape alone (rank >= 2). out0 [..., rows, "
+        "embed_dim] repeats one vector on every row: sin(2*pi*t/p_i) in the first "
+        "half, cos in the second, p_i geometric from min_period to max_period.",
+        required("embed_dim", &C::embedDim)
+            .check([](uint32_t d) { return d >= 4 && d % 2 == 0; }, "must be even and >= 4"),
+        required("min_period", &C::minPeriod).check([](float p) { return p > 0.0f; }, "must be > 0"),
+        required("max_period", &C::maxPeriod)
+            .check([](float p, const C& c) { return p > c.minPeriod; }, "must be > min_period"),
+        required("num_steps", &C::numSteps).check(atLeast(1u), "must be >= 1"), field("o_dtype", &C::oDtype))
+        .def("reset_time", &vai::node::TimeEmbedding::resetTime,
+             "Start the count over, so the next forward embeds t = 1. Not "
+             "synchronized: call net.sync() first if a forward may still be running.");
 }
+PYVAI_NODE_BINDING(bindTimeEmbedding);
 
 }   // namespace pyvai
