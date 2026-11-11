@@ -106,8 +106,8 @@ jobs:
 
   # clang-tidy reads a source as the compiler does, so it needs the compile
   # database: a configure, not a build. Only the lines a PR changes can fail it
-  # (.github/scripts/clang-tidy-changed.py). A manual run lists every finding
-  # of the tree and fails on none.
+  # (LLVM's clang-tidy-diff). A manual run lists every finding of the tree and
+  # fails on none.
   tidy:
     needs: filter
     if: github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && needs.filter.outputs.cpp == 'true')
@@ -142,13 +142,24 @@ jobs:
             -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
             -DVAI_BUILD_EXAMPLES=ON
 
+      # clang-tidy-diff.py and run-clang-tidy.py come with the clang-tidy wheel,
+      # under those names on Linux. A changed header is read on its own; every
+      # header of these directories can be.
+      # The directories are the ones the configure above covers: a source of
+      # python/, tests/ or benchmarks/ has no entry in the compile database.
+      # Exit codes: 0 clean, 1 a finding on a changed line or an unreadable file.
       - name: clang-tidy (changed lines)
         if: github.event_name == 'pull_request'
-        run: python .github/scripts/clang-tidy-changed.py --build build --base "origin/$BASE_REF"
+        run: |
+          base=$(git merge-base "origin/$BASE_REF" HEAD)
+          git diff -U0 "$base" -- vai models examples \
+              ':!vai/shaders' \
+              ':!vai/utils/stb_image.h' ':!vai/utils/stb_image_write.h' ':!vai/utils/tiny-json.h' \
+            | clang-tidy-diff.py -p1 -path build -j "$(nproc)" -quiet -warnings-as-errors='*'
 
       - name: clang-tidy (whole tree, report only)
         if: github.event_name == 'workflow_dispatch'
-        run: python .github/scripts/clang-tidy-changed.py --build build --all
+        run: run-clang-tidy.py -p build -quiet "$PWD/(vai|models|examples)/"
 
   vai-linux:
     needs: filter
