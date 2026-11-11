@@ -20,6 +20,20 @@ repos:
         exclude: ^(external/|vai/shaders/|vai/utils/(stb_image|stb_image_write|tiny-json)\.h$)
         require_serial: true          # one temporary index at a time
 
+      # Reports and does not rewrite. Its first run configures build-tidy/ for
+      # the compile database, a Visual Studio build having none; after that it
+      # reads only the staged files. verbose: so a skipped run says why.
+      - id: clang-tidy
+        name: clang-tidy (staged lines)
+        language: python
+        additional_dependencies: ["clang-tidy==22.1.8"]
+        entry: python .github/scripts/clang-tidy-staged.py
+        files: ^(vai|models|examples)/.*\.(h|hpp|cpp)$
+        exclude: ^(vai/shaders/|vai/utils/(stb_image|stb_image_write|tiny-json)\.h$)
+        pass_filenames: false
+        require_serial: true
+        verbose: true
+
   # Whole-file, as ruff is. The python tree is small enough to format once.
   # ruff-check reports and does not rewrite: its rules are in pyproject.toml.
   - repo: https://github.com/astral-sh/ruff-pre-commit
