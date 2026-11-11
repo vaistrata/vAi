@@ -158,6 +158,9 @@ if(VAI_BUILD_BENCH)
     # VLM benchmarks
     add_subdirectory(benchmarks/gemma3)
 
+    # Diffusion benchmarks
+    add_subdirectory(benchmarks/zimage)
+
     message(STATUS "[vAi] Benchmark projects build configuration completed.")
 endif()
 

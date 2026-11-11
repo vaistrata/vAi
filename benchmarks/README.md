@@ -440,3 +440,14 @@ pip install -r $CONVERT/requirements-convert_hf_to_gguf.txt
 ```bash
 PYTHONPATH=$CONVERT python $CONVERT/convert_hf_to_gguf.py data/<model>/<size> --outtype f16 --outfile data/<model>/<size>/model-f16.gguf
 ```
+
+## Diffusion benchmarks
+
+- Benches, with their results and how to run them: [Z-Image](zimage/README.md)
+- Comparison framework: [PyTorch](https://pytorch.org) through [diffusers](https://github.com/huggingface/diffusers)
+
+### Shared conditions: vAi vs diffusers
+
+- Measurement: one DiT forward, i.e. one denoising step, on the same latent, caption features and timestep for both. The caption encoder and the VAE are outside it.
+- Timing: the median of 10 forwards after warmup, from building the host inputs to reading the output back (vAi), or CUDA-synchronized (PyTorch).
+- Accuracy: both sides are checked against one fp32 diffusers forward of the same inputs, which `torch/bench.py` stores and the vAi bench reads.

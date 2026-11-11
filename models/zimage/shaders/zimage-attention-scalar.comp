@@ -1,0 +1,148 @@
+// =============================================================================
+// zimage-attention-scalar.comp: bidirectional flash attention for one fresh
+//     sequence, scalar FMA path (devices without cooperative matrices)
+//
+//     O[n, h] = softmax(Q[h, n] · K[h, :]^T * scale) · V[:, h]
+//
+// Same frame as zimage-attention.comp — Br query rows of one head per
+// workgroup, all N keys swept in Bc-wide tiles staged through shared memory
+// and fetched a tile ahead — with the inner products on plain FMAs:
+//   - LPR = 4 adjacent invocations share a query row, each holding Dh / 4
+//     of its dims (vec4 c = part + 4t) of q (pre-scaled) and of the output
+//     accumulator; a score is their partial dots summed by shuffle-xor.
+//   - every row reads the same key at a time, so the shared reads broadcast.
+//   - online softmax per key tile in exp2, fp32 throughout; shared staging
+//     is fp32 so no 16-bit arithmetic feature is needed.
+//
+// - Q, K: [H, N, Dh] f16; V: [N, H*Dh] (typeV); O: [N, H*Dh] (typeO).
+// - Requirements (host-checked): Dh % 16 == 0, N % Bc == 0, subgroups made
+//   of whole aligned groups of 4 invocations (any subgroup size >= 4).
+// - Dispatch (host): .dispatch(ceil(N / Br), H).
+// =============================================================================
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_control_flow_attributes : enable
+#extension GL_KHR_shader_subgroup_shuffle : require
+#include "common/spec_constants.h"
+
+layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;
+
+layout(constant_id = 0) const uint wgSize = 128;   // = Br * LPR
+layout(constant_id = 2) const uint Dh     = 128;   // head dim
+layout(constant_id = 3) const uint Bc     = 16;    // keys per tile
+layout(constant_id = 4) const uint typeV  = 0;     // V dtype
+layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0;
+
+layout(set = 0, binding = 0) writeonly buffer O_BUF_F32 { vec4 bufferO_f32[]; };            // [N, H*Dh]
+layout(set = 0, binding = 0) writeonly buffer O_BUF_F16 { f16vec4 bufferO_f16[]; };
+layout(set = 0, binding = 1) readonly buffer Q_BUF { f16vec4 bufferQ[]; };                  // [H, N, Dh]
+layout(set = 0, binding = 2) readonly buffer K_BUF { f16vec4 bufferK[]; };                  // [H, N, Dh]
+layout(set = 0, binding = 3) readonly buffer V_BUF_F32 { vec4 bufferV_f32[]; };             // [N, H*Dh]
+layout(set = 0, binding = 3) readonly buffer V_BUF_F16 { f16vec4 bufferV_f16[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint N;
+    uint H;
+    float scaleLog2;   // log2(e) / sqrt(Dh): softmax runs in exp2
+};
+
+const uint LPR = 4u;                    // lanes per query row
+const uint Br  = wgSize / LPR;          // query rows per workgroup
+const uint DH4 = Dh / 4u;               // head dim in vec4s
+const uint T   = DH4 / LPR;             // vec4s per lane
+const uint LD  = (Bc * DH4 + wgSize - 1u) / wgSize;   // K (and V) vec4s staged per thread
+
+shared vec4 s_k[Bc * DH4];
+shared vec4 s_v[Bc * DH4];
+
+vec4 readV4(uint i) { return (typeV == 0u) ? bufferV_f32[i] : vec4(bufferV_f16[i]); }
+
+void main()
+{
+    const uint h    = gl_WorkGroupID.y;
+    const uint tid  = gl_LocalInvocationIndex;
+    const uint part = tid % LPR;
+    const uint row  = gl_WorkGroupID.x * Br + tid / LPR;
+    const bool inRange = row < N;
+
+    vec4 q[T], o[T];
+    [[unroll]] for (uint t = 0; t < T; ++t)
+    {
+        q[t] = inRange ? vec4(bufferQ[(h * N + row) * DH4 + part + LPR * t]) * scaleLog2 : vec4(0.0);
+        o[t] = vec4(0.0);
+    }
+    float m = -1.0 / 0.0, l = 0.0;      // running max (log2 domain) / sum
+
+    vec4 pk[LD], pv[LD];                // the next K / V tile, in flight
+    [[unroll]] for (uint u = 0; u < LD; ++u)
+    {
+        const uint i = tid + u * wgSize, j = i / DH4, c = i % DH4;
+        if (i < Bc * DH4)
+        {
+            pk[u] = vec4(bufferK[(h * N + j) * DH4 + c]);
+            pv[u] = readV4((j * H + h) * DH4 + c);
+        }
+    }
+
+    for (uint kv0 = 0; kv0 < N; kv0 += Bc)
+    {
+        barrier();   // previous tile's K/V reads done
+        [[unroll]] for (uint u = 0; u < LD; ++u)
+        {
+            const uint i = tid + u * wgSize;
+            if (i < Bc * DH4)
+            {
+                s_k[i] = pk[u];
+                s_v[i] = pv[u];
+            }
+        }
+        barrier();
+        if (kv0 + Bc < N)
+            [[unroll]] for (uint u = 0; u < LD; ++u)
+            {
+                const uint i = tid + u * wgSize, j = kv0 + Bc + i / DH4, c = i % DH4;
+                if (i < Bc * DH4)
+                {
+                    pk[u] = vec4(bufferK[(h * N + j) * DH4 + c]);
+                    pv[u] = readV4((j * H + h) * DH4 + c);
+                }
+            }
+
+        // Scores of this tile (every lane of the row ends up with all of them).
+        float s[Bc];
+        float mx = -1.0 / 0.0;
+        [[unroll]] for (uint j = 0; j < Bc; ++j)
+        {
+            float d = 0.0;
+            [[unroll]] for (uint t = 0; t < T; ++t)
+                d += dot(q[t], s_k[j * DH4 + part + LPR * t]);
+            d += subgroupShuffleXor(d, 1u);
+            d += subgroupShuffleXor(d, 2u);
+            s[j] = d;
+            mx = max(mx, d);
+        }
+
+        const float mNew = max(m, mx);
+        const float alpha = exp2(m - mNew);
+        l *= alpha;
+        [[unroll]] for (uint t = 0; t < T; ++t) o[t] *= alpha;
+        [[unroll]] for (uint j = 0; j < Bc; ++j)
+        {
+            const float p = exp2(s[j] - mNew);
+            l += p;
+            [[unroll]] for (uint t = 0; t < T; ++t)
+                o[t] += p * s_v[j * DH4 + part + LPR * t];
+        }
+        m = mNew;
+    }
+
+    if (!inRange) return;
+    const float inv = 1.0 / l;
+    [[unroll]] for (uint t = 0; t < T; ++t)
+    {
+        const uint i = (row * H + h) * DH4 + part + LPR * t;
+        if (typeO == 0u) bufferO_f32[i] = o[t] * inv;
+        else             bufferO_f16[i] = f16vec4(o[t] * inv);
+    }
+}

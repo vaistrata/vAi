@@ -63,6 +63,7 @@ const char* vaiName(vai::Dtype dt)
         case vai::Dtype::Fp32: return "F32";
         case vai::Dtype::Fp16: return "F16";
         case vai::Dtype::None: return "None";
+        case vai::Dtype::Q4:   return "Q4";
     }
     return "?";
 }

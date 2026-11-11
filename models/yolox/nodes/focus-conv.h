@@ -147,7 +147,7 @@ inline FocusConvNode::Plan FocusConvNode::selectPlan(
             vai::node::classifyAMDArchitecture(
                 currentDevice.vendorID(), currentDevice.deviceID()) ==
                     vai::node::AMDArchitecture::RDNA4 &&
-            currentDevice.coreClusterCount() == 64u &&
+            currentDevice.computeBlockCount() == 64u &&
             workload.hi == 320u && workload.wi == 320u &&
             workload.co == 64u;
         if (navi48Large)

@@ -1,0 +1,178 @@
+// =============================================================================
+// zimage-attention-i8.comp: bidirectional flash attention for one fresh
+//     sequence, with the Q·K dots on packed int8 dot products (Adreno)
+//
+//     O[n, h] = softmax(Q[h, n] · K[h, :]^T * scale) · V[:, h]
+//
+// Laid out like linear-q4-q8: no shared memory, each lane a register tile,
+// neighbouring lanes reading neighbouring rows straight from memory. 64
+// lanes = 8 row groups x 8 key groups; a tile is Bc = 32 keys:
+//   S   lane (rg, kg) dots its tM = 4 query rows with keys kv0 + kg + 8 c,
+//       c < 4, over all 128 dims: 64 dotPacked4x8AccSatEXT per 8 uvec4
+//       loads, no cross-lane sum. Q and K come in as int8 rows with a
+//       scale each (zimage-attention-i8-quant, softmax scale in Q's).
+//   softmax  the row max and sum over the 8 key groups are 3-step
+//       butterflies; online softmax in exp2, fp32, with O kept normalized
+//       by the running sum so the fp16 sums below stay within |v|.
+//   P·V lane (rg, kg) owns the 4 rows x dims [16 kg, 16 kg + 16) of O,
+//       taking key group kg ^ x's p by subgroupShuffleXor(.., x). V is fp16,
+//       and so are these sums: half-precision registers are what let the
+//       4-row tile fit (in fp32 it spills: 190 ms). Each tile sums from zero
+//       and joins O once, so O rounds 33 times at N = 1056, not once per key:
+//       the 512x512 forward's rel L2 against fp32 is 3.99e-2 (3.91e-2 with
+//       the kernel this replaced, 4.32e-2 summing into O per key, 4.02e-2
+//       with an fp32 O).
+// - Measured on a Galaxy S25 Ultra (Adreno 830, N = 1056, 30 heads): 11.8 ms,
+//   plus 0.8 ms for the quant pass. The shared-memory frame this replaced
+//   (one row per 4 lanes, one shared read per dot) took 34 ms. The signed
+//   dot form beats the mixed one on k + 128 bytes by 1.2x; tiles other than
+//   4 x 4 spill or stay rolled (95-1300 ms).
+// - Q8, K8: int8 [H, N, Dh] (the Q rows, then the K rows, in QK8); scales:
+//   [2, H, N]; V: [N, H*Dh] f16; O: [N, H*Dh] (typeO).
+// - Dh = 128, the tile and 64 invocations are compile-time constants (as
+//   specialization constants the Adreno compiler leaves loops rolled).
+// - Requirements (host-checked): N % Bc == 0.
+// - Dispatch (host): .dispatch(ceil(N / Br), H), Br = 32.
+// =============================================================================
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_control_flow_attributes : enable
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_KHR_shader_subgroup_shuffle : require
+#extension GL_EXT_integer_dot_product : require
+#include "common/spec_constants.h"
+
+const uint wgSize = 64u;
+const uint tM  = 4u;                    // query rows per lane
+const uint tN  = 4u;                    // keys per lane in S
+const uint Br  = 8u * tM;               // query rows per workgroup
+const uint Bc  = 8u * tN;               // keys per tile
+const uint DH4 = 32u;                   // Dh = 128, in vec4s
+const uint DH16 = 8u;                   // Dh in int8 uvec4s
+
+layout(local_size_x = wgSize, local_size_y = 1, local_size_z = 1) in;
+
+layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0;
+
+layout(set = 0, binding = 0) writeonly buffer O_BUF_F32 { vec4 bufferO_f32[]; };        // [N, H*Dh]
+layout(set = 0, binding = 0) writeonly buffer O_BUF_F16 { f16vec4 bufferO_f16[]; };
+layout(set = 0, binding = 1) readonly buffer QK8_BUF { uvec4 bufferQK8[]; };            // [2, H, N, Dh] int8
+layout(set = 0, binding = 2) readonly buffer V_BUF { f16vec4 bufferV[]; };              // [N, H*Dh]
+layout(set = 0, binding = 3) readonly buffer SCALE_BUF { float bufferScale[]; };        // [2, H, N]
+
+layout(push_constant) uniform PushConstants {
+    uint N;
+    uint H;
+};
+
+void main()
+{
+    const uint h = gl_WorkGroupID.y;
+    const uint lane = gl_LocalInvocationIndex;
+    const uint rg = lane / 8u, kg = lane % 8u;           // row group; key group (S) = dim group (P·V)
+    const uint row0 = gl_WorkGroupID.x * Br + rg * tM;   // this lane's rows: row0 + r
+    const uint hN = h * N, kOff = H * N;                 // K's rows follow Q's
+
+    uint qrow[tM];
+    float qd[tM];
+    [[unroll]] for (uint r = 0; r < tM; ++r)
+    {
+        qrow[r] = hN + min(row0 + r, N - 1u);            // the tail clamps; its rows are not stored
+        qd[r] = bufferScale[qrow[r]];
+    }
+    float m[tM], l[tM];
+    f16vec4 o[tM][4];
+    [[unroll]] for (uint r = 0; r < tM; ++r)
+    {
+        m[r] = -1.0 / 0.0;
+        l[r] = 0.0;
+        [[unroll]] for (uint y = 0; y < 4u; ++y) o[r][y] = f16vec4(0.0);
+    }
+
+    for (uint kv0 = 0; kv0 < N; kv0 += Bc)
+    {
+        // S: tM rows x keys kv0 + kg + 8 c.
+        int acc[tM][tN];
+        [[unroll]] for (uint r = 0; r < tM; ++r) [[unroll]] for (uint c = 0; c < tN; ++c) acc[r][c] = 0;
+        [[unroll]] for (uint ch = 0; ch < DH16; ++ch)
+        {
+            uvec4 qv[tM], kv[tN];
+            [[unroll]] for (uint r = 0; r < tM; ++r) qv[r] = bufferQK8[qrow[r] * DH16 + ch];
+            [[unroll]] for (uint c = 0; c < tN; ++c) kv[c] = bufferQK8[(kOff + hN + kv0 + kg + 8u * c) * DH16 + ch];
+            [[unroll]] for (uint r = 0; r < tM; ++r) [[unroll]] for (uint c = 0; c < tN; ++c)
+            {
+                acc[r][c] = dotPacked4x8AccSatEXT(int(qv[r].x), int(kv[c].x), acc[r][c]);
+                acc[r][c] = dotPacked4x8AccSatEXT(int(qv[r].y), int(kv[c].y), acc[r][c]);
+                acc[r][c] = dotPacked4x8AccSatEXT(int(qv[r].z), int(kv[c].z), acc[r][c]);
+                acc[r][c] = dotPacked4x8AccSatEXT(int(qv[r].w), int(kv[c].w), acc[r][c]);
+            }
+        }
+        float kd[tN];
+        [[unroll]] for (uint c = 0; c < tN; ++c) kd[c] = bufferScale[kOff + hN + kv0 + kg + 8u * c];
+
+        float p[tM][tN], keep[tM];
+        [[unroll]] for (uint r = 0; r < tM; ++r)
+        {
+            float s[tN];
+            float mx = -1.0 / 0.0;
+            [[unroll]] for (uint c = 0; c < tN; ++c)
+            {
+                s[c] = float(acc[r][c]) * qd[r] * kd[c];
+                mx = max(mx, s[c]);
+            }
+            mx = max(mx, subgroupShuffleXor(mx, 1u));
+            mx = max(mx, subgroupShuffleXor(mx, 2u));
+            mx = max(mx, subgroupShuffleXor(mx, 4u));
+            const float mNew = max(m[r], mx);
+            float sum = 0.0;
+            [[unroll]] for (uint c = 0; c < tN; ++c)
+            {
+                p[r][c] = exp2(s[c] - mNew);
+                sum += p[r][c];
+            }
+            sum += subgroupShuffleXor(sum, 1u);
+            sum += subgroupShuffleXor(sum, 2u);
+            sum += subgroupShuffleXor(sum, 4u);
+            // O stays normalized (|O| <= max |v|, within fp16): rescale by
+            // l_old alpha / l_new and weigh this tile by p / l_new.
+            const float kept = l[r] * exp2(m[r] - mNew);
+            const float lNew = kept + sum;
+            const float inv = 1.0 / lNew;
+            keep[r] = kept * inv;
+            [[unroll]] for (uint c = 0; c < tN; ++c) p[r][c] *= inv;
+            m[r] = mNew;
+            l[r] = lNew;
+        }
+
+        // P·V into this tile's sums t: key group kg ^ x's keys, their p by shuffle.
+        f16vec4 t[tM][4];
+        [[unroll]] for (uint r = 0; r < tM; ++r) [[unroll]] for (uint y = 0; y < 4u; ++y) t[r][y] = f16vec4(0.0);
+        [[unroll]] for (uint x = 0; x < 8u; ++x)
+            [[unroll]] for (uint c = 0; c < tN; ++c)
+            {
+                float16_t pr[tM];
+                [[unroll]] for (uint r = 0; r < tM; ++r)
+                    pr[r] = float16_t(x == 0u ? p[r][c] : subgroupShuffleXor(p[r][c], x));
+                const uint vi = ((kv0 + (kg ^ x) + 8u * c) * H + h) * DH4 + kg * 4u;
+                const f16vec4 v[4] = { bufferV[vi], bufferV[vi + 1u], bufferV[vi + 2u], bufferV[vi + 3u] };
+                [[unroll]] for (uint r = 0; r < tM; ++r) [[unroll]] for (uint y = 0; y < 4u; ++y)
+                    t[r][y] += pr[r] * v[y];
+            }
+        [[unroll]] for (uint r = 0; r < tM; ++r) [[unroll]] for (uint y = 0; y < 4u; ++y)
+            o[r][y] = o[r][y] * float16_t(keep[r]) + t[r][y];
+    }
+
+    [[unroll]] for (uint r = 0; r < tM; ++r)
+    {
+        const uint row = row0 + r;
+        if (row >= N)
+            continue;
+        const uint i = (row * H + h) * DH4 + kg * 4u;
+        [[unroll]] for (uint y = 0; y < 4u; ++y)
+        {
+            if (typeO == 0u) bufferO_f32[i + y] = vec4(o[r][y]);
+            else             bufferO_f16[i + y] = f16vec4(o[r][y]);
+        }
+    }
+}

@@ -1,0 +1,260 @@
+// =============================================================================
+// zimage-attention.comp: bidirectional flash attention for one fresh sequence
+//     (no KV cache, no mask), cooperative-matrix GEMMs
+//
+//     O[n, h] = softmax(Q[h, n] · K[h, :]^T * scale) · V[:, h]
+//
+// Decomposition: a workgroup owns Br = 16 * NUM_SG query rows of one head and
+// sweeps all N keys in Bc-wide tiles; subgroup sg owns rows [sg*16, +16)
+// end to end. Per tile:
+//   stage   the whole workgroup copies the K and V tiles to shared (f16) —
+//           one copy feeds every subgroup, the reuse the decode-shaped
+//           vai-attention-kvcache-fa-cm (16 rows per tile) lacks. The next
+//           tile is fetched into registers while this one computes.
+//   GEMM1   S = Q · K^T: Q lives in registers as Dh/16 A tiles, K^T comes
+//           from a ColumnMajor load of the row-major K stage.
+//   softmax S goes through the subgroup's shared slice; sgSize/16 adjacent
+//           lanes share a row (shuffle-xor max / add), keep its running m and
+//           l, and write P (f16) plus the row's rescale factor.
+//   GEMM2   O = O * alpha + P · V, O staying in accumulator registers.
+// The accumulator element -> row map is implementation-defined, so it is
+// read once from a matrix whose elements hold their row index (rowOf); the
+// per-row rescale and the final 1/l gather their factors through it.
+//
+// - Q, K: [H, N, Dh] f16 (head-major, QkNormRopeNode's layout); V: [N, H*Dh]
+//   token-major, fp32 or fp16 (typeV) — the projection output as is.
+// - O: [N, H*Dh] token-major (typeO), the layout the output projection reads.
+// - Requirements (host-checked): 16x16x16 f16 x f16 -> f32 subgroup coopmat,
+//   N % 16 == 0, N % Bc == 0, Dh % 16 == 0, wgSize = NUM_SG * sgSize with the
+//   subgroup size forced, sgSize in {16, 32, 64}.
+// - Dispatch (host): .dispatch(ceil(N / Br), H).
+// =============================================================================
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_control_flow_attributes : enable
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_shuffle : require
+#extension GL_KHR_memory_scope_semantics : enable
+#extension GL_KHR_cooperative_matrix : require
+#include "common/spec_constants.h"
+
+layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;
+
+layout(constant_id = 0) const uint wgSize = 256;   // = NUM_SG * sgSize
+layout(constant_id = 1) const uint sgSize = 32;    // forced on the pipeline
+layout(constant_id = 2) const uint Dh     = 128;   // head dim
+layout(constant_id = 3) const uint Bc     = 32;    // keys per tile
+layout(constant_id = 4) const uint typeV  = 0;     // V dtype
+layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0;
+
+layout(set = 0, binding = 0) writeonly buffer O_BUF_F32 { float bufferO_f32[]; };           // [N, H*Dh]
+layout(set = 0, binding = 0) writeonly buffer O_BUF_F16 { float16_t bufferO_f16[]; };
+layout(set = 0, binding = 1) readonly buffer Q_BUF { float16_t bufferQ[]; };                // [H, N, Dh]
+layout(set = 0, binding = 2) readonly buffer K_BUF { f16vec4 bufferK[]; };                  // [H, N, Dh]
+layout(set = 0, binding = 3) readonly buffer V_BUF_F32 { vec4 bufferV_f32[]; };             // [N, H*Dh]
+layout(set = 0, binding = 3) readonly buffer V_BUF_F16 { f16vec4 bufferV_f16[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint N;
+    uint H;
+    float scaleLog2;   // log2(e) / sqrt(Dh): softmax runs in exp2
+};
+
+const uint MAT     = 16u;
+const uint NUM_SG  = wgSize / sgSize;
+const uint Br      = NUM_SG * MAT;
+const uint DH4     = Dh / 4u;
+const uint DC      = Dh / MAT;          // head-dim tiles
+const uint KC      = Bc / MAT;          // key tiles
+const uint LPR     = sgSize / MAT;      // lanes per softmax row
+const uint CPL     = Bc / LPR;          // S columns per lane
+const uint LD      = (Bc * DH4 + wgSize - 1u) / wgSize;   // K (and V) vec4s staged per thread
+
+// Padding keeps the coopmat loads/stores off bank conflicts.
+const uint KV_STRIDE = DH4 + 2u;        // f16vec4
+const uint S_STRIDE  = Bc + 4u;         // float
+const uint P_STRIDE  = Bc + 8u;         // float16_t
+
+shared f16vec4   s_k[Bc * KV_STRIDE];
+shared f16vec4   s_v[Bc * KV_STRIDE];
+shared float     s_s[NUM_SG * MAT * S_STRIDE];
+shared float16_t s_p[NUM_SG * MAT * P_STRIDE];
+shared float     s_row[NUM_SG * MAT];   // per-row rescale (alpha, then 1/l)
+
+f16vec4 readV4(uint i) { return (typeV == 0u) ? f16vec4(bufferV_f32[i]) : bufferV_f16[i]; }
+
+// Reductions over the LPR adjacent lanes of one row.
+float rowMax(float x)
+{
+    [[unroll]] for (uint o = 1u; o < LPR; o <<= 1u) x = max(x, subgroupShuffleXor(x, o));
+    return x;
+}
+float rowSum(float x)
+{
+    [[unroll]] for (uint o = 1u; o < LPR; o <<= 1u) x += subgroupShuffleXor(x, o);
+    return x;
+}
+
+void subgroupSync()
+{
+    subgroupMemoryBarrierShared();
+    subgroupBarrier();
+}
+
+void main()
+{
+    const uint h    = gl_WorkGroupID.y;
+    const uint tid  = gl_LocalInvocationIndex;
+    const uint sg   = gl_SubgroupID;
+    const uint lane = gl_SubgroupInvocationID;
+    const uint row0 = gl_WorkGroupID.x * Br + sg * MAT;   // first query row of this subgroup
+    const bool inRange = row0 < N;                        // N % 16 == 0: whole subgroups drop out
+
+    const uint sBase = sg * MAT * S_STRIDE;
+    const uint pBase = sg * MAT * P_STRIDE;
+    const uint rBase = sg * MAT;
+    const uint r     = lane / LPR;                        // softmax row within the subgroup
+    const uint part  = lane % LPR;
+
+    // Accumulator element -> row map.
+    for (uint i = lane; i < MAT * MAT; i += sgSize)
+        s_s[sBase + (i / MAT) * S_STRIDE + (i % MAT)] = float(i / MAT);
+    subgroupSync();
+    coopmat<float, gl_ScopeSubgroup, MAT, MAT, gl_MatrixUseAccumulator> rowOf;
+    coopMatLoad(rowOf, s_s, sBase, S_STRIDE, gl_CooperativeMatrixLayoutRowMajor);
+
+    coopmat<float16_t, gl_ScopeSubgroup, MAT, MAT, gl_MatrixUseA> Q[DC];
+    coopmat<float, gl_ScopeSubgroup, MAT, MAT, gl_MatrixUseAccumulator> O[DC];
+    [[unroll]] for (uint dc = 0; dc < DC; ++dc)
+    {
+        O[dc] = coopmat<float, gl_ScopeSubgroup, MAT, MAT, gl_MatrixUseAccumulator>(0.0);
+        if (inRange)
+            coopMatLoad(Q[dc], bufferQ, (h * N + row0) * Dh + dc * MAT, Dh,
+                        gl_CooperativeMatrixLayoutRowMajor);
+    }
+    // The row factors of s_row, gathered into accumulator layout.
+    coopmat<float, gl_ScopeSubgroup, MAT, MAT, gl_MatrixUseAccumulator> A;
+
+    float m = -1.0 / 0.0, l = 0.0;   // running max (log2 domain) / sum of this lane's row
+
+    f16vec4 pk[LD], pv[LD];          // the next K / V tile, in flight
+    [[unroll]] for (uint u = 0; u < LD; ++u)
+    {
+        const uint i = tid + u * wgSize, j = i / DH4, c = i % DH4;
+        if (i < Bc * DH4)
+        {
+            pk[u] = bufferK[(h * N + j) * DH4 + c];
+            pv[u] = readV4((j * H + h) * DH4 + c);
+        }
+    }
+
+    for (uint kv0 = 0; kv0 < N; kv0 += Bc)
+    {
+        barrier();   // previous tile's K/V reads done
+        [[unroll]] for (uint u = 0; u < LD; ++u)
+        {
+            const uint i = tid + u * wgSize, j = i / DH4, c = i % DH4;
+            if (i < Bc * DH4)
+            {
+                s_k[j * KV_STRIDE + c] = pk[u];
+                s_v[j * KV_STRIDE + c] = pv[u];
+            }
+        }
+        barrier();
+        if (kv0 + Bc < N)
+            [[unroll]] for (uint u = 0; u < LD; ++u)
+            {
+                const uint i = tid + u * wgSize, j = kv0 + Bc + i / DH4, c = i % DH4;
+                if (i < Bc * DH4)
+                {
+                    pk[u] = bufferK[(h * N + j) * DH4 + c];
+                    pv[u] = readV4((j * H + h) * DH4 + c);
+                }
+            }
+        if (!inRange) continue;
+
+        // GEMM1: S = Q K^T
+        [[unroll]] for (uint kc = 0; kc < KC; ++kc)
+        {
+            coopmat<float, gl_ScopeSubgroup, MAT, MAT, gl_MatrixUseAccumulator> S =
+                coopmat<float, gl_ScopeSubgroup, MAT, MAT, gl_MatrixUseAccumulator>(0.0);
+            [[unroll]] for (uint dc = 0; dc < DC; ++dc)
+            {
+                coopmat<float16_t, gl_ScopeSubgroup, MAT, MAT, gl_MatrixUseB> B;
+                coopMatLoad(B, s_k, (kc * MAT) * KV_STRIDE + dc * (MAT / 4u), KV_STRIDE,
+                            gl_CooperativeMatrixLayoutColumnMajor);
+                S = coopMatMulAdd(Q[dc], B, S);
+            }
+            coopMatStore(S, s_s, sBase + kc * MAT, S_STRIDE, gl_CooperativeMatrixLayoutRowMajor);
+        }
+        subgroupSync();
+
+        // Online softmax; lane part of row r takes columns part, part + LPR, ...
+        float s[CPL];
+        float mx = -1.0 / 0.0;
+        [[unroll]] for (uint j = 0; j < CPL; ++j)
+        {
+            s[j] = s_s[sBase + r * S_STRIDE + j * LPR + part] * scaleLog2;
+            mx = max(mx, s[j]);
+        }
+        mx = rowMax(mx);
+        const float mNew = max(m, mx);
+        const float alpha = exp2(m - mNew);
+        float sum = 0.0;
+        [[unroll]] for (uint j = 0; j < CPL; ++j)
+        {
+            const float p = exp2(s[j] - mNew);
+            sum += p;
+            s_p[pBase + r * P_STRIDE + j * LPR + part] = float16_t(p);
+        }
+        l = l * alpha + rowSum(sum);
+        m = mNew;
+        if (part == 0u) s_row[rBase + r] = alpha;
+        subgroupSync();
+
+        // GEMM2: O = O * alpha + P V
+        for (int i = 0; i < A.length(); ++i)
+            A[i] = s_row[rBase + uint(rowOf[i])];
+        [[unroll]] for (uint dc = 0; dc < DC; ++dc)
+            for (int i = 0; i < A.length(); ++i)
+                O[dc][i] *= A[i];
+        [[unroll]] for (uint kc = 0; kc < KC; ++kc)
+        {
+            coopmat<float16_t, gl_ScopeSubgroup, MAT, MAT, gl_MatrixUseA> P;
+            coopMatLoad(P, s_p, pBase + kc * MAT, P_STRIDE, gl_CooperativeMatrixLayoutRowMajor);
+            [[unroll]] for (uint dc = 0; dc < DC; ++dc)
+            {
+                coopmat<float16_t, gl_ScopeSubgroup, MAT, MAT, gl_MatrixUseB> B;
+                coopMatLoad(B, s_v, (kc * MAT) * KV_STRIDE + dc * (MAT / 4u), KV_STRIDE,
+                            gl_CooperativeMatrixLayoutRowMajor);
+                O[dc] = coopMatMulAdd(P, B, O[dc]);
+            }
+        }
+    }
+
+    if (!inRange) return;
+
+    // O / l, stored token-major.
+    subgroupSync();   // last tile's alpha reads done
+    if (part == 0u) s_row[rBase + r] = 1.0 / l;
+    subgroupSync();
+    for (int i = 0; i < A.length(); ++i)
+        A[i] = s_row[rBase + uint(rowOf[i])];
+    const uint stride = H * Dh;
+    [[unroll]] for (uint dc = 0; dc < DC; ++dc)
+    {
+        for (int i = 0; i < A.length(); ++i)
+            O[dc][i] *= A[i];
+        const uint off = row0 * stride + h * Dh + dc * MAT;
+        if (typeO == 0u)
+            coopMatStore(O[dc], bufferO_f32, off, stride, gl_CooperativeMatrixLayoutRowMajor);
+        else
+        {
+            coopmat<float16_t, gl_ScopeSubgroup, MAT, MAT, gl_MatrixUseAccumulator> Oh =
+                coopmat<float16_t, gl_ScopeSubgroup, MAT, MAT, gl_MatrixUseAccumulator>(O[dc]);
+            coopMatStore(Oh, bufferO_f16, off, stride, gl_CooperativeMatrixLayoutRowMajor);
+        }
+    }
+}

@@ -16,7 +16,12 @@ namespace vai {
 
 class NeuralNet;
 
-enum class Dtype { Fp32, Fp16, None };
+// Q4 is a weight format: symmetric 4-bit values in groups of 32 consecutive
+// elements (the last axis a multiple of 32), each group with an fp16 scale.
+// The packed words come first, a uint32 per 8 elements with element i in bits
+// 4i..4i+3 holding q for the value (q - 8) * scale; the scales follow, one per
+// group. Linear reads it; on the host it is only converted to and from.
+enum class Dtype { Fp32, Fp16, None, Q4 };
 
 constexpr size_t bytesPerElement(Dtype dt) noexcept
 {
@@ -24,25 +29,35 @@ constexpr size_t bytesPerElement(Dtype dt) noexcept
         case Dtype::Fp16:  return 2;
         case Dtype::Fp32:  return 4;
         case Dtype::None:  return 0;
+        case Dtype::Q4:    return 0;   // packed; see byteSize()
     }
     return 4;
 }
 
+// Bytes that `count` elements of dt take, Q4's scales included.
+constexpr size_t byteSize(Dtype dt, size_t count) noexcept
+{
+    return (dt == Dtype::Q4) ? count / 2 + count / 32 * 2 : count * bytesPerElement(dt);
+}
+
 // Tensor dtype a safetensors dtype string loads as. BF16 is a file format
 // only, not a tensor dtype - it loads as fp32 (lossless) unless the caller
-// requests a target dtype (see Tensor(SafetensorRef, Dtype)).
+// requests a target dtype (see Tensor(SafetensorRef, Dtype)). Q4 is not a
+// safetensors dtype: only files saveSafetensors() wrote carry it.
 inline Dtype dtypeFromString(const std::string& s)
 {
     if (s == "F32")  return Dtype::Fp32;
     if (s == "F16")  return Dtype::Fp16;
     if (s == "BF16") return Dtype::Fp32;
+    if (s == "Q4")   return Dtype::Q4;
     VAI_ASSERT(false && "Unsupported dtype string");
     return Dtype::Fp32;
 }
 
 
 // Element-wise dtype conversion of `count` elements (host-side).
-// Handles all fp32 / fp16 combinations; same-dtype is a memcpy.
+// Handles all fp32 / fp16 combinations, and to and from Q4 (count a multiple
+// of 32, each group within one row); same-dtype is a memcpy.
 void convertDtype(const void* src, Dtype srcDtype, void* dst, Dtype dstDtype, size_t count);
 
 
@@ -59,9 +74,23 @@ Tensor concat(std::initializer_list<SafetensorRef> refs, Dtype targetDtype);
 Tensor slice(const SafetensorRef& ref, uint32_t begin, uint32_t end, Dtype targetDtype);
 
 
+// A checkpoint tensor's bytes as stored, read into dst (ref.byteSize()
+// bytes) by several threads at once.
+void readStored(const SafetensorRef& ref, void* dst);
+
+
 // a + b under numpy broadcasting (e.g. a position table [N, D] plus a bias
 // [D]). Summed in fp32 and rounded to targetDtype once.
 Tensor sum(const SafetensorRef& a, const SafetensorRef& b, Dtype targetDtype);
+
+
+// Writes `tensors` (each with host data, as loaded and not yet uploaded) to one
+// safetensors file at `path`, in the given order and at their own dtypes. A Q4
+// tensor is stored as packed, under the dtype string "Q4", so reading it back
+// costs one read and no conversion; only vai reads such a file. The file is
+// written beside `path` and renamed into place, so `path` is never partial.
+void saveSafetensors(const std::string& path,
+                     const std::vector<std::pair<std::string, const Tensor*>>& tensors);
 
 
 // Smallest power of two >= n (with nextPow2(0) == 1). Used to bucket grow-only
@@ -211,7 +240,7 @@ public:
     /**
      * Concatenate along the leading axis, the inverse of split(). Every tensor
      * must match this one's dtype and trailing dimensions; the result owns its
-     * bytes.
+     * bytes. Not for Q4: concatenate wider tensors and convert the result.
      *
      *   Tensor gu = gate.concat(up);   // two [H, K] -> one [2H, K]
      */
@@ -275,7 +304,7 @@ public:
 
     size_t numBytes() const
     {
-        return numElements() * bytesPerElement(dtype());
+        return byteSize(dtype(), numElements());
     }
 
     bool validShape() const
@@ -362,6 +391,7 @@ inline Tensor Tensor::permute(Ts... Perms) const
     for (int i = rank - 2; i >= 0; --i)
         dstStrides[i] = dstStrides[i + 1] * dstShape[i + 1];
 
+    VAI_ASSERT(data_->dtype_ != Dtype::Q4);
     const size_t n = numElements();
     const size_t elemSize = bytesPerElement(data_->dtype_);
     const char* srcData = data_->hostData_.data();
@@ -401,7 +431,7 @@ inline auto Tensor::split(Ts... offsets) const
 {
     static_assert((std::conjunction_v<std::is_integral<Ts>...>), "All offsets must be integral types");
     VAI_ASSERT(data_ && !data_->hostData_.empty());
-    VAI_ASSERT(!shape_.empty());
+    VAI_ASSERT(!shape_.empty() && data_->dtype_ != Dtype::Q4);
 
     constexpr size_t count = sizeof...(Ts) + 1;
     const uint32_t bounds[count] = { static_cast<uint32_t>(offsets)..., shape_[0] };
@@ -432,7 +462,7 @@ inline Tensor Tensor::concat(const Ts&... others) const
 {
     static_assert((std::conjunction_v<std::is_same<Ts, Tensor>...>), "All arguments must be Tensors");
     VAI_ASSERT(data_ && !data_->hostData_.empty());
-    VAI_ASSERT(!shape_.empty());
+    VAI_ASSERT(!shape_.empty() && data_->dtype_ != Dtype::Q4);   // Q4's scales follow all its words
 
     const Tensor* parts[] = { this, &others... };
 

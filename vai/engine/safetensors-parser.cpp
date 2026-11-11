@@ -218,6 +218,11 @@ size_t SafetensorsParser::byteSize(std::string_view key) const
         if (bytes != numElements * 2)
             throw std::runtime_error("Data size mismatch for F16/BF16 tensor.");
     }
+    else if (meta.dtype == "Q4")   // vai's own (saveSafetensors): packed words, then fp16 scales
+    {
+        if (numElements % 32 != 0 || bytes != numElements / 2 + numElements / 32 * 2)
+            throw std::runtime_error("Data size mismatch for Q4 tensor.");
+    }
     else
         throw std::runtime_error("Unsupported dtype: " + meta.dtype);
 

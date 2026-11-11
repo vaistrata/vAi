@@ -1242,7 +1242,11 @@ class Tokenizer::Impl
     };
 
 public:
-    explicit Impl(const std::string& tokenizerJsonPath) { load(tokenizerJsonPath); }
+    Impl(const std::string& tokenizerJsonPath, bool inputIsNfc)
+    : inputIsNfc_(inputIsNfc)
+    {
+        load(tokenizerJsonPath);
+    }
 
     std::vector<int> encode(const std::string& text, bool addSpecial, bool parseSpecial) const
     {
@@ -1368,6 +1372,7 @@ private:
     std::vector<std::string> prefixNames_, suffixNames_;   // resolved once the vocabulary is in
     std::vector<tokenizer_detail::SplitStep> splits_;
     std::vector<tokenizer_detail::TextStep> normalizeSteps_;   // input -> vocabulary spelling
+    bool inputIsNfc_ = false;                                   // an NFC normalizer is the caller's
     std::vector<tokenizer_detail::TextStep> decodeSteps_;      // one piece -> text
     std::array<int, 256> byteFallbackIds_{};   // byte -> "<0xNN>" id, -1 when absent
     std::unique_ptr<tokenizer_detail::PieceCodec> codec_ =
@@ -1568,6 +1573,8 @@ private:
 
         if (type == "Sequence")
             return;   // the children registered themselves
+        if (type == "NFC" && inputIsNfc_)
+            return;   // the caller composed the text
         if (type == "Prepend" && haveTo)
             step.kind = tokenizer_detail::TextStep::prepend;
         else if (type == "Replace" && haveFrom && haveTo)
@@ -1936,8 +1943,8 @@ private:
 /////////////////////////////////////////////////////////////////////////////////////////
 // Tokenizer - forwards to Impl
 /////////////////////////////////////////////////////////////////////////////////////////
-Tokenizer::Tokenizer(const std::string& tokenizerJsonPath)
-    : impl_(std::make_unique<Impl>(tokenizerJsonPath))
+Tokenizer::Tokenizer(const std::string& tokenizerJsonPath, bool inputIsNfc)
+    : impl_(std::make_unique<Impl>(tokenizerJsonPath, inputIsNfc))
 {
 }
 
