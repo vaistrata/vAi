@@ -1,0 +1,67 @@
+# Mistakes and names. Layout is .clang-format's.
+#
+# CI reads only the lines a PR changes, so the findings the tree already has
+# are no PR's to fix until it touches those lines.
+Checks: >
+  -*,
+  bugprone-*,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-exception-escape,
+  -bugprone-narrowing-conversions,
+  clang-analyzer-*,
+  -clang-analyzer-optin.*,
+  performance-*,
+  -performance-enum-size,
+  readability-identifier-naming
+
+HeaderFilterRegex: '.*[\\/](vai|models|examples|benchmarks|python|tests)[\\/].*'
+ExcludeHeaderFilterRegex: '.*[\\/](external|shaders)[\\/].*|.*[\\/](stb_image|stb_image_write|tiny-json)\.h'
+
+# Names, as the tree already writes them:
+# - types are PascalCase; functions, methods, variables, parameters and members
+#   are camelCase; namespaces are lower case; macros are UPPER_CASE;
+# - a private or protected member ends in `_`, a public one does not;
+# - an enum's values are PascalCase, in an enum class or a plain enum;
+# - a constant is camelCase like any variable, with no `k` in front.
+#
+# What the regexps let through:
+# - a tensor dimension keeps the letter the maths gives it: N, K, Co, Dh, Tmax;
+# - a model's size preset starts with `_`, since a name cannot start with a
+#   digit: _124M(), _3B_224();
+# - a node's public `config_`: the constructor's parameter is `config`. The `_`
+#   goes once the nodes are changed together.
+CheckOptions:
+  readability-identifier-naming.ClassCase: CamelCase
+  readability-identifier-naming.StructCase: CamelCase
+  readability-identifier-naming.UnionCase: CamelCase
+  readability-identifier-naming.EnumCase: CamelCase
+  readability-identifier-naming.TypeAliasCase: CamelCase
+  readability-identifier-naming.TypeAliasIgnoredRegexp: '^is_transparent$'   # the standard library's name
+  readability-identifier-naming.TypedefCase: CamelCase
+  readability-identifier-naming.ConceptCase: CamelCase
+  readability-identifier-naming.TypeTemplateParameterCase: CamelCase
+  readability-identifier-naming.EnumConstantCase: CamelCase
+  readability-identifier-naming.ScopedEnumConstantCase: CamelCase
+
+  readability-identifier-naming.NamespaceCase: lower_case
+  readability-identifier-naming.MacroDefinitionCase: UPPER_CASE
+
+  readability-identifier-naming.FunctionCase: camelBack
+  readability-identifier-naming.MethodCase: camelBack
+  readability-identifier-naming.ClassMethodIgnoredRegexp: '^_[0-9][A-Za-z0-9_]*$'
+
+  readability-identifier-naming.VariableCase: camelBack
+  readability-identifier-naming.VariableIgnoredRegexp: '^[A-Z]([a-z]{1,4}|[A-Z])?$'
+  readability-identifier-naming.ParameterCase: camelBack
+  readability-identifier-naming.ParameterIgnoredRegexp: '^[A-Z]([a-z]{1,4}|[A-Z])?$'
+  readability-identifier-naming.ValueTemplateParameterCase: camelBack
+  readability-identifier-naming.ValueTemplateParameterIgnoredRegexp: '^[A-Z]([a-z]{1,4}|[A-Z])?$'
+
+  readability-identifier-naming.MemberCase: camelBack
+  readability-identifier-naming.PublicMemberIgnoredRegexp: '^([A-Z]([a-z]{1,4}|[A-Z])?|config_)$'
+  readability-identifier-naming.PrivateMemberSuffix: '_'
+  readability-identifier-naming.ProtectedMemberSuffix: '_'
+  # A static member: the check cannot tell a private one from a public one, so
+  # either spelling passes.
+  readability-identifier-naming.ClassMemberCase: camelBack
+  readability-identifier-naming.ClassMemberIgnoredRegexp: '^[a-z][A-Za-z0-9]*_$'

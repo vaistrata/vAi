@@ -5,6 +5,7 @@
 !LICENSE
 !.clang-format
 !.clang-format-ignore
+!.clang-tidy
 !.pre-commit-config.yaml
 
 !CMakeLists.txt

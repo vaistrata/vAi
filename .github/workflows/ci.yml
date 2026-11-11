@@ -99,6 +99,57 @@ jobs:
           if [ -z "$files" ]; then echo "ruff: no python changes"; exit 0; fi
           ruff format --check --diff $files
 
+      # The whole tree, unlike the format steps: the rules in pyproject.toml are
+      # few and the tree passes them, so a finding is always the PR's own.
+      - name: ruff check
+        run: ruff check --output-format=github .
+
+  # clang-tidy reads a source as the compiler does, so it needs the compile
+  # database: a configure, not a build. Only the lines a PR changes can fail it
+  # (.github/scripts/clang-tidy-changed.py). A manual run lists every finding
+  # of the tree and fails on none.
+  tidy:
+    needs: filter
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && needs.filter.outputs.cpp == 'true')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      CC: gcc-14
+      CXX: g++-14
+      BASE_REF: ${{ github.base_ref }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+          fetch-depth: 0                   # the merge base must be reachable
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-14 g++-14 ninja-build glslc libvulkan-dev spirv-headers
+          pip install clang-tidy==22.1.8
+          clang-tidy --version
+
+      - name: Configure
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+            -DVAI_BUILD_EXAMPLES=ON
+
+      - name: clang-tidy (changed lines)
+        if: github.event_name == 'pull_request'
+        run: python .github/scripts/clang-tidy-changed.py --build build --base "origin/$BASE_REF"
+
+      - name: clang-tidy (whole tree, report only)
+        if: github.event_name == 'workflow_dispatch'
+        run: python .github/scripts/clang-tidy-changed.py --build build --all
+
   vai-linux:
     needs: filter
     if: github.event_name == 'workflow_dispatch' || needs.filter.outputs.cpp == 'true'

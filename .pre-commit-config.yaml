@@ -21,7 +21,9 @@ repos:
         require_serial: true          # one temporary index at a time
 
   # Whole-file, as ruff is. The python tree is small enough to format once.
+  # ruff-check reports and does not rewrite: its rules are in pyproject.toml.
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.17.4
     hooks:
+      - id: ruff-check
       - id: ruff-format
