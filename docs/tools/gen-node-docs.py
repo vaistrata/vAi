@@ -34,7 +34,7 @@ STRINGS = {
     "ko": {
         "title": "제공 노드들",
         "intro": "빌트인 노드 {n}종. 개념은 [노드(Node)](03-usage/node.md)를, "
-                 "새 노드를 만드는 법은 [커스텀 노드와 커널](07-contributing-nodes.md)을 참조하세요.",
+        "새 노드를 만드는 법은 [커스텀 노드와 커널](07-contributing-nodes.md)을 참조하세요.",
         "list": "목록",
         "list_head": "| 노드 | 요약 | 커널 |",
         "source": "소스:",
@@ -50,8 +50,8 @@ STRINGS = {
     "en": {
         "title": "Built-in nodes",
         "intro": "{n} built-in nodes. See [Node](03-usage/node.md) for the concept and "
-                 "[Writing custom nodes and kernels](07-contributing-nodes.md) for instructions "
-                 "on creating new nodes.",
+        "[Writing custom nodes and kernels](07-contributing-nodes.md) for instructions "
+        "on creating new nodes.",
         "list": "List",
         "list_head": "| Node | Summary | Kernel |",
         "source": "Source:",
@@ -109,7 +109,7 @@ class ParseError(Exception):
 def stamp_body(line, indent):
     """블록 스탬프 본문의 공통 들여쓰기 두 칸을 제거한다."""
     if line.startswith(indent):
-        line = line[len(indent):]
+        line = line[len(indent) :]
     if line.startswith("  "):
         line = line[2:]
     return line.rstrip()
@@ -226,12 +226,14 @@ def parse_config(lines):
                 continue
             m = OPT_FIELD.match(cur)
             if m:
-                fields.append({
-                    "type": " ".join(m.group(1).split()),
-                    "name": m.group(2),
-                    "default": (m.group(3) or "").strip(),
-                    "note": (m.group(4) or "").strip(),
-                })
+                fields.append(
+                    {
+                        "type": " ".join(m.group(1).split()),
+                        "name": m.group(2),
+                        "default": (m.group(3) or "").strip(),
+                        "note": (m.group(4) or "").strip(),
+                    }
+                )
         return fields
     return []
 
@@ -258,7 +260,7 @@ def parse_node_file(path):
     text = path.read_text(encoding="utf-8")
     lines = text.splitlines()
 
-    declared = [m.group(1) for m in (CLASS_DECL.match(l) for l in lines) if m]
+    declared = [m.group(1) for m in (CLASS_DECL.match(line) for line in lines) if m]
 
     nodes = []
     i = 0
@@ -348,7 +350,9 @@ def render(nodes, lang):
             w("|---|---|---|---|")
             for o in n["config"]:
                 default = f"`{o['default']}`" if o["default"] else "—"
-                w(f"| `{o['name']}` | `{md_escape(o['type'])}` | {md_escape(default)} | {md_escape(o['note'])} |")
+                w(
+                    f"| `{o['name']}` | `{md_escape(o['type'])}` | {md_escape(default)} | {md_escape(o['note'])} |"
+                )
             w("")
 
         if n["narrative"]:
@@ -403,12 +407,14 @@ def write(nodes, lang):
     text = render(nodes, lang)
     out.parent.mkdir(parents=True, exist_ok=True)
 
+    # 메시지에 줄표(—)를 쓰지 않는다: 한국어 Windows 콘솔(cp949)에 없는 글자라
+    # print 가 예외를 내고, mkdocs build / serve 가 거기서 멈춘다.
     if out.exists() and out.read_text(encoding="utf-8") == text:
-        print(f"{out.relative_to(ROOT)} — 변경 없음 (노드 {len(nodes)}종)")
+        print(f"{out.relative_to(ROOT)}: 변경 없음 (노드 {len(nodes)}종)")
         return False
 
     out.write_text(text, encoding="utf-8")
-    print(f"wrote {out.relative_to(ROOT)} — 노드 {len(nodes)}종")
+    print(f"wrote {out.relative_to(ROOT)}: 노드 {len(nodes)}종")
     return True
 
 
@@ -431,7 +437,9 @@ def main():
         for lang in STRINGS:
             out = OUTS[lang]
             if not out.exists():
-                print(f"error: {out.relative_to(ROOT)} 가 없다. 생성기를 실행할 것.", file=sys.stderr)
+                print(
+                    f"error: {out.relative_to(ROOT)} 가 없다. 생성기를 실행할 것.", file=sys.stderr
+                )
                 drifted = True
                 continue
             if out.read_text(encoding="utf-8") != render(nodes, lang):
