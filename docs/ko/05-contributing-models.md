@@ -279,7 +279,7 @@ cmake --build build --target demo-gpt2 --config Release
 
 **모델과 그룹의 선언**
 
-타입 이름은 `PascalCase`로 씁니다. 각 단어의 첫 글자를 대문자로 씁니다. (예: `ModelConfig`, `RuntimeConfig`.) 함수와 변수 이름은 `camelCase`로 씁니다. 첫 단어는 소문자로 시작하고 다음 단어의 첫 글자는 대문자로 씁니다. (예: `resetState()`, `numLayers`, `modelCfg`.) 함수의 여는 중괄호는 다음 줄에 둡니다.
+타입 이름은 `PascalCase`로 씁니다. 각 단어의 첫 글자를 대문자로 씁니다. (예: `ModelConfig`, `RuntimeConfig`.) 함수와 변수 이름은 `camelCase`로 씁니다. 첫 단어는 소문자로 시작하고 다음 단어의 첫 글자는 대문자로 씁니다. (예: `resetState()`, `numLayers`, `modelCfg`.) 함수와 구조체의 여는 중괄호는 다음 줄에 둡니다.
 
 다음은 `model.h`의 작성 형식을 보여주는 예제입니다. `Node` 구성과 생성자는 생략했습니다. `model_name`과 주석의 모델명과 작성자 이메일은 기여자의 정보로 바꾸면 됩니다. 이때 구조체 이름 `Model`은 유지합니다.
 
@@ -291,11 +291,13 @@ cmake --build build --target demo-gpt2 --config Release
 
 namespace model_name {
 
-struct Block : public vai::NodeGroup {
+struct Block : public vai::NodeGroup
+{
     // ...
 };
 
-struct Model : public vai::NeuralNet {
+struct Model : public vai::NeuralNet
+{
     uint32_t numLayers = 0;
 
     void resetState()
@@ -306,7 +308,7 @@ struct Model : public vai::NeuralNet {
     // ...
 };
 
-} // namespace model_name
+}   // namespace model_name
 ```
 
 **체크포인트 로더의 주석**

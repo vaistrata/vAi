@@ -100,21 +100,52 @@ void addSlot(...);       // 함수
 uint32_t numQHeads;       // 변수
 ```
 
+대상별 규칙은 다음과 같습니다.
+
+| 대상 | 규칙 | 예 |
+|---|---|---|
+| 클래스 · 구조체 · `enum` · 타입 별칭 · `concept` | `PascalCase` | `NeuralNet`, `PipeParams` |
+| 함수 · 멤버 함수 | `camelCase` | `loadWeights()`, `setProfileTag()` |
+| 변수 · 매개변수 | `camelCase` | `outShape`, `targetDtype` |
+| `public` 멤버 변수 | `camelCase` | `hasBias`, `iDtype` |
+| `private` · `protected` 멤버 변수 | `camelCase` 뒤에 `_` | `device_`, `cmdBuffer_` |
+| `enum`의 값 | `PascalCase` | `Fp16`, `Bilinear` |
+| 상수 | `camelCase`. 앞에 `k`를 붙이지 않습니다. | `tokensPerSide` |
+| 네임스페이스 | 소문자 | `vai`, `node`, `detail` |
+| 매크로 | `UPPER_CASE` | `VAI_ASSERT` |
+
+다음 이름은 위 규칙의 예외입니다.
+
+- 텐서의 차원은 수식의 문자를 그대로 씁니다. (예: `N`, `K`, `Co`, `Dh`, `Tmax`.)
+- 모델의 크기별 설정 함수는 `_`로 시작합니다. 이름이 숫자로 시작할 수 없기 때문입니다. (예: `_124M()`, `_3B_224()`.)
+- `Node`의 `public` 멤버 `config_`는 `_`를 붙입니다. 생성자의 매개변수 `config`와 구분하기 위한 이름입니다.
+
 **3.2 여는 중괄호**: 대상에 따라 다음을 따릅니다.
 
 | 대상 | 여는 중괄호 |
 |---|---|
-| `if` · `for` 블록 | Allman |
-| 일반 함수 · 멤버 함수 | Allman |
-| 람다 함수 | 자유 |
-| 구조체 · 클래스 선언 | 자유 |
+| 일반 함수 · 멤버 함수 | 다음 줄 (Allman) |
+| `if` · `for` · `while` · `switch` 블록 | 다음 줄 (Allman) |
+| 구조체 · 클래스 선언 | 다음 줄 (Allman) |
+| 람다 함수 · `namespace` · `enum` | 같은 줄 |
 
 ```cpp
-// Allman 스타일
-void foo()
+namespace vai::node {
+
+enum class Mode { Fast, Exact };
+
+class Linear : public vai::Node
 {
-    ...
-}
+public:
+    void prepare()
+    {
+        if (config_.hasBias)
+            addBias();
+        auto scaled = [&](uint32_t x) { return x * factor_; };
+    }
+};
+
+}   // namespace vai::node
 ```
 
 **3.3 namespace**: 일반적으로 vai를 네임스페이스로 사용하고, 공통 노드와 노드그룹의 경우 vai::node, vai::group을 사용합니다.
@@ -130,3 +161,5 @@ namespace rtdetrv2
 namespace rtdetrv2::node
 namespace rtdetrv2::group
 ```
+
+**3.4 자동 검사**: 3.1과 3.2는 저장소 루트의 `.clang-format`과 `.clang-tidy`에 설정되어 있고, 커밋할 때와 PR을 올릴 때 자동으로 검사합니다. 줄 길이와 들여쓰기 같은 나머지 형식, 검사를 통과하는 방법은 [기여 절차와 자동 검사](10-contributing.md)에서 다룹니다.

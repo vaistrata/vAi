@@ -58,6 +58,8 @@ nav:
   - 커스텀 모델 작성: ko/05-contributing-models.md
   - 제공 노드들: ko/06-nodes.md
   - 커스텀 노드와 커널 작성: ko/07-contributing-nodes.md
+  - 커스텀 그룹 작성: ko/08-contributing-groups.md
+  - 기여 절차와 자동 검사: ko/10-contributing.md
 
 # docs/ 아래 파일은 nav 에 없어도 페이지가 만들어지고 검색에도 걸린다.
 # 문서는 전부 공개하고, 숨길 것만 적는다 (.gitignore 문법).
