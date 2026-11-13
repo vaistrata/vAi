@@ -19,11 +19,11 @@ First, define the values to compute and the supported input conditions. These co
 | Slot names | Inputs and outputs to connect in the graph | Input `in0`, output `out0` |
 | Shape | Meaning of each axis and supported sizes | Input and output have the same shape |
 | dtype | Supported input and output storage formats | FP32 and FP16 |
-| Configuration | Values to set when creating the `Node` | Activation function `epilogue`, in-place operation `inPlace`, output dtype `oDtype` |
+| Configuration | Values to set when creating the `Node` | Activation function `epilogue`, in-place operation `inPlace` |
 
 Document any restrictions on rank, dimension sizes, or alignment. For example, an operation that normalizes only the last dimension should specify that axis and the size of its weights.
 
-Configuration is set when the `Node` is created. The actual input shape and `dtype` are read in `prepare()`. The output `dtype` is determined by the node's `oDtype` setting. In `Activation`, `oDtype` defaults to `None`. When no value is specified, `oDefaultDtype()` supplies the engine's default output `dtype`. If the user explicitly selects a value such as `FP16`, that value is used.
+Configuration is set when the `Node` is created. The actual input shape and `dtype` are read in `prepare()`. The output `dtype` is not part of the node's configuration. `prepare()` takes the net's default output `dtype` from `oDefaultDtype()`. When one node has to write another `dtype`, the model (`Net`) sets it in its constructor with `setODtype()`, and the node reads it as `oDtype_`. A weight's `dtype` is not configured either: the node reads it from the `Tensor` in the slot.
 
 The following example declares a node configured for ReLU as a model member. It leaves `inPlace` at its default value of `false`.
 ```cpp
@@ -46,7 +46,6 @@ public:
     struct Config {
         vai::Epilogue epilogue = vai::Epilogue::None;
         bool inPlace = false;
-        vai::Dtype oDtype = vai::Dtype::None;
     } config_;
 
     Activation(Config config);
@@ -60,9 +59,7 @@ inline Activation::Activation(Config config)
 : config_(config)
 {
     addSlot("out0", NodeSlot::output);
-    addSlot("in0",  NodeSlot::input);
-
-    config_.oDtype = (config_.oDtype == Dtype::None) ? oDefaultDtype() : config_.oDtype;
+    addSlot("in0", NodeSlot::input);
 }
 ```
 
@@ -88,16 +85,17 @@ The following is the tensor preparation part of `Activation::prepare()`. Use thi
 ```cpp
 inline void Activation::prepare()
 {
+    const Dtype oDtype = (oDtype_ == Dtype::None) ? oDefaultDtype() : oDtype_;
     const Tensor& inTen = (*this)["in0"];
     VAI_ASSERT(inTen.validShape());
 
     const Dtype iDtype = inTen.dtype();
-    if (config_.inPlace)
-        VAI_ASSERT(config_.oDtype == iDtype);
+    if (config_.inPlace)   // in-place reads and writes the same buffer
+        VAI_ASSERT(oDtype == iDtype);
 
     // ... prepare a pipeline for the input dtype
 
-    (*this)["out0"] = config_.inPlace ? inTen : Tensor(inTen.shape(), config_.oDtype);
+    (*this)["out0"] = config_.inPlace ? inTen : Tensor(inTen.shape(), oDtype);
 }
 ```
 
@@ -181,7 +179,7 @@ if (!pipe || p != pipeParams)
     pipeParams = p;
     pipe = pipelinePool().request("activation", {
         eva::constant_id<0>(config_.inPlace ? 1u : 0u),
-        eva::constant_id<SPEC_ID_TYPE_O>(config_.oDtype),
+        eva::constant_id<SPEC_ID_TYPE_O>(oDtype),
         eva::constant_id<SPEC_ID_TYPE_I>(iDtype),
         eva::constant_id<SPEC_ID_EPILOGUE>((uint32_t) config_.epilogue)
     });
@@ -292,29 +290,26 @@ An API that changes configuration after construction must also update the record
 | Purpose | Node | Kernel |
 |---|---|---|
 | Operations used by multiple models | `vai/nodes/<name>.h` | `vai/shaders/<name>.comp` |
-| Operations used by a specific model | `models/<model>/nodes/<name>.h` | `models/<model>/shaders/<name>.comp` |
+| Operations used by a specific model | `models/<impl>/<model>/nodes/<name>.h` | `models/<impl>/<model>/shaders/<name>.comp` |
 
 The [root build configuration](../../../CMakeLists.txt) collects shared kernels and builds them with `vAi`.
 Request them from the node with `pipelinePool().request("kernel name", {...})`, as in the example.
 Include the node header in the C++ file that uses it.
 
-The [model build configuration](../../../models/CMakeLists.txt) builds model-specific kernels under the `<model>-shaders` target.
-Pass `<MODEL>_SHADER_OUTPUT_DIR` from the node as well.
-The following request is taken from [YOLOv8's SPPF node](../../../models/yolov8/nodes/sppf.h).
+The [model build configuration](../../../models/CMakeLists.txt) builds model-specific kernels under the `<impl>-<model>-shaders` target. `<impl>` is `production` or `experimental`.
+The directory the compiled kernels land in is passed through the `<IMPL>_<MODEL>_SHADER_OUTPUT_DIR` macro, and the node reads its kernel from there.
+The following code is taken from [YOLOX's SPPF node](../../../models/experimental/yolox/nodes/sppf.h).
 
 ```cpp
-pipe = pipelinePool().request(YOLOV8_SHADER_OUTPUT_DIR, "sppf", {
-    eva::constant_id<SPEC_ID_TYPE_O>(config_.oDtype),
-    eva::constant_id<SPEC_ID_TYPE_I>(p.iDtype)
-});
+inline eva::SpvBlob sppfSpv = eva::SpvBlob::readFrom(EXPERIMENTAL_YOLOX_SHADER_OUTPUT_DIR "/sppf.comp.spv");
 ```
 
 Also add a build dependency to the executable target that uses the kernel.
-The following code is from the [YOLOv8 demo build configuration](../../../examples/yolov8/CMakeLists.txt).
-Here, `${PROJECT_NAME}` is `demo-yolov8`.
+The following code is from the [YOLOX demo build configuration](../../../models/experimental/yolox/CMakeLists.txt).
+Here, `${PROJECT_NAME}` is `demo-yolox`.
 
 ```cmake
-add_dependencies(${PROJECT_NAME} yolov8-shaders)
+add_dependencies(${PROJECT_NAME} experimental-yolox-shaders)
 ```
 
 Place GLSL code shared by multiple kernels in `vai/shaders/common/`.
@@ -377,7 +372,7 @@ A PR that adds a `Node` must include the following files in addition to the `Nod
 
 | Order | File | Location |
 |---|---|---|
-| 1 | Python binding | `python/bindings/nodes/<name>.cpp` or `python/bindings/models/<model-name>/nodes/<name>.cpp` |
+| 1 | Python binding | `python/bindings/nodes/<name>.cpp` or `python/bindings/models/<model-name>/nodes/<name>.cpp` (without the `<impl>` folder) |
 | 2 | Name export (common `Node` only) | `python/pyvai/nodes.py` |
 | 3 | Test | `python/tests/nodes/test_<name>.py` or `python/tests/models/<model-name>/test_<name>.py` |
 | 4 | Node documentation | `docs/ko/06-nodes.md`, `docs/en/06-nodes.md` |
@@ -396,8 +391,7 @@ static void bindSlice(nb::module_& m)
     bindNode<vai::node::Slice>(m, "SliceNode", "Take `count` consecutive indices ...",
                                required("start", &C::start),
                                field("count", &C::count).check(atLeast(1u), "must be >= 1"),
-                               field("axis", &C::axis),
-                               field("o_dtype", &C::oDtype));
+                               field("axis", &C::axis));
 }
 PYVAI_NODE_BINDING(bindSlice);
 ```

@@ -19,11 +19,11 @@ GPU 명령에는 실행할 커널, 커널이 읽고 쓸 버퍼, 처리할 데이
 | 슬롯 이름 | 그래프에서 연결할 입력과 출력 | 입력 `in0`, 출력 `out0` |
 | 형상 | 각 축의 의미와 지원 크기 | 입력과 출력의 형상이 같음 |
 | dtype | 지원하는 입력과 출력의 저장 형식 | FP32와 FP16 |
-| 설정 | `Node`를 만들 때 정할 값 | 활성화 함수 `epilogue`, 제자리 연산 `inPlace`, 출력 dtype `oDtype` |
+| 설정 | `Node`를 만들 때 정할 값 | 활성화 함수 `epilogue`, 제자리 연산 `inPlace` |
 
 축 수, 차원 크기, 정렬 조건에 제한이 있으면 함께 적습니다. 예를 들어 마지막 차원만 정규화하는 연산은 그 축과 가중치의 크기를 명시합니다.
 
-설정은 `Node`를 만들 때 정합니다. 실제 입력의 형상과 `dtype`은 `prepare()`에서 읽습니다. 출력 `dtype`은 `Node`의 `oDtype` 설정으로 정합니다. `Activation`의 `oDtype` 기본값은 `None`으로 설정되어 있는데 이렇게 별도로 지정하지 않으면 `oDefaultDtype()`으로 엔진의 기본 출력 `dtype`을 가져와 사용합니다. 사용자가 `FP16` 등을 직접 지정한다면 그 값을 사용하게 됩니다.
+설정은 `Node`를 만들 때 정합니다. 실제 입력의 형상과 `dtype`은 `prepare()`에서 읽습니다. 출력 `dtype`은 `Node`의 설정에 두지 않습니다. `prepare()`에서 `oDefaultDtype()`으로 넷의 기본 출력 `dtype`을 가져와 사용합니다. 특정 `Node`의 출력만 다른 `dtype`으로 내야 하면 모델(`Net`)이 생성자에서 `setODtype()`으로 지정하고, `Node`는 그 값을 `oDtype_`으로 읽습니다. 가중치의 `dtype`도 설정이 아니라 슬롯에 들어온 `Tensor`에서 읽습니다.
 
 다음 코드는 ReLU를 선택한 `Node`를 모델의 멤버로 선언하는 작성 예시입니다. `inPlace`는 기본값인 `false`를 사용하도록 했습니다.
 ```cpp
@@ -46,7 +46,6 @@ public:
     struct Config {
         vai::Epilogue epilogue = vai::Epilogue::None;
         bool inPlace = false;
-        vai::Dtype oDtype = vai::Dtype::None;
     } config_;
 
     Activation(Config config);
@@ -60,9 +59,7 @@ inline Activation::Activation(Config config)
 : config_(config)
 {
     addSlot("out0", NodeSlot::output);
-    addSlot("in0",  NodeSlot::input);
-
-    config_.oDtype = (config_.oDtype == Dtype::None) ? oDefaultDtype() : config_.oDtype;
+    addSlot("in0", NodeSlot::input);
 }
 ```
 
@@ -88,16 +85,17 @@ inline Activation::Activation(Config config)
 ```cpp
 inline void Activation::prepare()
 {
+    const Dtype oDtype = (oDtype_ == Dtype::None) ? oDefaultDtype() : oDtype_;
     const Tensor& inTen = (*this)["in0"];
     VAI_ASSERT(inTen.validShape());
 
     const Dtype iDtype = inTen.dtype();
-    if (config_.inPlace)
-        VAI_ASSERT(config_.oDtype == iDtype);
+    if (config_.inPlace)   // in-place reads and writes the same buffer
+        VAI_ASSERT(oDtype == iDtype);
 
     // ... 입력 dtype에 맞는 파이프라인 준비
 
-    (*this)["out0"] = config_.inPlace ? inTen : Tensor(inTen.shape(), config_.oDtype);
+    (*this)["out0"] = config_.inPlace ? inTen : Tensor(inTen.shape(), oDtype);
 }
 ```
 
@@ -181,7 +179,7 @@ if (!pipe || p != pipeParams)
     pipeParams = p;
     pipe = pipelinePool().request("activation", {
         eva::constant_id<0>(config_.inPlace ? 1u : 0u),
-        eva::constant_id<SPEC_ID_TYPE_O>(config_.oDtype),
+        eva::constant_id<SPEC_ID_TYPE_O>(oDtype),
         eva::constant_id<SPEC_ID_TYPE_I>(iDtype),
         eva::constant_id<SPEC_ID_EPILOGUE>((uint32_t) config_.epilogue)
     });
@@ -292,29 +290,26 @@ inline void Activation::run(eva::CommandBuffer cmdBuff)
 | 용도 | `Node` | 커널 |
 |---|---|---|
 | 여러 모델에서 쓰는 연산 | `vai/nodes/<이름>.h` | `vai/shaders/<이름>.comp` |
-| 특정 모델에서 쓰는 연산 | `models/<모델명>/nodes/<이름>.h` | `models/<모델명>/shaders/<이름>.comp` |
+| 특정 모델에서 쓰는 연산 | `models/<impl>/<모델명>/nodes/<이름>.h` | `models/<impl>/<모델명>/shaders/<이름>.comp` |
 
 공용 커널은 [루트 빌드 설정](../../../CMakeLists.txt)이 수집해 `vAi`와 함께 빌드합니다.
 `Node`에서는 예제처럼 `pipelinePool().request("커널 이름", {...})`로 요청합니다.
 `Node`를 사용하는 C++ 파일에서는 해당 `Node` 헤더를 포함합니다.
 
-모델 전용 커널은 [모델 빌드 설정](../../../models/CMakeLists.txt)이 `<모델명>-shaders` 타겟으로 빌드합니다.
-`Node`에서 `<MODEL>_SHADER_OUTPUT_DIR`을 함께 전달합니다.
-다음은 [YOLOv8의 SPPF `Node`](../../../models/yolov8/nodes/sppf.h)에서 발췌한 요청 코드입니다.
+모델 전용 커널은 [모델 빌드 설정](../../../models/CMakeLists.txt)이 `<impl>-<모델명>-shaders` 타겟으로 빌드합니다. `<impl>`은 `production` 또는 `experimental`입니다.
+컴파일된 커널이 놓이는 경로는 `<IMPL>_<MODEL>_SHADER_OUTPUT_DIR` 매크로로 전달되고, `Node`는 이 경로에서 커널을 읽습니다.
+다음은 [YOLOX의 SPPF `Node`](../../../models/experimental/yolox/nodes/sppf.h)에서 발췌한 코드입니다.
 
 ```cpp
-pipe = pipelinePool().request(YOLOV8_SHADER_OUTPUT_DIR, "sppf", {
-    eva::constant_id<SPEC_ID_TYPE_O>(config_.oDtype),
-    eva::constant_id<SPEC_ID_TYPE_I>(p.iDtype)
-});
+inline eva::SpvBlob sppfSpv = eva::SpvBlob::readFrom(EXPERIMENTAL_YOLOX_SHADER_OUTPUT_DIR "/sppf.comp.spv");
 ```
 
 커널을 사용하는 실행 타겟에도 빌드 의존성을 추가합니다.
-다음은 [YOLOv8 데모의 빌드 설정](../../../examples/yolov8/CMakeLists.txt)에 있는 코드입니다.
-여기서 `${PROJECT_NAME}`은 `demo-yolov8`입니다.
+다음은 [YOLOX 데모의 빌드 설정](../../../models/experimental/yolox/CMakeLists.txt)에 있는 코드입니다.
+여기서 `${PROJECT_NAME}`은 `demo-yolox`입니다.
 
 ```cmake
-add_dependencies(${PROJECT_NAME} yolov8-shaders)
+add_dependencies(${PROJECT_NAME} experimental-yolox-shaders)
 ```
 
 여러 커널이 공유하는 GLSL 코드는 `vai/shaders/common/`에 둡니다.
@@ -377,7 +372,7 @@ add_dependencies(${PROJECT_NAME} yolov8-shaders)
 
 | 순서 | 파일 | 위치 |
 |---|---|---|
-| 1 | Python 바인딩 | `python/bindings/nodes/<이름>.cpp` 또는 `python/bindings/models/<모델명>/nodes/<이름>.cpp` |
+| 1 | Python 바인딩 | `python/bindings/nodes/<이름>.cpp` 또는 `python/bindings/models/<모델명>/nodes/<이름>.cpp` (`<impl>` 폴더는 넣지 않습니다) |
 | 2 | 이름 공개 (공용 `Node`만) | `python/pyvai/nodes.py` |
 | 3 | 테스트 | `python/tests/nodes/test_<이름>.py` 또는 `python/tests/models/<모델명>/test_<이름>.py` |
 | 4 | 노드 문서 | `docs/ko/06-nodes.md`, `docs/en/06-nodes.md` |
@@ -396,8 +391,7 @@ static void bindSlice(nb::module_& m)
     bindNode<vai::node::Slice>(m, "SliceNode", "Take `count` consecutive indices ...",
                                required("start", &C::start),
                                field("count", &C::count).check(atLeast(1u), "must be >= 1"),
-                               field("axis", &C::axis),
-                               field("o_dtype", &C::oDtype));
+                               field("axis", &C::axis));
 }
 PYVAI_NODE_BINDING(bindSlice);
 ```
