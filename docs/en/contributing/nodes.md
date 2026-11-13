@@ -170,7 +170,7 @@ Push constants hold shapes, offsets, small scalar values, and similar data. Spec
 
 A pipeline is a GPU execution object that combines a kernel with its specialization settings. Pass the kernel name and specialization constants to `pipelinePool().request()`. The pool reuses pipelines for identical requests. The kernel name passed to `pipelinePool().request()` omits the file extension. For example, request `activation.comp` as `"activation"`.
 
-The following part of `Activation::prepare()` prepares the pipeline. The input dtype is read from the actual input. The output dtype uses the value set in the constructor.
+The following part of `Activation::prepare()` prepares the pipeline. The input dtype is read from the actual input. The output dtype is the `oDtype` computed above.
 
 ```cpp
 const PipeParams p = { .iDtype = iDtype };
@@ -388,7 +388,9 @@ The following excerpt is from the [`Slice` binding](../../../python/bindings/nod
 static void bindSlice(nb::module_& m)
 {
     using C = vai::node::Slice::Config;
-    bindNode<vai::node::Slice>(m, "SliceNode", "Take `count` consecutive indices ...",
+    bindNode<vai::node::Slice>(m,
+                               "SliceNode",
+                               "Take `count` consecutive indices ...",
                                required("start", &C::start),
                                field("count", &C::count).check(atLeast(1u), "must be >= 1"),
                                field("axis", &C::axis));

@@ -172,10 +172,10 @@ BF16은 Tensor의 독립적인 Dtype으로 사용하지 않습니다. 목표 Dty
 
 로드한 Tensor는 Host 메모리에 데이터를 보유하며, Device 버퍼는 아직 할당되지 않습니다.
 
-가중치를 사용할 때는 연산 Node가 요구하는 Dtype과 Shape를 확인해야 합니다. 파일에 저장된 데이터의 Shape가 연산에 필요한 구조와 다르면 `permute()`, `reshape()` 등의 연산으로 조정할 수 있습니다.
+가중치를 사용할 때는 연산 Node가 요구하는 Shape를 확인해야 합니다. 파일에 저장된 데이터의 Shape가 연산에 필요한 구조와 다르면 `permute()`, `reshape()` 등의 연산으로 조정할 수 있습니다. 가중치의 Dtype은 Tensor가 정하고, Node는 Slot에 들어온 Tensor의 Dtype을 읽습니다. 제공 모델의 로더는 가중치를 넷의 `wDefaultDtype`으로, 정규화 계수를 Fp32로 로드합니다.
 
 ```cpp
-// weightDtype은 연산 Node가 요구하는 Dtype
+// weightDtype은 가중치를 로드할 Dtype (예: net.config().wDefaultDtype)
 linear["weight"] = Tensor(parser["fc.weight"], weightDtype);
 ```
 

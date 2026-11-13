@@ -38,7 +38,6 @@ cmake --build build --target demo-mnist
 |---|---|---|
 | `VAI_BUILD_MODEL_DEMO` | `ON` | 모델별 데모 (`demo-gpt2`, `demo-yolox` 등) |
 | `VAI_BUILD_EXAMPLES` | `OFF` | 모델 밖의 예제 (`demo-mnist`, `chat-llama3`, `chat-gemma3`) |
-| `VAI_BUILD_TESTS` | `OFF` | 커널 단위 테스트, A/B |
 | `VAI_BUILD_BENCH` | `OFF` | llama.cpp, ncnn 등 비교 프레임워크 벤치 |
 | `VAI_BUILD_PYTHON` | `OFF` | Python 바인딩 |
 

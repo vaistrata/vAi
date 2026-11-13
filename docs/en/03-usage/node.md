@@ -26,8 +26,6 @@ Linear::Linear(Config config)
     addSlot("partial", NodeSlot::temporary);   // Allocated only when using the reduce pass
     addSlot("bias", NodeSlot::persistent);
     if (config_.acceptResidual) addSlot("residual", NodeSlot::input);
-
-    // ... Select dtype and request pipelines
 }
 ```
 
@@ -49,7 +47,6 @@ Attention::Attention(Config config)
         addSlot("V_cache", NodeSlot::persistent);
         // ... Create cache tensors
     }
-    // ... Select output dtype
 }
 ```
 

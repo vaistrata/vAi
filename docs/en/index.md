@@ -22,7 +22,8 @@ The graph DSL exposes the model structure directly in code. With vAi's dedicated
 
 ```cpp
 template<TransformerType layout, QkvLayout qkv>
-struct TransformerLayer : public vai::NodeGroup {
+struct TransformerLayer : public vai::NodeGroup
+{
     vai::node::Identity input;
     typename BranchNorm<layout>::Type norm1;
     MultiHeadAttention<qkv> mhAttn;
@@ -33,8 +34,8 @@ struct TransformerLayer : public vai::NodeGroup {
 
     TransformerLayer(...)
     {
-        input - norm1 -            mhAttn - lastRow - gate/"then" - norm2 -            ffn;
-        input         - "residual"/mhAttn - lastRow - gate/"then"         - "residual"/ffn;
+        input - norm1 -    mhAttn - lastRow - gate/"then" - norm2 -    ffn;
+        input - "residual"/mhAttn - lastRow - gate/"then" - "residual"/ffn;
     }
 };
 ```
@@ -74,8 +75,8 @@ models/                     Supported models
     demo.cpp                  demo-<model-name>
 
 examples/                   Programs beyond one model's demo (e.g., mnist/, chat-llama3/)
+python/                     Python bindings (pyvai)
 benchmarks/
-tests/
 external/eva/               Vulkan wrapper (submodule)
 docs/
 ```
@@ -148,18 +149,18 @@ public:
 }   // namespace vai::node
 ```
 
-**3.3 namespace**: Use vai as the general namespace, and vai::node and vai::group for common nodes and node groups.
-For custom nodes and node groups, use the model name in place of vai.
+**3.3 namespace**: The engine uses the `vai` namespace, and common nodes and node groups use `vai::node` and `vai::group`.
+Models and their own nodes and node groups go under `model::<impl>::<model-name>`. `<impl>` is `production` or `experimental`.
 
 ```cpp
 namespace vai
 namespace vai::node
 namespace vai::group
 
-// For RT-DETRv2
-namespace rtdetrv2
-namespace rtdetrv2::node
-namespace rtdetrv2::group
+// For YOLOX
+namespace model::experimental::yolox
+namespace model::experimental::yolox::node
+namespace model::experimental::yolox::group
 ```
 
 **3.4 Automated checks**: Rules 3.1 and 3.2 are configured in `.clang-format` and `.clang-tidy` at the repository root and checked automatically on commits and PRs. [Contribution workflow and automated checks](contributing/README.md) covers the remaining formatting rules, such as line length and indentation, and how to pass the checks.

@@ -28,8 +28,6 @@ Linear::Linear(Config config)
     addSlot("partial", NodeSlot::temporary);   // reduce 패스를 탈 때만 할당된다
     addSlot("bias", NodeSlot::persistent);
     if (config_.acceptResidual) addSlot("residual", NodeSlot::input);
-
-    // ... dtype 결정, 파이프라인 요청
 }
 ```
 
@@ -51,7 +49,6 @@ Attention::Attention(Config config)
         addSlot("V_cache", NodeSlot::persistent);
         // ... 캐시 텐서 생성
     }
-    // ... 출력 dtype 결정
 }
 ```
 

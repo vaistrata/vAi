@@ -7,7 +7,7 @@ vAi can measure each node's **GPU execution time**. It records timestamps before
 Profiling is enabled when at least one node has a tag. With no tags, there is no profiling overhead.
 
 ```cpp
-net.layers[i].mhAttn.attn.setProfileTag("Attn");
+net.decoder.layers[i].mhAttn.attn.setProfileTag("Attn");
 ```
 
 
@@ -16,10 +16,10 @@ net.layers[i].mhAttn.attn.setProfileTag("Attn");
 Times for nodes with the same tag are summed.
 
 ```cpp
-for (uint32_t i = 0; i < net.modelCfg.numLayers; ++i)
+for (uint32_t i = 0; i < net.modelCfg.languageCfg.numLayers; ++i)
 {
-    net.layers[i].norm1.setProfileTag("LayerNorm");
-    net.layers[i].norm2.setProfileTag("LayerNorm");
+    net.decoder.layers[i].norm1.setProfileTag("LayerNorm");
+    net.decoder.layers[i].norm2.setProfileTag("LayerNorm");
 }
 ```
 
@@ -40,14 +40,14 @@ Measurements accumulate after each forward pass, and `printProfile()` prints the
 
 ```cpp
 for (int i = 0; i < 5; ++i)   // Warmup
-    model(inDict);
+    net(inDict);
 
-model.resetProfileRecords();   // Discard warmup records
+net.resetProfileRecords();   // Discard warmup records
 
 for (int i = 0; i < 10; ++i)
     net(inDict);
 
-model.printProfile();          // Average over 10 passes
+net.printProfile();          // Average over 10 passes
 ```
 
 Initial runs can include one-time costs such as shader compilation or buffer preparation, so measure after a warmup. Use `resetProfileRecords()` to clear all accumulated records and start measuring again.
@@ -78,13 +78,13 @@ By default, `printProfile()` resets accumulated records after printing. Use `pri
 The default behavior makes it easy to measure two phases with the same tags separately, such as prefill and decode.
 
 ```cpp
-model(inDict);
-model.printProfile();          // Print prefill results and reset records
+net(inDict);
+net.printProfile();          // Print prefill results and reset records
 
 for (int i = 0; i < maxNewTokens; ++i)
     net(inDict);
 
-model.printProfile();          // Print only the decode phase
+net.printProfile();          // Print only the decode phase
 ```
 
 Because the first print resets the records, the second print includes only the measurements accumulated during decode.
@@ -98,8 +98,8 @@ After inspecting the full profile, clear the existing tags and tag the desired n
 ```cpp
 net.clearProfileTags();
 
-net.layers[0].ffn.fc1.setProfileTag("fc1");
-net.layers[0].ffn.fc2.setProfileTag("fc2");
+net.decoder.layers[0].ffn.fc1.setProfileTag("fc1");
+net.decoder.layers[0].ffn.fc2.setProfileTag("fc2");
 ```
 
 Pass an empty string to remove the tag from a specific node.

@@ -22,7 +22,8 @@ vAi로 LLM을 배포하면 런타임 바이너리가 2MB 남짓입니다. on-dev
 
 ```cpp
 template<TransformerType layout, QkvLayout qkv>
-struct TransformerLayer : public vai::NodeGroup {
+struct TransformerLayer : public vai::NodeGroup
+{
     vai::node::Identity input;
     typename BranchNorm<layout>::Type norm1;
     MultiHeadAttention<qkv> mhAttn;
@@ -33,8 +34,8 @@ struct TransformerLayer : public vai::NodeGroup {
 
     TransformerLayer(...)
     {
-        input - norm1 -            mhAttn - lastRow - gate/"then" - norm2 -            ffn;
-        input         - "residual"/mhAttn - lastRow - gate/"then"         - "residual"/ffn;
+        input - norm1 -    mhAttn - lastRow - gate/"then" - norm2 -    ffn;
+        input - "residual"/mhAttn - lastRow - gate/"then" - "residual"/ffn;
     }
 };
 ```
@@ -74,8 +75,8 @@ models/                     제공 모델들
     demo.cpp                  demo-<모델명>
 
 examples/                   모델 데모 밖의 프로그램들 (예: mnist/, chat-llama3/)
+python/                     Python 바인딩 (pyvai)
 benchmarks/
-tests/
 external/eva/               Vulkan 래퍼 (서브모듈)
 docs/
 ```
@@ -148,18 +149,18 @@ public:
 }   // namespace vai::node
 ```
 
-**3.3 namespace**: 일반적으로 vai를 네임스페이스로 사용하고, 공통 노드와 노드그룹의 경우 vai::node, vai::group을 사용합니다.
-커스텀 노드와 노드그룹의 경우 vai 대신 모델명을 사용합니다.
+**3.3 namespace**: 엔진은 `vai`를 네임스페이스로 사용하고, 공통 노드와 노드그룹은 `vai::node`, `vai::group`을 사용합니다.
+모델과 모델 전용 노드, 노드그룹은 `model::<impl>::<모델명>` 아래에 둡니다. `<impl>`은 `production` 또는 `experimental`입니다.
 
 ```cpp
 namespace vai
 namespace vai::node
 namespace vai::group
 
-// RT-DETRv2의 경우
-namespace rtdetrv2
-namespace rtdetrv2::node
-namespace rtdetrv2::group
+// YOLOX의 경우
+namespace model::experimental::yolox
+namespace model::experimental::yolox::node
+namespace model::experimental::yolox::group
 ```
 
 **3.4 자동 검사**: 3.1과 3.2는 저장소 루트의 `.clang-format`과 `.clang-tidy`에 설정되어 있고, 커밋할 때와 PR을 올릴 때 자동으로 검사합니다. 줄 길이와 들여쓰기 같은 나머지 형식, 검사를 통과하는 방법은 [기여 절차와 자동 검사](contributing/README.md)에서 다룹니다.

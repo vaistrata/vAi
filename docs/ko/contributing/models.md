@@ -177,7 +177,7 @@ data/ckpts/gpt2/openai/774M/
 data/ckpts/gpt2/openai/1.5B/
 ```
 
-`vai::Checkpoint`는 폴더의 모든 `.safetensors` 파일을 열고 키로 `Tensor`를 찾습니다. 따라서 가중치가 여러 파일에 나뉘어 있어도 같은 코드로 읽을 수 있습니다. 다른 체크포인트나 검증용 `.safetensors` 파일이 함께 있으면 읽을 파일을 목록으로 지정합니다. 파일 목록을 지정하는 방법은 [weights.h](../../../vai/engine/weights.h)를 참조하면 됩니다.
+`vai::Checkpoint`는 폴더의 모든 `.safetensors` 파일을 열고 키로 `Tensor`를 찾습니다. 따라서 가중치가 여러 파일에 나뉘어 있어도 같은 코드로 읽을 수 있습니다. 폴더의 `.safetensors` 파일을 전부 읽으므로, 체크포인트 폴더에는 그 체크포인트의 파일만 둡니다. 자세한 동작은 [weights.h](../../../vai/engine/weights.h)를 참조하면 됩니다.
 
 ## 4. 모델 실행하기
 

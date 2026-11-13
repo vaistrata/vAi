@@ -172,10 +172,10 @@ BF16 is not a separate Tensor Dtype. Without a target Dtype, it is converted to 
 
 The loaded Tensor holds data in Host memory; no Device buffer has been allocated yet.
 
-When using weights, check the Dtype and Shape required by the operation Node. If the file's data Shape differs from the required structure, it can be adjusted with operations such as `permute()` and `reshape()`.
+When using weights, check the Shape required by the operation Node. If the file's data Shape differs from the required structure, it can be adjusted with operations such as `permute()` and `reshape()`. A weight's Dtype is set by its Tensor, and the Node reads the Dtype of the Tensor in the slot. The loaders of the provided models load weights at the net's `wDefaultDtype` and normalization coefficients at Fp32.
 
 ```cpp
-// weightDtype is the Dtype required by the operation Node
+// weightDtype is the Dtype to load the weight at (e.g. net.config().wDefaultDtype)
 linear["weight"] = Tensor(parser["fc.weight"], weightDtype);
 ```
 

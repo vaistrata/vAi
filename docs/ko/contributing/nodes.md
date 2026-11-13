@@ -170,7 +170,7 @@ GLSL의 `barrier()`는 같은 작업 그룹의 스레드를 동기화합니다. 
 
 파이프라인은 커널과 특수화 설정을 묶은 GPU 실행 객체입니다. `pipelinePool().request()`에 커널 이름과 특수화 상수를 전달합니다. 같은 요청의 파이프라인은 풀에서 재사용합니다. `pipelinePool().request()`에는 확장자를 제외한 커널 파일 이름을 전달합니다. 예를 들어 `activation.comp`는 `"activation"`으로 요청합니다.
 
-다음은 `Activation::prepare()`에서 파이프라인을 준비하는 부분입니다. 입력 dtype은 실제 입력에서 읽습니다. 출력 dtype은 생성자에서 정한 값을 사용합니다.
+다음은 `Activation::prepare()`에서 파이프라인을 준비하는 부분입니다. 입력 dtype은 실제 입력에서 읽습니다. 출력 dtype은 앞에서 구한 `oDtype`을 사용합니다.
 
 ```cpp
 const PipeParams p = { .iDtype = iDtype };
@@ -388,7 +388,9 @@ add_dependencies(${PROJECT_NAME} experimental-yolox-shaders)
 static void bindSlice(nb::module_& m)
 {
     using C = vai::node::Slice::Config;
-    bindNode<vai::node::Slice>(m, "SliceNode", "Take `count` consecutive indices ...",
+    bindNode<vai::node::Slice>(m,
+                               "SliceNode",
+                               "Take `count` consecutive indices ...",
                                required("start", &C::start),
                                field("count", &C::count).check(atLeast(1u), "must be >= 1"),
                                field("axis", &C::axis));

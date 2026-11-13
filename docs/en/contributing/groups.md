@@ -18,7 +18,7 @@ For example, `FeedForward` combines two `Linear` `Node` objects and an activatio
 | Intermediate result | `[..., hiddenDim]` |
 | Output | `out0 [..., outDim]` |
 | dtype | The `Linear` outputs in this example use the engine's default output dtype |
-| Computation settings | Input, hidden, and output dimensions, activation function, and whether to use bias |
+| Computation settings | Input, hidden, and output dimensions, activation function, and whether to accept a residual input |
 
 `...` means that the leading axes are preserved. For example, an input of `[T, inDim]` produces an output of `[T, outDim]`. Specify any dtype and dimension size restrictions according to the conditions supported by the internal `Node` objects.
 
@@ -326,7 +326,7 @@ Building C++ source that includes this header also compiles the required group i
 | Purpose | File location | Namespace |
 |---|---|---|
 | Group used by multiple models | `vai/groups/<name>.h` | `vai::group` |
-| Group used by a specific model | `models/<model-name>/groups/<name>.h` | The model's namespace |
+| Group used by a specific model | `models/<impl>/<model-name>/groups/<name>.h` | `model::<impl>::<model-name>::group` |
 
 Stable addresses and correct slot connections are required for the engine to work. Value members, constructors centered on `Config`, and the following code style are repository conventions.
 
@@ -363,13 +363,13 @@ static auto ffnConfig(const Config& config)
 
 **Supported choices and initialization order**
 
-The shared implementation of `TransformerLayer` uses `static_assert` to accept only `Classic` and `Default`. Other configurations are handled by their respective specializations. As in `MultiHeadAttention`, the primary template can also be declared without a definition, with groups defined only for supported choices. Template specialization and these checks are ways to separate implementations, not formats required by the engine.
+The shared implementation of `TransformerLayer` handles both `Classic` and `Default`. The supported choices are the values for which `BranchNorm` and `BranchFfn` are defined; a value without a definition does not compile. As in `MultiHeadAttention`, the primary template can also be declared without a definition, with groups defined only for supported choices. Template specialization is a way to separate implementations, not a format required by the engine.
 
 Declare and initialize derived values used by multiple members before those members. C++ initializes members in declaration order, not in the order listed in the initializer list.
 
 **Order of configuration changes for repeated blocks**
 
-For callbacks that change per-layer settings, specify the order of application and how long changed values persist. `Transformer`'s `perLayer` modifies the same `config.layerCfg`, so changes persist into the next layer. After the callback, finalize any conditions the parent must guarantee, then construct the child. The following example is an excerpt from the descriptive comment for `FeedForward`.
+For settings that differ by layer, specify the order of application and how long changed values persist. `Transformer` modifies the same `config.layerCfg` in its constructor loop as it builds the layers, so a changed value persists into the next layer. A value that is on only for the last layer, such as `sliceLastRow`, is therefore assigned again for every layer. Finalize any conditions the parent must guarantee before constructing the child. The following example is an excerpt from the descriptive comment for `FeedForward`.
 
 ```cpp
 /////////////////////////////////////////////////////////////////////////////////////////

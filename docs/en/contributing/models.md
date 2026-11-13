@@ -177,7 +177,7 @@ data/ckpts/gpt2/openai/774M/
 data/ckpts/gpt2/openai/1.5B/
 ```
 
-`vai::Checkpoint` opens all `.safetensors` files in a directory and finds tensors by key. The same code therefore works when weights are split across multiple files. If other checkpoints or validation `.safetensors` files are present, specify a list of files to read. See [weights.h](../../../vai/engine/weights.h) for how to specify that list.
+`vai::Checkpoint` opens all `.safetensors` files in a directory and finds tensors by key. The same code therefore works when weights are split across multiple files. Because every `.safetensors` file in the directory is read, keep only that checkpoint's files in it. See [weights.h](../../../vai/engine/weights.h) for details.
 
 ## 4. Running the model
 
