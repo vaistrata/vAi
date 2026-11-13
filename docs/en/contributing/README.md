@@ -253,10 +253,11 @@ Change existing calls to load_model(path, format).
 | Item | Rule |
 |---|---|
 | Merge path | Changes enter `master` only through PRs. |
-| PR title | Use the commit subject format in [6.2](#62-commit-messages). On merge, this title becomes the commit subject on `master`. |
+| PR title | Use the commit subject format in [6.2](#62-commit-messages). With a squash merge, this title becomes the commit subject on `master`. |
 | PR description | Describe the changes and how they were verified. Also mention any checks that failed for reasons unrelated to the changes. For an incompatible change, include a `BREAKING CHANGE:` paragraph. |
 | Approval | Two approvals from the maintainer team are required. Changes to paths listed in [`CODEOWNERS`](../../../.github/CODEOWNERS) must include approval from the relevant code owner. |
-| Merge method | Use squash merge. The PR's commits enter `master` as one commit. |
+| Merge method: PRs from forks | Use squash merge. The PR's commits enter `master` as one commit. |
+| Merge method: PRs from branches of this repository | Use a merge commit. The PR's commits enter `master` as they are, so every commit must follow [6.2](#62-commit-messages). Otherwise, use squash merge. |
 | After merging | Delete the merged working branch. |
 
 ## 7. Versions

@@ -36,9 +36,10 @@ python .github/scripts/clang-tidy-staged.py --setup        # if you change C++: 
 
 - **Incompatible change**: `!` after the type, and a `BREAKING CHANGE:`
   paragraph that says what breaks and how to move over.
-- **Merge**: two approvals from the maintainers, then a squash merge. The pull
-  request title becomes the commit on `master`, so it is the title that has to
-  follow the format.
+- **Merge**: two approvals from the maintainers. A pull request from a fork is
+  squash-merged, so its title becomes the commit on `master`. One from a branch
+  of this repository gets a merge commit, so each of its commits has to follow
+  the format.
 - **Checks**: a pull request is checked on the lines it changes, and a new
   node comes with its Python binding and its test.
 
