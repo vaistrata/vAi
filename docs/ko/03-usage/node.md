@@ -7,7 +7,7 @@
 계산 명령을 기록하지 않는 노드도 있습니다.
 
 ```cpp
-vai::node::Linear linear({.inDim = inDim, .outDim = outDim, .hasBias = true});
+vai::node::Linear linear({.inDim = inDim, .outDim = outDim});
 vai::node::Attention attn({
     .headDim = 64,
     .numQHeads = 8,
@@ -26,7 +26,7 @@ Linear::Linear(Config config)
     addSlot("in0", NodeSlot::input);
     addSlot("weight", NodeSlot::persistent);
     addSlot("partial", NodeSlot::temporary);   // reduce 패스를 탈 때만 할당된다
-    if (config_.hasBias) addSlot("bias", NodeSlot::persistent);
+    addSlot("bias", NodeSlot::persistent);
     if (config_.acceptResidual) addSlot("residual", NodeSlot::input);
 
     // ... dtype 결정, 파이프라인 요청
@@ -55,8 +55,8 @@ Attention::Attention(Config config)
 }
 ```
 
-슬롯 구성은 옵션에 따라 달라지기도 합니다. `Linear`의 `bias`는
-`hasBias`일 때만 생기고 `residual`은 `acceptResidual`일 때만 생깁니다.
+슬롯 구성은 옵션에 따라 달라지기도 합니다. `Linear`의 `residual`은
+`acceptResidual`일 때만 생깁니다. `bias` 슬롯은 항상 있고, 가중치가 채워졌을 때만 적용됩니다.
 Attention의 캐시 슬롯은 `kvCacheSize > 0`일 때만 생깁니다. 그림에 없는
 `partial`은 연산 내부의 버퍼입니다.그래프의 입출력 연결에는 사용하지 않습니다.
 
@@ -89,9 +89,10 @@ Attention의 캐시 슬롯은 `kvCacheSize > 0`일 때만 생깁니다. 그림�
 파라미터 값이 올라가는 슬롯입니다. 준비하지 않으면 `Node::prepare()`의 형상 검증에 걸립니다.
 
 ```cpp
-vai::Checkpoint ckpt(VAI_DATA_DIR "/mnist/ckpts");
-linear["weight"] = vai::Tensor(ckpt["fc.weight"], linear.config_.wDtype);
-linear["bias"]   = vai::Tensor(ckpt["fc.bias"], linear.config_.wDtype);
+vai::Checkpoint ckpt(VAI_DATA_DIR "/ckpts/mnist/jroot");
+const vai::Dtype wDt = net.config().wDefaultDtype;   // 넷의 가중치 dtype
+linear["weight"] = vai::Tensor(ckpt["fc.weight"], wDt);
+linear["bias"]   = vai::Tensor(ckpt["fc.bias"], wDt);
 ```
 
 **2. 나머지는 노드가 스스로 준비합니다**: `Attention`의 `K_cache`, `V_cache`,
@@ -119,7 +120,7 @@ linear["bias"]   = vai::Tensor(ckpt["fc.bias"], linear.config_.wDtype);
 
 ```cpp
 linear.slot("weight");   // OK
-linear.slot("gamma");    // Linear에 없는 슬롯(예외)
+linear.slot("scale");    // Linear에 없는 슬롯(예외)
 ```
 
 어떤 슬롯이 있는지는 [제공 노드들](../06-nodes.md)의 노드별 슬롯 표에

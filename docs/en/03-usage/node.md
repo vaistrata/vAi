@@ -5,7 +5,7 @@
 A `Node` represents one operation. It receives `Tensor` values through named slots, performs an operation, and passes the results out through slots. A node can record multiple GPU kernels; nodes such as `Identity` and `Flatten` share buffers without recording compute commands.
 
 ```cpp
-vai::node::Linear linear({.inDim = inDim, .outDim = outDim, .hasBias = true});
+vai::node::Linear linear({.inDim = inDim, .outDim = outDim});
 vai::node::Attention attn({
     .headDim = 64,
     .numQHeads = 8,
@@ -24,7 +24,7 @@ Linear::Linear(Config config)
     addSlot("in0", NodeSlot::input);
     addSlot("weight", NodeSlot::persistent);
     addSlot("partial", NodeSlot::temporary);   // Allocated only when using the reduce pass
-    if (config_.hasBias) addSlot("bias", NodeSlot::persistent);
+    addSlot("bias", NodeSlot::persistent);
     if (config_.acceptResidual) addSlot("residual", NodeSlot::input);
 
     // ... Select dtype and request pipelines
@@ -53,7 +53,7 @@ Attention::Attention(Config config)
 }
 ```
 
-The slot configuration can depend on the options. `Linear` has `bias` only when `hasBias` is set, and `residual` only when `acceptResidual` is set. Attention's cache slots exist only when `kvCacheSize > 0`. The `partial` slot, omitted from the diagram, is an internal buffer for the operation. It is not used for graph input or output connections.
+The slot configuration can depend on the options. `Linear` has `residual` only when `acceptResidual` is set. Its `bias` slot always exists and applies only when the weights fill it. Attention's cache slots exist only when `kvCacheSize > 0`. The `partial` slot, omitted from the diagram, is an internal buffer for the operation. It is not used for graph input or output connections.
 
 ## 1. Slots
 
@@ -81,9 +81,10 @@ These slots retain values between executions. There are two cases.
 **1. The user prepares weights**: These slots hold learned parameter values, such as `Linear`'s `weight` and `bias`. If they are not prepared, shape validation in `Node::prepare()` fails.
 
 ```cpp
-vai::Checkpoint ckpt(VAI_DATA_DIR "/mnist/ckpts");
-linear["weight"] = vai::Tensor(ckpt["fc.weight"], linear.config_.wDtype);
-linear["bias"]   = vai::Tensor(ckpt["fc.bias"], linear.config_.wDtype);
+vai::Checkpoint ckpt(VAI_DATA_DIR "/ckpts/mnist/jroot");
+const vai::Dtype wDt = net.config().wDefaultDtype;   // the net's weight dtype
+linear["weight"] = vai::Tensor(ckpt["fc.weight"], wDt);
+linear["bias"]   = vai::Tensor(ckpt["fc.bias"], wDt);
 ```
 
 **2. The node prepares other values itself**: Examples include Attention's `K_cache` and `V_cache`, and Rope's `freqs`.
@@ -107,7 +108,7 @@ Slots are declared in the constructor with `Node::addSlot`. Users cannot add new
 
 ```cpp
 linear.slot("weight");   // OK
-linear.slot("gamma");    // Slot not present in Linear (exception)
+linear.slot("scale");    // Slot not present in Linear (exception)
 ```
 
 The per-node slot tables in [Built-in nodes](../06-nodes.md) list the available slots.

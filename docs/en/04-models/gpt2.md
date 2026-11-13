@@ -20,8 +20,8 @@ gpt2::Net net({
 
 ### NeuralNetConfig
 
-GPT-2 uses the defaults, except that each `LayerNorm` forces `wDtype = fp32`.
-For details, see [NeuralNet](../03-usage/neural-net.md).
+GPT-2 uses the defaults as they are; the loader reads every `LayerNorm`'s coefficients at fp32.
+See [NeuralNet](../03-usage/neural-net.md) for details.
 
 ### ModelConfig
 
@@ -81,7 +81,7 @@ projQKV - splitHeads - perQKV - sliceQ - "Q"/attn - mergeOut - projOut;
                      perQKV - sliceV - "V"/attn;
 ```
 
-With `acceptResidual = true`, `toOut` receives the block's residual through `residual` and adds it to the projection result.
+Because `projOut` has `acceptResidual = true`, it accepts the block residual as `residual` and adds it to the projection result.
 
 #### FeedForward
 
@@ -107,7 +107,7 @@ fc1 - fc2;   // 768 -> 3072 -> 768
 
 ## Checkpoints
 
-Place checkpoints in size-specific folders (`ModelConfig::variant`), with the tokenizer in their parent folder.
+Checkpoints are placed in a folder for each size (`ModelConfig::variant`) under `data/ckpts/gpt2/openai/`, and the tokenizer in `data/tokenizers/gpt2/`.
 All four sizes share `tokenizer.json`.
 
 ```
@@ -135,9 +135,9 @@ Download `model.safetensors` and `tokenizer.json` directly from the HuggingFace 
 
 ### Loading weights
 
-The code that maps checkpoint tensors to graph slots is in [`models/gpt2/openai-weights.h`](../../../models/gpt2/openai-weights.h).
-Loading takes one line at the call site. The specialization constructs the path (`VAI_DATA_DIR "/gpt2/" + modelCfg.variant`),
-so only the size needs to be selected. For distribution tags, see [`distribution-weights.h` in Writing custom models](../contributing/models.md#distribution-weightsh).
+The code that maps checkpoints to graph slots is in [`models/production/gpt2/openai-weights.h`](../../../models/production/gpt2/openai-weights.h).
+Only one line is needed at the call site. The specialization assembles the path (`VAI_DATA_DIR "/ckpts/gpt2/openai/" + modelCfg.variant`),
+so only the size needs to be set. For how the distribution-name tag works, see [`distribution-name-weights.h` in Writing custom models](../contributing/models.md#distribution-name-weightsh).
 
 ```cpp
 loadWeights<"openai">(net);
@@ -148,12 +148,10 @@ loadWeights<"openai">(net);
 ### Directory structure
 
 ```
-models/gpt2/
-├── model.h                       Model and NodeGroup definitions
-└── openai-weights.h               OpenAI (HuggingFace `openai-community/*`) checkpoint mapping
-
-examples/gpt2/
-├── demo.cpp                      demo-gpt2: complete one prompt and measure timing
+models/production/gpt2/
+├── net.h                         Model definition and NodeGroup definitions
+├── openai-weights.h              Mapping for OpenAI (HuggingFace `openai-community/*`) checkpoints
+├── demo.cpp                      demo-gpt2: complete one prompt + timing
 └── CMakeLists.txt
 
 data/

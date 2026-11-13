@@ -146,7 +146,7 @@ struct ConcatModel : vai::NeuralNet {
 
     explicit ConcatModel(const vai::NeuralNetConfig& cfg = {})
         : NeuralNet(cfg)
-        , concat({.axis = 0, .inputCount = 2, .oDtype = vai::Dtype::Fp32})
+        , concat({.axis = 0, .inputCount = 2})
     {
         input("a") - concat;                  // a.out0 -> concat.in0
         input("b")/"out0" - "in1"/concat;     // b.out0 -> concat.in1

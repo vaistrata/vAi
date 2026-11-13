@@ -3,17 +3,17 @@
 These models are implemented in vAi.
 
 ```
-models/<model>/
-├── model.h                      Model and NodeGroup definitions
-├── <distribution>-weights.h     Distribution checkpoint -> graph slot mapping (loadWeights<"distribution">)
-├── nodes/                       Model-specific nodes (if any)
-└── shaders/                     Kernels for model-specific nodes (if any)
-
-examples/<model>/
-├── demo.cpp                     demo-<model> - model inference and timing
+models/<impl>/<model>/
+├── net.h                        Model and NodeGroup definitions
+├── <distribution-name>-weights.h Distribution checkpoint to graph slot mapping (loadWeights<"distribution-name">)
+├── nodes/                        Dedicated model nodes (if any)
+├── shaders/                      Kernels for dedicated nodes (if any)
+├── demo.cpp                      demo-<model> - model inference and inference timing
 └── CMakeLists.txt
 
-data/<model>/                    Checkpoints and related data
+data/ckpts/<model>/<distribution-name>/   Checkpoints
+data/tokenizers/<model>/                  Tokenizer
+data/images/                              Input images
 ```
 
 ## Loading weights

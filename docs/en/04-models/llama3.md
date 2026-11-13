@@ -22,8 +22,8 @@ llama3::Net net({
 
 ### NeuralNetConfig
 
-Llama 3 uses the defaults, except that each `RmsNorm` forces `wDtype = fp32`.
-For details, see [NeuralNet](../03-usage/neural-net.md).
+Llama 3 uses the defaults as they are; the loader reads every `RmsNorm`'s scale at fp32.
+See [NeuralNet](../03-usage/neural-net.md) for details.
 
 ### ModelConfig
 
@@ -81,7 +81,7 @@ input - projK - splitK - perK - ropeK - "K"/attn;
 input - projV - splitV - perV         - "V"/attn;
 ```
 
-With `acceptResidual = true`, `toOut` receives the block's residual through `residual` and adds it to the projection result.
+Because `projOut` has `acceptResidual = true`, it accepts the block residual as `residual` and adds it to the projection result.
 
 `Rope` shares the KV cache token counter, so rotation uses the cumulative absolute position even during decode steps, rather than the offset within the current forward pass.
 
@@ -111,7 +111,7 @@ gateValue - gatedMul - out;   // 2048 -> 16384 -> 8192 -> 2048
 
 ## Checkpoints
 
-Place checkpoints in size-specific folders (`ModelConfig::variant`), with the tokenizer in their parent folder.
+Checkpoints are placed in a folder for each size (`ModelConfig::variant`) under `data/ckpts/llama3/meta/`, and the tokenizer in `data/tokenizers/llama3/`.
 Both sizes share `tokenizer.json`.
 
 ```
@@ -141,8 +141,8 @@ Download `model.safetensors` and `tokenizer.json` directly from the HuggingFace 
 
 ### Loading weights
 
-The code that maps checkpoint tensors to graph slots is in [`models/llama3/meta-weights.h`](../../../models/llama3/meta-weights.h).
-Loading takes one line at the call site. The specialization constructs the path (`VAI_DATA_DIR "/llama3/" + modelCfg.variant`), so only the size needs to be selected. For distribution tags, see [`distribution-weights.h` in Writing custom models](../contributing/models.md#distribution-weightsh).
+The code that maps checkpoints to graph slots is in [`models/production/llama3/meta-weights.h`](../../../models/production/llama3/meta-weights.h).
+Only one line is needed at the call site. The specialization assembles the path (`VAI_DATA_DIR "/ckpts/llama3/meta/" + modelCfg.variant`), so only the size needs to be set. For how the distribution-name tag works, see [`distribution-name-weights.h` in Writing custom models](../contributing/models.md#distribution-name-weightsh).
 
 ```cpp
 loadWeights<"meta">(net);
@@ -153,13 +153,10 @@ loadWeights<"meta">(net);
 ### Directory structure
 
 ```
-models/llama3/
-├── model.h                       Model and NodeGroup definitions
-└── meta-weights.h                Meta (HuggingFace `meta-llama/*`) checkpoint mapping
-
-examples/llama3/
-├── demo.cpp                      demo-llama3, complete one prompt and measure timing
-├── chat.cpp                      chat-llama3, multi-turn conversation
+models/production/llama3/
+├── net.h                         Model definition and NodeGroup definitions
+├── meta-weights.h                Mapping for Meta (HuggingFace `meta-llama/*`) checkpoints
+├── demo.cpp                      demo-llama3: complete one prompt + timing
 └── CMakeLists.txt
 
 examples/chat-llama3/
@@ -187,7 +184,7 @@ cmake --build build --config RelWithDebInfo
 ./build/bin/demo-llama3
 ```
 
-The demo generates text that continues the text in `prompt` in [`demo.cpp`](../../../examples/llama3/demo.cpp). It measures `prefill` and `decode` times separately and prints them with the generated text.
+[`demo.cpp`](../../../models/production/llama3/demo.cpp) continues the sentence in `prompt` to generate a new sentence. It measures the `prefill` and `decode` times separately and prints them together with the generated sentence.
 
 ### chat-llama3
 
@@ -195,7 +192,7 @@ The demo generates text that continues the text in `prompt` in [`demo.cpp`](../.
 ./build/bin/chat-llama3
 ```
 
-This runs a multi-turn conversation from [`chat.cpp`](../../../examples/llama3/chat.cpp). Conversation history stays in the KV cache, and the session ends on an empty line or when the cache is full.
+This is the multi-turn conversation in [`main.cpp`](../../../examples/chat-llama3/main.cpp). The conversation history remains in the KV cache, and the conversation ends when an empty line is entered or the cache fills up.
 
 ## Benchmark summary
 

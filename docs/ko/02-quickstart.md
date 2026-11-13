@@ -2,7 +2,7 @@
 
 vAi를 빌드하고 MNIST 분류기 예제를 돌려봅니다.
 
-MNIST 분류기는 모델 정의부터 가중치 로딩, 실행까지 [`examples/mnist/main.cpp`](../../examples/mnist/main.cpp) 한 파일에 들어 있습니다. 체크포인트와 입력 이미지는 [`data/mnist/`](../../data/mnist/)에 함께 있습니다.
+MNIST 분류기는 모델 정의부터 가중치 로딩, 실행까지 [`examples/mnist/main.cpp`](../../examples/mnist/main.cpp) 한 파일에 들어 있습니다. 체크포인트는 [`data/ckpts/mnist/jroot/`](../../data/ckpts/mnist/jroot/)에, 입력 이미지는 [`data/images/`](../../data/images/)에 있습니다.
 
 ## 1. 설치
 
@@ -36,7 +36,8 @@ cmake --build build --target demo-mnist
 
 | 옵션 | 기본 | 내용 |
 |---|---|---|
-| `VAI_BUILD_EXAMPLES` | `OFF` | 모델별 데모 (`demo-mnist`, `demo-gpt2` 등) |
+| `VAI_BUILD_MODEL_DEMO` | `ON` | 모델별 데모 (`demo-gpt2`, `demo-yolox` 등) |
+| `VAI_BUILD_EXAMPLES` | `OFF` | 모델 밖의 예제 (`demo-mnist`, `chat-llama3`, `chat-gemma3`) |
 | `VAI_BUILD_TESTS` | `OFF` | 커널 단위 테스트, A/B |
 | `VAI_BUILD_BENCH` | `OFF` | llama.cpp, ncnn 등 비교 프레임워크 벤치 |
 | `VAI_BUILD_PYTHON` | `OFF` | Python 바인딩 |

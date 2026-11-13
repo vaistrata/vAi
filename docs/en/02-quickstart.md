@@ -2,7 +2,7 @@
 
 Build vAi and run the MNIST classifier example.
 
-The MNIST classifier, from model definition to weight loading and execution, is contained in a single file, [`examples/mnist/main.cpp`](../../examples/mnist/main.cpp). The checkpoint and input images are included in [`data/mnist/`](../../data/mnist/).
+The MNIST classifier, from model definition to weight loading and execution, is contained in a single file, [`examples/mnist/main.cpp`](../../examples/mnist/main.cpp). The checkpoint is in [`data/ckpts/mnist/jroot/`](../../data/ckpts/mnist/jroot/), and the input images are in [`data/images/`](../../data/images/).
 
 ## 1. Installation
 
@@ -36,7 +36,8 @@ Build options:
 
 | Option | Default | Description |
 |---|---|---|
-| `VAI_BUILD_EXAMPLES` | `OFF` | Model demos (`demo-mnist`, `demo-gpt2`, etc.) |
+| `VAI_BUILD_MODEL_DEMO` | `ON` | Model demos (`demo-gpt2`, `demo-yolox`, etc.) |
+| `VAI_BUILD_EXAMPLES` | `OFF` | Examples outside the models (`demo-mnist`, `chat-llama3`, `chat-gemma3`) |
 | `VAI_BUILD_TESTS` | `OFF` | Kernel unit tests, A/B |
 | `VAI_BUILD_BENCH` | `OFF` | Benchmarks against frameworks such as llama.cpp and ncnn |
 | `VAI_BUILD_PYTHON` | `OFF` | Python bindings |

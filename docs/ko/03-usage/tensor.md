@@ -152,7 +152,7 @@ Dtype은 `TensorData` 생성 시 설정되며 이후 변경할 수 없습니다.
 Safetensors 파일에 저장된 데이터를 읽어 Tensor를 생성할 수 있습니다. 주로 모델의 가중치를 로드할 때 사용합니다.
 
 ```cpp
-SafetensorsParser parser(VAI_DATA_DIR "/mnist/model.safetensors");
+SafetensorsParser parser(VAI_DATA_DIR "/ckpts/mnist/jroot/model.safetensors");
 
 Tensor w(parser["fc.weight"]);                // 파일의 Dtype에 따라 생성
 Tensor half(parser["fc.weight"], Dtype::Fp16); // Fp16으로 변환하여 생성

@@ -152,7 +152,7 @@ Dtype is set when `TensorData` is created and cannot be changed afterward. A dif
 A Tensor can be constructed by reading data stored in a Safetensors file. This is mainly used to load model weights.
 
 ```cpp
-SafetensorsParser parser(VAI_DATA_DIR "/mnist/model.safetensors");
+SafetensorsParser parser(VAI_DATA_DIR "/ckpts/mnist/jroot/model.safetensors");
 
 Tensor w(parser["fc.weight"]);                // Construct using the file's Dtype
 Tensor half(parser["fc.weight"], Dtype::Fp16); // Convert to Fp16 during construction

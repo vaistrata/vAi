@@ -187,7 +187,7 @@ loadWeights<"ultralytics">(net);
 
 경로는 `model.cfg.tier`로 특수화가 조립하므로(`VAI_DATA_DIR "/yolov8/yolov8" + <tier 글자>`) 부르는
 쪽은 `tier`만 정하면 됩니다. 배포명 태그의 원리는 [커스텀 모델 작성의 `배포명-weights.h`](../contributing/models.md#배포명-weightsh) 참조. Ultralytics의 `model.<n>` 인덱스 키를 `backbone`, `neck`, `head` 멤버로 옮기는 매핑이 로더의
-본체입니다. `conv` 가중치와 `BN` 파라미터(`gamma`, `beta`, `running mean`/`var`)를 모두 노드의 `wDtype`으로
+본체입니다. `conv` 가중치와 `BN` 파라미터(`gamma`, `beta`, `running mean`/`var`)를 모두 넷의 `wDefaultDtype`으로
 읽습니다. 가중치 로더가 BN의 `scale`·`bias`를 계산해 `Convolution`에 전달합니다.
 
 ## 실행
