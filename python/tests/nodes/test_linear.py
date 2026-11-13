@@ -16,6 +16,14 @@ from pyvai import nodes
         pytest.param(33, 96, 48, True, "RELU", 0, FP16, None, id="tile_relu"),
         pytest.param(64, 128, 100, False, "GELU_TANH", 0, FP16, None, id="tile_odd_n"),
         pytest.param(16, 256, 64, True, "NONE", 64, FP16, None, id="tile_split_k"),
+        # K off the k-block: a masked tail, at 8-, 4- or 2-wide loads by K and
+        # the split span, scalar loads for an odd K; alone and in a split.
+        pytest.param(33, 1000, 100, True, "NONE", 0, FP16, None, id="tile_k_tail_8wide"),
+        pytest.param(33, 100, 48, False, "NONE", 0, FP16, None, id="tile_k_tail_4wide"),
+        pytest.param(33, 102, 48, False, "NONE", 0, FP16, None, id="tile_k_tail_2wide"),
+        pytest.param(33, 101, 48, False, "NONE", 0, FP16, None, id="tile_k_odd"),
+        pytest.param(16, 2050, 64, True, "NONE", 0, FP16, None, id="tile_k_tail_split"),
+        pytest.param(33, 1000, 48, False, "NONE", 100, FP16, None, id="tile_k_tail_split_size"),
     ],
 )
 def test_linear(m, k, n, has_bias, epilogue, split_size, tol, alt_m):
