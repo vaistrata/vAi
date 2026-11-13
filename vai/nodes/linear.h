@@ -22,7 +22,8 @@ namespace vai::node {
   - tile (M > 8): a workgroup owns a wgM x wgN tile. Two kernels share the
     frame, chosen per device in selectLinearTile(): scalar
     (linear-tile, each thread accumulates its own outputs) and
-    cooperative-matrix (linear-cm, subgroup MMA tiles).
+    cooperative-matrix (linear-cm, subgroup MMA tiles; NVIDIA's Fill tiles
+    run linear-cm-nv, which masks the K tail per k-block).
   - Intel (useIntelTile; every M, slab included): linear-tile-intel, a port of
     OpenVINO's fully_connected_gpu_bf_tiled, reading W packed once on the GPU
     (packWeightIntel); its tile choice is intelTileParams(), its split
@@ -92,6 +93,7 @@ public:
         uint32_t tN;
         uint32_t tK = 0;    // coopmat k tile: k depth per coopMatMulAdd (= device coopmat K);
                             // 0 on the scalar path — doubles as the coopmat-tile marker
+        bool kTailMasked = false;   // coopmat: linear-cm-nv (K tail masked per k-block)
         vai::Dtype iDtype = vai::Dtype::None;
 
         PipeParamsTile() = default;
@@ -222,8 +224,15 @@ private:
 
 
 /////////////////////////////////////////////////////////////////////////////////////////
-// Helpers: shared across the sections below
+// Helpers: shared across the sections below and prepare()
 /////////////////////////////////////////////////////////////////////////////////////////
+
+// Shared memory of a coopmat tile: tileA/tileB + the fp32 store stage. NOTE (vs llama.cpp): ggml
+// divides the stage term by warps — the shader declares cmStage[warps * tN * tM], so vai multiplies.
+inline uint32_t coopmatTileShmem(const Linear::PipeParamsTile& t)
+{
+    return (t.wgN + t.wgM) * (t.wgK / 2 + 4) * 4 + (t.wgSize / t.sgSize) * t.tN * t.tM * 4;
+}
 
 // Whether a coopmat tile candidate works on this device. A failure means
 // "not on this device" (degrade the tier / fall back to scalar), not a bad
@@ -249,38 +258,21 @@ inline bool coopmatTileUsable(const Linear::PipeParamsTile& t, eva::Device devic
     if (t.sgSize % t.tN != 0 || t.tM % (t.sgSize / t.tN) != 0)
         return false;
 
-    // Shared budget: tileA/tileB + the fp32 store stage. NOTE (vs llama.cpp):
-    // ggml divides the stage term by warps — the shader declares
-    // cmStage[warps * tN * tM], so vai multiplies.
-    const uint32_t shmem = (t.wgN + t.wgM) * (t.wgK / 2 + 4) * 4 + (t.wgSize / t.sgSize) * t.tN * t.tM * 4;
-    return shmem <= device.maxComputeSharedMemorySize();
+    // Shared budget.
+    return coopmatTileShmem(t) <= device.maxComputeSharedMemorySize();
 }
 
-// A vendor's refinement of ggml's coopmat pick is geometry-recognizable:
-// ggml's coopmat tiles are all square k32, refined ones never are. The vendor
-// split rules tell the two apart by it.
-inline bool cmRefinedTile(const Linear::PipeParamsTile& t)
+// Whether the cooperative loaders (shared by both tile kernels) cover a tile:
+// wgK 8-wide-load aligned, and whole wgM / wgN tiles per pass at the load
+// code's elements per load call (1: 8-wide 8, 2: 4-wide 4, 3: 2-wide and
+// 0: scalar 2).
+inline bool tileLoadersFit(const Linear::PipeParamsTile& t, uint32_t loadCode)
 {
-    return t.tK != 0u && (t.wgK != 32u || t.wgM != t.wgN);
-}
-
-// A vendor rule's geometry over ggml's coopmat pick `t`: it stands where the
-// device runs it, ggml's pick otherwise.
-inline Linear::PipeParamsTile refineCoopmatTile(const Linear::PipeParamsTile& t, uint32_t wgSize, uint32_t wgM,
-                                                uint32_t wgN, uint32_t wgK, uint32_t sgM, uint32_t sgN,
-                                                eva::Device device)
-{
-    Linear::PipeParamsTile tuned = t;
-    tuned.wgSize = wgSize;
-    tuned.wgM = wgM;
-    tuned.wgN = wgN;
-    tuned.wgK = wgK;
-    tuned.sgM = sgM;
-    tuned.sgN = sgN;
-    // The vendor split rules recognize these picks by geometry: no rule may
-    // land on a square k32 tile, which is what ggml's own picks all are.
-    VAI_ASSERT(cmRefinedTile(tuned));
-    return coopmatTileUsable(tuned, device) ? tuned : t;
+    const uint32_t el = (loadCode == 1u) ? 8u : (loadCode == 2u) ? 4u : 2u;
+    if (t.wgK % 8 != 0 || (t.wgSize * el) % t.wgK != 0)
+        return false;
+    const uint32_t rows = t.wgSize * el / t.wgK;
+    return t.wgM % rows == 0 && t.wgN % rows == 0;
 }
 
 
@@ -452,7 +444,8 @@ inline Linear::PipeParamsTile ggmlCoopmatWarptile(int tier, const Linear::CmShap
 // ggml_vk_guess_matmul_pipeline port, the tile (vai naming: M = flattened
 // batch, N = outDim): the device coopmat tile of the shape's tier where one is
 // usable, degrading L -> M -> S, the gated scalar warptile otherwise. ggml's
-// pick as such: NVIDIA and AMD refine it in their sections below.
+// pick as such: AMD refines it in its section below, and NVIDIA falls back to
+// it where no Fill tile fits (nvLinearTile).
 inline Linear::PipeParamsTile ggmlMulmmWarptile(uint32_t M, uint32_t N, eva::Device device, bool stageF32 = false)
 {
     const Linear::CmShape cm = ggmlCoopmatShape(device);
@@ -485,8 +478,8 @@ inline uint32_t ggmlSplitSize(uint32_t K, uint32_t splitCount)
 
 // ggml_vk_guess_split_k port (ggml m/n are vai N/M): split only an
 // underfilled deep-K grid; shrink while the 256-rounded split size would
-// leave the last split empty. ggml's guess as such: a vendor's refined pick
-// takes the vendor's own rule first.
+// leave the last split empty. ggml's guess as such: AMD's refined picks take
+// AMD's own rule first.
 inline uint32_t ggmlGuessSplitCount(uint32_t M, uint32_t N, uint32_t K,
                                     const Linear::PipeParamsTile& t, eva::Device device)
 {
@@ -547,184 +540,300 @@ inline uint32_t ggmlSlabWgSize(uint32_t K, uint32_t N, uint32_t sgSize, eva::Dev
 // NVIDIA
 /////////////////////////////////////////////////////////////////////////////////////////
 
-// Does the ggml L (128x128) grid cover the cores? Grids that are not small-M
-// count from ~1x cores (an exact fit needs no more); small-M ones only from 1.5x.
-inline bool cmGridFilled(uint32_t M, uint32_t N, uint32_t cores)
+// The Fill selector: a coopmat tile and split count from M, N, Kp, the core count and the
+// shared-memory budget — no vendor tables, no per-GPU constants. Its tiles run linear-cm-nv.comp
+// (kTailMasked).
+
+// Candidate at wgM x wgN: 4 subgroups as 2x2, 1x4 or 4x1, whichever minimizes sgM + sgN
+// (16-multiples).
+inline Linear::PipeParamsTile fillCandidate(const Linear::PipeParamsTile& base, uint32_t m, uint32_t n)
 {
-    const Linear::TileGrid g(M, N, 128u, 128u);
-    return g.tiles() >= cores * 3u / 2u || (!g.smallM && g.tiles() >= cores);
+    Linear::PipeParamsTile c = base;
+    c.wgM = m;
+    c.wgN = n;
+    uint32_t bestSum = ~0u;
+    for (auto [rows, cols] : { std::pair{ 2u, 2u }, std::pair{ 1u, 4u }, std::pair{ 4u, 1u } })
+    {
+        const uint32_t sm = m / rows, sn = n / cols;
+        if (m % rows || n % cols || sm % 16u || sn % 16u)
+            continue;
+        if (sm + sn < bestSum)
+        {
+            bestSum = sm + sn;
+            c.sgM = sm;
+            c.sgN = sn;
+        }
+    }
+    return c;
 }
 
-// ggml's pick, refined per shape and SM count on the coopmat kernel (=
-// upstream's vendor l_warptile overrides, made shape-aware). Wherever no rule
-// applies, ggml's pick stands. Every rule wants the SM count and was measured
-// on whole k-blocks (the picks step k32 / k64; the lone k128 pick checks
-// K % 128 itself).
-inline Linear::PipeParamsTile nvLinearTile(uint32_t M, uint32_t N, uint32_t K, Dtype iDtype, Dtype wDtype,
-                                           eva::Device device)
+// Workgroups of a tile, and the fill target (1.5 waves).
+inline uint32_t fillTiles(uint32_t M, uint32_t N, const Linear::PipeParamsTile& c)
 {
-    const Linear::PipeParamsTile t = ggmlMulmmTileParams(M, N, iDtype, wDtype, device);
-    const uint32_t cores = device.computeBlockCount();
-    if (t.tK == 0 || t.sgSize != 32 || cores == 0 || K % 64 != 0)
-        return t;
+    return CEIL_DIV(M, c.wgM) * CEIL_DIV(N, c.wgN);
+}
 
-    uint32_t wgM, wgN, wgK, sgM, sgN;
-    uint32_t wgSize = 128;
+inline bool fillFilled(uint32_t tiles, uint32_t cores)
+{
+    return tiles * 2u >= cores * 3u;
+}
 
-    // Measured per shape and SM count; the split is 40-95 SMs vs. the rest.
-    const Linear::TileGrid gridL(M, N, 128u, 128u);   // ggml's L tile
-    const uint32_t tilesL = gridL.tiles();
-    const bool smallM = gridL.smallM;
-    // Big-L2 proxy: weight re-reads are cheap on the high-core parts.
-    const bool coresRich = cores >= 96u;
-    const bool midCores = cores >= 40u && !coresRich;
-    const bool filled = cmGridFilled(M, N, cores);
+// The M-tile ladder and its cost (tilesM x rows covered).
+inline uint32_t fillNextM(uint32_t m)
+{
+    return m == 128u ? 96u : m == 96u ? 64u : 32u;
+}
 
-    if (midCores)
+inline uint64_t fillMCost(uint32_t M, uint32_t m)
+{
+    const uint64_t tm = CEIL_DIV(M, m);
+    return tm * tm * m;
+}
+
+// Split count: the smallest S (2..8) that fills the grid, each split >= minSpan deep and the last
+// one non-empty. A grid below half a wave may split from K 1024, others from 2048.
+// `settle` -> the largest allowed S.
+inline uint32_t fillSplitFor(uint32_t Kp, uint32_t tiles, uint32_t cores, uint32_t minSpan, bool settle)
+{
+    if (Kp < (tiles * 2u < cores ? 1024u : 2048u))
+        return 1u;
+    uint32_t last = 1u;
+    for (uint32_t s = 2; s <= 8u; ++s)
     {
-        if (smallM)
+        if (Kp / s < minSpan)
+            break;
+        if (ggmlSplitSize(Kp, s) * (s - 1u) >= Kp)
+            continue;
+        if (fillFilled(tiles * s, cores))
+            return s;
+        last = s;
+    }
+    return settle ? last : 1u;
+}
+
+// Half-height tile for a 128x128 grid below half a wave: S = cores / tiles (<= 8, >= 256 deep),
+// then 64x128 or 64x64 if that grid x S reaches one WG per core.
+inline bool fillHalfTile(uint32_t M, uint32_t N, uint32_t Kp, uint32_t cores, const Linear::PipeParamsTile& base,
+                         eva::Device device, Linear::PipeParamsTile& t, uint32_t& splitCount)
+{
+    uint32_t s = std::min(8u, std::max(1u, cores / fillTiles(M, N, t)));
+    while (s > 1u && (Kp / s < 256u || ggmlSplitSize(Kp, s) * (s - 1u) >= Kp))
+        --s;
+    if (s < 2u)
+        return false;
+    for (auto [hm, hn] : { std::pair{ 64u, 128u }, std::pair{ 64u, 64u } })
+    {
+        const Linear::PipeParamsTile d = fillCandidate(base, hm, hn);
+        if (coopmatTileUsable(d, device) && fillTiles(M, N, d) * s >= cores)
         {
-            if (K >= 4096u || N <= 1024u)
-                return t;   // ggml (with its split) wins these
-            if (tilesL >= cores * 3u)
-            {
-                // Many waves at small M (gate/up, lm_head): one M tile.
-                wgM = (M <= 96u) ? 96u : 192u;
-                wgN = 96;
-                wgK = 64;
-                sgM = wgM / 2;
-                sgN = 48;
-            }
-            else
-            {
-                wgM = 32;
-                wgN = 128;
-                wgK = 64;
-                sgM = 16;
-                sgN = 32;
-                wgSize = 256;
-            }
-        }
-        else
-        {
-            if (N < 2048u)
-                return t;
-            const uint32_t waves = CEIL_DIV(tilesL, cores);
-            if (tilesL >= cores * 2u)
-            {
-                // Deep grids: 1.5x-area tiles; grow M against a wide N,
-                // otherwise grow N.
-                if (N >= 4u * M)
-                {
-                    wgM = 256;
-                    wgN = 96;
-                    sgM = 64;
-                    sgN = 96;
-                }
-                else
-                {
-                    wgM = 128;
-                    wgN = 192;
-                    sgM = 64;
-                    sgN = 96;
-                }
-                wgK = 32;
-            }
-            else if (tilesL >= cores && (waves * cores - tilesL) * 4u >= waves * cores)
-            {
-                // 1-2 waves with >= 25% of the round-up idle: halve the M tile.
-                wgM = 64;
-                wgN = 128;
-                wgK = 32;
-                sgM = 32;
-                sgN = 64;
-            }
-            else
-                return t;   // near-exact fit: ggml's L is already right
+            t = d;
+            splitCount = s;
+            return true;
         }
     }
-    else if (filled)
+    return false;
+}
+
+// Resident-round split: the S (1..8, splits >= 512 deep) that minimizes rounds of resident workgroups
+// x k-blocks per round plus the partials' traffic; only raises Fill's S, compute-bound GEMMs only.
+inline uint32_t fillSplitRounds(uint32_t M, uint32_t N, uint32_t tiles, uint32_t Kp, uint64_t wBytes, uint32_t cores,
+                                const Linear::PipeParamsTile& t, eva::Device device)
+{
+    if (Kp < 2048u)
+        return 1u;
+    if (2.0 * double(M) * double(N) * double(Kp) < double(wBytes) * 100.0)
+        return 1u;   // W-bandwidth-bound regime
+    // Resident workgroups per core: the per-workgroup shared limit is taken as half of a core's.
+    const uint32_t r = std::max(1u, 2u * device.maxComputeSharedMemorySize() / coopmatTileShmem(t));
+    const uint64_t slots = uint64_t(cores) * r;
+    const double roundWork = double(slots) * 2.0 * t.wgM * t.wgN * t.wgK;
+    const double partialFlopPerSplit = 8.0 * double(M) * double(N) * 100.0;
+    const double weightStream = double(wBytes) * 100.0;
+    uint32_t best = 1u;
+    double bestCost = 0.0;
+    for (uint32_t s = 1; s <= 8u; ++s)
     {
-        // Trim wgM to the smallest step keeping the tile count (pure waste cut).
-        wgM = 128;
-        for (uint32_t w : { 32u, 64u, 96u })
-            if (CEIL_DIV(M, w) == CEIL_DIV(M, 128u))
-            {
-                wgM = w;
-                break;
-            }
-        wgN = 128;
-        wgK = (K >= 4096u) ? 64u : 32u;
-        sgM = wgM / 2;
-        sgN = 64;   // 4 subgroups
-        if (wgM == 128u && wgK == 32u)
-            return t;   // = ggml's L exactly
+        if (Kp / s < 512u)
+            break;
+        if (s > 1u && ggmlSplitSize(Kp, s) * (s - 1u) >= Kp)
+            continue;   // empty last split
+        const uint64_t rounds = CEIL_DIV(uint64_t(tiles) * s, slots);
+        const uint64_t blocks = CEIL_DIV(uint64_t(s > 1u ? ggmlSplitSize(Kp, s) : Kp), uint64_t(t.wgK));
+        const double cost = std::max(double(rounds) * double(blocks) * roundWork, weightStream) +
+                            (s > 1u ? s * partialFlopPerSplit : 0.0);
+        if (s == 1u || cost < bestCost)
+        {
+            bestCost = cost;
+            best = s;
+        }
     }
-    else if (K >= 4096u && !smallM)
+    return best;
+}
+
+// The Fill selector on Kp (K rounded up to 64 when K % 32 != 0; the kernel masks the tail).
+// splitCount 0: no fill tile fits the device (nvLinearTile then takes ggml's pick and split).
+inline Linear::PipeParamsTile fillTileParams(uint32_t M, uint32_t N, uint32_t Kp, Dtype iDtype, Dtype wDtype,
+                                             eva::Device device, uint32_t& splitCount)
+{
+    splitCount = 1;
+    const Linear::CmShape cm = ggmlCoopmatShape(device);
+    if (!cm.valid())   // no coopmat GEMM: ggml's pick
     {
-        wgM = 128;
-        wgN = 128;
-        wgK = 64;
-        sgM = 64;
-        sgN = 64;   // L, deeper k-block
+        splitCount = 0;
+        return {};
     }
-    else if (K >= 4096u && !coresRich)
+
+    const uint32_t cores = std::max(device.computeBlockCount(), 1u);
+    Linear::PipeParamsTile base = ggmlCoopmatWarptile(2, cm, device);   // ggml L: 128x128, 4 subgroups
+    base.wgK = (Kp % 64u == 0u) ? 64u : 32u;
+
+    uint32_t wgM = 128, wgN = 128;
+    if (N <= 32u)
     {
-        wgM = 96;
-        wgN = 96;
-        wgK = 64;
-        sgM = 48;
-        sgN = 48;   // tall tile: weights stream once per 96 rows
+        wgM = 32;
+        wgN = 32;
     }
-    else
+    else if (M <= 32u)
     {
-        // Underfilled: 32-row tiles, the widest wgN that still fills.
         wgM = 32;
         wgN = 64;
-        for (uint32_t w : { 128u, 96u })
-            if (Linear::TileGrid(M, N, wgM, w).tiles() >= cores * 6u / 5u)
+    }
+    else if (M <= 64u || N <= 64u)
+    {
+        wgM = 64;
+        wgN = 64;
+    }
+    for (uint32_t m = wgM; m > 32u; m = fillNextM(m))
+        if (fillMCost(M, fillNextM(m)) < fillMCost(M, wgM))
+            wgM = fillNextM(m);
+    Linear::PipeParamsTile t = fillCandidate(base, wgM, wgN);
+
+    if (!fillFilled(fillTiles(M, N, t), cores))
+    {
+        splitCount = fillSplitFor(Kp, fillTiles(M, N, t), cores, 1024u, false);
+        if (splitCount == 1u)
+        {
+            const uint32_t sMax = fillSplitFor(Kp, fillTiles(M, N, t), cores, 1024u, true);
+            if (sMax >= 4u && fillTiles(M, N, t) * sMax * 4u >= cores * 3u)
+                splitCount = sMax;
+        }
+        if (splitCount == 1u && t.wgM == 128u && t.wgN == 128u && Kp >= 2048u && fillTiles(M, N, t) * 2u < cores)
+            fillHalfTile(M, N, Kp, cores, base, device, t, splitCount);
+        if (splitCount == 1u)
+        {
+            while (!fillFilled(fillTiles(M, N, t), cores) && t.wgM > 32u)
             {
-                wgN = w;
-                break;
+                const Linear::PipeParamsTile d = fillCandidate(base, fillNextM(t.wgM), t.wgN);
+                if (!coopmatTileUsable(d, device))
+                    break;
+                t = d;
             }
-        const uint32_t preTiles = Linear::TileGrid(M, N, wgM, wgN).tiles();
-        wgK = (preTiles < cores / 2u && K % 128u == 0u) ? 128u : 64u;
-        sgM = (wgN == 128u) ? 32u : 16u;
-        sgN = (wgN == 128u) ? 32u : wgN / 2;   // 4 subgroups either way
+            while (!fillFilled(fillTiles(M, N, t), cores) && t.wgN > 64u)
+            {
+                const Linear::PipeParamsTile d = fillCandidate(base, t.wgM, t.wgN == 128u ? 96u : 64u);
+                if (!coopmatTileUsable(d, device))
+                    break;
+                t = d;
+            }
+            if (!fillFilled(fillTiles(M, N, t), cores))
+            {
+                splitCount = fillSplitFor(Kp, fillTiles(M, N, t), cores, 1024u, false);
+                if (splitCount == 1u)
+                    splitCount = fillSplitFor(Kp, fillTiles(M, N, t), cores, 256u, true);
+            }
+        }
     }
 
-    return refineCoopmatTile(t, wgSize, wgM, wgN, wgK, sgM, sgN, device);
+    if (!coopmatTileUsable(t, device))
+    {
+        t = fillCandidate(base, 128, 128);
+        splitCount = 1;
+    }
+
+    if (t.wgM + t.wgN <= 96u && Kp % 128u == 0u            // k-block 128: a small tile
+        && fillTiles(M, N, t) * splitCount * 2u < cores)   // below half a wave
+    {
+        Linear::PipeParamsTile d = t;
+        d.wgK = 128u;
+        if (coopmatTileUsable(d, device))
+            t = d;
+    }
+
+    if (!coopmatTileUsable(t, device))
+    {
+        splitCount = 0;   // no fill tile on this device: ggml's pick and its split guess
+        return {};
+    }
+
+    // Only ever raises Fill's S.
+    const uint64_t wBytes = uint64_t(Kp) * N * (wDtype == Dtype::Fp16 ? 2u : 4u);
+    splitCount = std::max(splitCount, fillSplitRounds(M, N, fillTiles(M, N, t), Kp, wBytes, cores, t, device));
+
+    t.iDtype = iDtype;
+    t.kTailMasked = true;   // linear-cm-nv
+    return t;
 }
 
-// A refined pick carries its own split rule; ggml's own picks (and the filled
-// trims and the deep-K L) take ggml's guess.
-inline uint32_t nvLinearSplitCount(uint32_t M, uint32_t N, uint32_t K, const Linear::PipeParamsTile& t,
-                                   eva::Device device)
+// The tile and split count: the Fill selector on Kp, ggml's pick and split guess where no fill tile
+// fits the device (no coopmat GEMM, or none within the shared-memory budget).
+inline Linear::PipeParamsTile nvLinearTile(uint32_t M, uint32_t N, uint32_t K, Dtype iDtype, Dtype wDtype,
+                                           eva::Device device, uint32_t& splitCount)
 {
-    if (cmRefinedTile(t))
+    const uint32_t Kp = (K % 32u != 0u) ? ROUNDUP_POW2(K, 64u) : K;
+    Linear::PipeParamsTile t = fillTileParams(M, N, Kp, iDtype, wDtype, device, splitCount);
+    if (splitCount == 0)
     {
-        const uint32_t cores = device.computeBlockCount();
-        const uint32_t tiles = Linear::TileGrid(M, N, t.wgM, t.wgN).tiles();
-
-        if (K < 2048u || (cores >= 40u && cores < 96u))
-            return 1;   // shallow K, and every mid-core pick, run unsplit
-                        // (also floors the K/1024, K/256 targets below away from 0)
-
-        // Tall tile: fewer, fatter workgroups, ~4 wgs/core.
-        if (t.wgM == 96u && t.wgN == 96u)
-            return std::min(ROUNDUP_POW2(CEIL_DIV(cores * 4u, tiles), 2u), std::min(8u, K / 1024u));
-
-        // 32-row underfill: ~2 wgs/core.
-        if (t.wgM == 32u && !cmGridFilled(M, N, cores))
-            return std::min(std::max((2u * cores + tiles / 2u) / tiles, 1u), std::min(8u, K / 256u));
+        t = ggmlMulmmTileParams(M, N, iDtype, wDtype, device);
+        splitCount = ggmlGuessSplitCount(M, N, K, t, device);
     }
-    return ggmlGuessSplitCount(M, N, K, t, device);
+    return t;
+}
+
+// linear-cm-nv's K tail: the selector works on Kp and the kernel masks the tail per k-block, so K
+// need not be a multiple of wgK. Load-width code = the widest vector dividing both K and the split
+// span (1: 8-wide, 2: 4-wide, 3: 2-wide), else 0 = the scalar masked path (odd K).
+inline uint32_t nvCmLoadCode(uint32_t K, uint32_t splitSize)
+{
+    if (K % 8u == 0u && splitSize % 8u == 0u)
+        return 1u;
+    if (K % 4u == 0u && splitSize % 4u == 0u)
+        return 2u;
+    if (K % 2u == 0u && splitSize % 2u == 0u)
+        return 3u;
+    return 0u;
 }
 
 
 /////////////////////////////////////////////////////////////////////////////////////////
 // AMD
 /////////////////////////////////////////////////////////////////////////////////////////
+
+// A vendor's refinement of ggml's coopmat pick is geometry-recognizable:
+// ggml's coopmat tiles are all square k32, refined ones never are. The split
+// rule below tells the two apart by it.
+inline bool cmRefinedTile(const Linear::PipeParamsTile& t)
+{
+    return t.tK != 0u && (t.wgK != 32u || t.wgM != t.wgN);
+}
+
+// A vendor rule's geometry over ggml's coopmat pick `t`: it stands where the
+// device runs it, ggml's pick otherwise.
+inline Linear::PipeParamsTile refineCoopmatTile(const Linear::PipeParamsTile& t, uint32_t wgSize, uint32_t wgM,
+                                                uint32_t wgN, uint32_t wgK, uint32_t sgM, uint32_t sgN,
+                                                eva::Device device)
+{
+    Linear::PipeParamsTile tuned = t;
+    tuned.wgSize = wgSize;
+    tuned.wgM = wgM;
+    tuned.wgN = wgN;
+    tuned.wgK = wgK;
+    tuned.sgM = sgM;
+    tuned.sgN = sgN;
+    // The split rule recognizes these picks by geometry: no rule may land on
+    // a square k32 tile, which is what ggml's own picks all are.
+    VAI_ASSERT(cmRefinedTile(tuned));
+    return coopmatTileUsable(tuned, device) ? tuned : t;
+}
 
 // ggml's pick, refined per shape and CU count on the coopmat kernel at wave64.
 // Wherever no rule applies, ggml's pick stands. Every rule wants the CU count
@@ -1008,34 +1117,25 @@ inline uint32_t otherLinearSlabWgSize(uint32_t K, uint32_t N, uint32_t sgSize, e
 // Tile, split count and slab size: the vendor decides
 /////////////////////////////////////////////////////////////////////////////////////////
 
-// The tile kernel's params for one shape (Intel's own kernel is prepare()'s
-// branch, see useIntelTile).
+// The tile kernel's params for one shape and their split count (Intel's own
+// kernel is prepare()'s branch, see useIntelTile). NVIDIA's Fill selector picks
+// the two together; AMD and the others split the picked tile by their rule.
 inline Linear::PipeParamsTile selectLinearTile(uint32_t M, uint32_t N, uint32_t K, Dtype iDtype, Dtype wDtype,
-                                               eva::Device device)
+                                               eva::Device device, uint32_t& splitCount)
 {
+    Linear::PipeParamsTile t;
     switch (device.vendorID())
     {
     case eva::VENDOR_ID::NVIDIA:
-        return nvLinearTile(M, N, K, iDtype, wDtype, device);
+        return nvLinearTile(M, N, K, iDtype, wDtype, device, splitCount);
     case eva::VENDOR_ID::AMD:
-        return amdLinearTile(M, N, K, iDtype, wDtype, device);
+        t = amdLinearTile(M, N, K, iDtype, wDtype, device);
+        splitCount = amdLinearSplitCount(M, N, K, t, device);
+        return t;
     default:
-        return otherLinearTile(M, N, iDtype, wDtype, device);
-    }
-}
-
-// The split count for the tile above.
-inline uint32_t selectLinearSplitCount(uint32_t M, uint32_t N, uint32_t K, const Linear::PipeParamsTile& t,
-                                       eva::Device device)
-{
-    switch (device.vendorID())
-    {
-    case eva::VENDOR_ID::NVIDIA:
-        return nvLinearSplitCount(M, N, K, t, device);
-    case eva::VENDOR_ID::AMD:
-        return amdLinearSplitCount(M, N, K, t, device);
-    default:
-        return otherLinearSplitCount(M, N, K, t, device);
+        t = otherLinearTile(M, N, iDtype, wDtype, device);
+        splitCount = otherLinearSplitCount(M, N, K, t, device);
+        return t;
     }
 }
 
@@ -1157,7 +1257,7 @@ inline void Linear::prepare()
     {
         // Slab policy (device / option-derived) — recomputed per prepare like
         // the tile params below; run() only re-derives wgN.
-        const uint32_t sgSize  = ggmlSlabSgSize(device());
+        const uint32_t sgSize = ggmlSlabSgSize(device());
         const uint32_t wgSize = selectLinearSlabWgSize(K, N, sgSize, device());
         const uint32_t wgN = (wDtype == Dtype::Fp16) ? 2u : 1u;   // fp16 W pairs N positions
         const bool     aligned = (K % 4 == 0);   // K_PER_ITER = 4 wide loads
@@ -1231,10 +1331,11 @@ inline void Linear::prepare()
             // fp32 x fp32 on the scalar tile kernel stages and accumulates fp32;
             // coopmat (like llama.cpp) and any fp16 operand keep fp16 staging.
             const bool stageF32 = iDtype == Dtype::Fp32 && wDtype == Dtype::Fp32;
-            const PipeParamsTile t = selectLinearTile(M, N, K, iDtype, wDtype, device());
+            uint32_t pickedSplits = 1;
+            const PipeParamsTile t = selectLinearTile(M, N, K, iDtype, wDtype, device(), pickedSplits);
 
             // Resolve split-K for this shape: explicit splitSize, or the
-            // vendor's rule when 0.
+            // vendor's count when 0.
             if (config_.splitSize > 0)
             {
                 VAI_ASSERT(config_.splitSize >= 32);
@@ -1243,7 +1344,7 @@ inline void Linear::prepare()
             }
             else
             {
-                splitCount = selectLinearSplitCount(M, N, K, t, device());
+                splitCount = pickedSplits;
                 splitSize = (splitCount > 1) ? ggmlSplitSize(K, splitCount) : K;
             }
 
@@ -1254,8 +1355,10 @@ inline void Linear::prepare()
                 // Whole k-blocks need K % wgK == 0 (and each split starting on a
                 // k-block boundary); otherwise the kernel's scalar masked-load path
                 // is selected. Heuristic splits are multiples of 256, so only wgK
-                // among the key moves this.
+                // among the key moves this. linear-cm-nv masks the K tail per
+                // k-block instead and takes a load-width code (nvCmLoadCode).
                 const bool aligned = (K % t.wgK == 0) && (splitSize % t.wgK == 0);
+                const uint32_t loadCode = t.kTailMasked ? nvCmLoadCode(K, splitSize) : (aligned ? 1u : 0u);
 
                 // Robustness folds the loaders' row-tail guards away (spec 12):
                 // garbage from a robust OOB tail read only feeds outputs the
@@ -1267,13 +1370,8 @@ inline void Linear::prepare()
                 const bool robust = device().supportsPipelineRobustness();
 
                 // Loader constraints, common to both tile kernels (they share
-                // the cooperative loaders): wgK 8-wide-load aligned, and the
-                // loaders sweep whole wgM/wgN tiles per pass (elements per load
-                // call: aligned 8, scalar 2).
-                const uint32_t el = aligned ? 8u : 2u;
-                VAI_ASSERT(t.wgK % 8 == 0);
-                VAI_ASSERT((t.wgSize * el) % t.wgK == 0);
-                VAI_ASSERT(t.wgM % (t.wgSize * el / t.wgK) == 0 && t.wgN % (t.wgSize * el / t.wgK) == 0);
+                // the cooperative loaders).
+                VAI_ASSERT(tileLoadersFit(t, loadCode));
 
                 if (t.tK != 0)   // coopmat kernel
                 {
@@ -1286,7 +1384,7 @@ inline void Linear::prepare()
                     // NOTE (vs llama.cpp): ggml passes REQUIRE_FULL_SUBGROUPS_BIT
                     // here; eva doesn't expose it (see ggmlCoopmatShape).
                     // clang-format off
-                    pipeTile = pipelinePool().request("linear-cm", {
+                    pipeTile = pipelinePool().request(t.kTailMasked ? "linear-cm-nv" : "linear-cm", {
                         eva::constant_id<0>(t.wgSize),                       // wgSize (= local_size_x)
                         eva::constant_id<1>(t.sgSize),                       // sgSize (= device subgroup size)
                         eva::constant_id<2>(t.wgM),                          // wgM
@@ -1302,7 +1400,7 @@ inline void Linear::prepare()
                         eva::constant_id<SPEC_ID_TYPE_O>(oDtype),    // typeO
                         eva::constant_id<SPEC_ID_TYPE_I>(iDtype),            // typeI
                         eva::constant_id<SPEC_ID_TYPE_W>(wDtype),    // typeW
-                        eva::constant_id<SPEC_ID_ALIGNED>(aligned ? 1u : 0u) // aligned
+                        eva::constant_id<SPEC_ID_ALIGNED>(loadCode)          // aligned (linear-cm-nv: load-width code)
                     }, {
                         .robustBufferAccess = robust,
                     });

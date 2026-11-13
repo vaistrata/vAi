@@ -1,0 +1,407 @@
+/*=============================================================================
+ linear-cm-nv.comp: Linear / fully-connected layer, cooperative-matrix GEMM
+     (ported from the ggml/llama.cpp Vulkan mul_mm kernel, COOPMAT branch)
+
+ linear-cm.comp plus the K-tail handling NVIDIA's Fill selector relies on.
+ Linear runs it for the Fill tiles (PipeParamsTile::kTailMasked) and
+ linear-cm.comp everywhere else. Differences from linear-cm.comp, and nothing
+ else:
+  - the `aligned` spec constant is a load-width code: 1 = 8-wide, 2 = 4-wide,
+    3 = 2-wide vector loads (K % width == 0), 0 = the scalar masked path;
+  - a k-block is loaded by one of three loaders chosen per block by a
+    uniform branch: full (block + wgK <= endK, row guard only), tail (the
+    last block of a span: vectors at or past endK read zeros — a vector is
+    fully in or fully out), scalar (odd K). So K need not be a multiple of
+    wgK: the selector works on Kp (K rounded up to 64 when K % 32 != 0)
+    and the kernel masks the tail. The selector's split spans are
+    256-multiples, so a tail sits only in the last split.
+
+     O[m, n] = sum_k I[m, k] * W[n, k]
+
+     M = flattened batch, N = outDim, K = inDim
+     O [M, N], I [M, K], W [N, K] — each fp32 or fp16 via same-binding
+     buffer aliases; shared-memory staging is fp16, the accumulator dtype
+     is selected by accType.
+
+ Same workgroup frame as linear-tile.comp — one wgM x wgN tile of O,
+ marching over K in wgK-wide blocks staged through shared memory by the
+ same cooperative loaders — but the inner product runs on cooperative
+ matrices: each subgroup owns a sgM x sgN tile as a (sgM/tM) x (sgN/tN)
+ grid of tN x tM accumulators, fed by coopMatLoad from the staged tiles
+ ((tN, tM, tK) = the device coopmat (M, N, K); W rows are the coopmat A
+ rows, I rows are the coopmat B columns).
+
+ Requirements (on top of linear-tile.comp's):
+  - every subgroup is full and sgSize equals the device subgroup size —
+    subgroups are addressed by gl_SubgroupID. The host guarantees this
+    structurally (wgSize % subgroupSize == 0, no varying subgroup size);
+    REQUIRE_FULL_SUBGROUPS_BIT should back it once eva exposes the flag
+  - the subgroups exactly cover the workgroup tile: wgN % sgN == 0,
+    wgM % sgM == 0, (wgM / sgM) * (wgN / sgN) == wgSize / sgSize
+  - sgN % tN == 0, sgM % tM == 0, wgK % tK == 0, tK % 2 == 0,
+    sgSize % tN == 0, tM % (sgSize / tN) == 0 (all host-gated)
+
+ Stores go one of three ways per accumulator tile (ggml's split): whole
+ tile in bounds with a 16-byte-aligned row stride -> coopMatStore straight
+ to O; in bounds but unaligned -> unload through the cmStage scratch and
+ store per lane; tile crossing the M / N edge -> the staged path with
+ masking. cmStage is always fp32: accType is a spec constant here (ggml
+ compiles per-acc variants) and a dead shared array would still occupy its
+ shared memory, so staging in the wider type serves both.
+
+ Split-K: workgroup z owns the K span [z * splitSize, min(K, (z + 1) *
+ splitSize)) and writes its partials to P[z, M, N] on binding 0;
+ linear-reduce.comp folds the partials and applies bias / epilogue.
+
+ Dispatch (host): (ceil(N / wgN), ceil(M / wgM), ceil(K / splitSize))
+=============================================================================*/
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_control_flow_attributes : enable
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_KHR_cooperative_matrix : require
+#extension GL_KHR_memory_scope_semantics : require
+#extension GL_KHR_shader_subgroup_basic : require
+#include "common/spec_constants.h"
+
+layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;   // = wgSize (same SpecId)
+
+layout(constant_id = 0)  const uint wgSize   = 128;             // threads per workgroup (= local_size_x)
+layout(constant_id = 1)  const uint sgSize   = 32;              // device subgroup size (full subgroups required)
+layout(constant_id = 2)  const uint wgM      = 128;             // workgroup tile size along M
+layout(constant_id = 3)  const uint wgN      = 128;             // workgroup tile size along N
+layout(constant_id = 4)  const uint wgK      = 32;              // k-block size
+layout(constant_id = 5)  const uint sgM      = 64;              // subgroup tile size along M
+layout(constant_id = 6)  const uint sgN      = 64;              // subgroup tile size along N
+layout(constant_id = 7)  const uint tM       = 16;              // coopmat tile along M (= device coopmat N)
+layout(constant_id = 8)  const uint tN       = 16;              // coopmat tile along N (= device coopmat M)
+layout(constant_id = 9)  const uint tK       = 16;              // coopmat tile along K (= device coopmat K)
+layout(constant_id = 11) const uint accType  = 0;               // accumulator dtype (0: fp32, 1: fp16)
+layout(constant_id = 12) const uint robustBufferAccess  = 0;    // robust buffer access (0: disabled, 1: enabled)
+
+layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0;  // O (output) dtype
+layout(constant_id = SPEC_ID_TYPE_I) const uint typeI = 0;  // I (input) dtype
+layout(constant_id = SPEC_ID_TYPE_W) const uint typeW = 0;  // W (weight) dtype
+layout(constant_id = SPEC_ID_ALIGNED) const uint aligned = 1;  // load width code: 1 = 8-wide, 2 = 4-wide, 3 = 2-wide (the K tail is masked per k-block), 0 = scalar masked loads
+
+const uint LOAD_VEC       = (aligned == 1u) ? 8u : (aligned == 2u) ? 4u : (aligned == 3u) ? 2u : 1u;   // elements per load
+const uint LOAD_VEC_BATCH = (aligned != 0u) ? 1u : 2u;   // the scalar path loads 2 values per call
+const uint SHMEM_STRIDE = wgK / 2 + 4;    // f16vec2 slots per shmem row; +4 keeps coopMatLoad off bank conflicts
+
+const float16_t FP16_MAX = 65504.0hf;     // largest finite fp16 value
+
+// Coopmat shapes: W rows along A rows, I rows along B columns, a tN x tM accumulator patch of O.
+#define matA   coopmat<float16_t, gl_ScopeSubgroup, tN, tK, gl_MatrixUseA>
+#define matB   coopmat<float16_t, gl_ScopeSubgroup, tK, tM, gl_MatrixUseB>
+#define accT32 coopmat<float,     gl_ScopeSubgroup, tN, tM, gl_MatrixUseAccumulator>
+#define accT16 coopmat<float16_t, gl_ScopeSubgroup, tN, tM, gl_MatrixUseAccumulator>
+
+layout(set = 0, binding = 0) writeonly buffer O_BUF_F32 { float bufferO_f32[]; };
+layout(set = 0, binding = 0) writeonly buffer O_BUF_F16 { float16_t bufferO_f16[]; };
+//////////////////////////////////////////////////////////////////////////////
+layout(set = 0, binding = 1) readonly buffer I_BUF_F32  { float bufferI_f32[]; };
+layout(set = 0, binding = 1) readonly buffer I_BUF_F16  { float16_t bufferI_f16[]; };
+layout(set = 0, binding = 1) readonly buffer I_BUF_8F32 { mat2x4 bufferI_8f32[]; };
+layout(set = 0, binding = 1) readonly buffer I_BUF_8F16 { f16mat2x4 bufferI_8f16[]; };
+layout(set = 0, binding = 1) readonly buffer I_BUF_4F32 { vec4 bufferI_4f32[]; };
+layout(set = 0, binding = 1) readonly buffer I_BUF_4F16 { f16vec4 bufferI_4f16[]; };
+layout(set = 0, binding = 1) readonly buffer I_BUF_2F32 { vec2 bufferI_2f32[]; };
+layout(set = 0, binding = 1) readonly buffer I_BUF_2F16 { f16vec2 bufferI_2f16[]; };
+//////////////////////////////////////////////////////////////////////////////
+layout(set = 0, binding = 2) readonly buffer W_BUF_F32  { float bufferW_f32[]; };
+layout(set = 0, binding = 2) readonly buffer W_BUF_F16  { float16_t bufferW_f16[]; };
+layout(set = 0, binding = 2) readonly buffer W_BUF_8F32 { mat2x4 bufferW_8f32[]; };
+layout(set = 0, binding = 2) readonly buffer W_BUF_8F16 { f16mat2x4 bufferW_8f16[]; };
+layout(set = 0, binding = 2) readonly buffer W_BUF_4F32 { vec4 bufferW_4f32[]; };
+layout(set = 0, binding = 2) readonly buffer W_BUF_4F16 { f16vec4 bufferW_4f16[]; };
+layout(set = 0, binding = 2) readonly buffer W_BUF_2F32 { vec2 bufferW_2f32[]; };
+layout(set = 0, binding = 2) readonly buffer W_BUF_2F16 { f16vec2 bufferW_2f16[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint M;
+    uint N;
+    uint K;
+    uint splitSize;   // K span per workgroup-z (= K without splitting)
+};
+
+f16mat2x4 readI8(uint i8) { return (typeI == DTYPE_F32) ? f16mat2x4(bufferI_8f32[i8]) : bufferI_8f16[i8]; }
+f16mat2x4 readW8(uint i8) { return (typeW == DTYPE_F32) ? f16mat2x4(bufferW_8f32[i8]) : bufferW_8f16[i8]; }
+f16vec4   readI4(uint i4) { return (typeI == DTYPE_F32) ? f16vec4(bufferI_4f32[i4]) : bufferI_4f16[i4]; }
+f16vec4   readW4(uint i4) { return (typeW == DTYPE_F32) ? f16vec4(bufferW_4f32[i4]) : bufferW_4f16[i4]; }
+f16vec2   readI2(uint i2) { return (typeI == DTYPE_F32) ? f16vec2(bufferI_2f32[i2]) : bufferI_2f16[i2]; }
+f16vec2   readW2(uint i2) { return (typeW == DTYPE_F32) ? f16vec2(bufferW_2f32[i2]) : bufferW_2f16[i2]; }
+float16_t readI(uint i)   { return (typeI == DTYPE_F32) ? float16_t(bufferI_f32[i]) : bufferI_f16[i]; }
+float16_t readW(uint i)   { return (typeW == DTYPE_F32) ? float16_t(bufferW_f32[i]) : bufferW_f16[i]; }
+void writeO(uint i, float v) { if (typeO == DTYPE_F32) bufferO_f32[i] = v; else bufferO_f16[i] = float16_t(v); }
+
+// One k-block of W (tileA) and I (tileB) rows, staged as f16vec2 slots.
+shared f16vec2 tileA[wgN * SHMEM_STRIDE];
+shared f16vec2 tileB[wgM * SHMEM_STRIDE];
+
+// Per-subgroup fp32 scratch for the staged store paths.
+shared float cmStage[(wgSize / sgSize) * tN * tM];
+
+// Vector loaders: one LOAD_VEC-wide piece per call as LOAD_VEC / 2 f16vec2 slots; `ok` = row guard
+// (folded under robustness).
+void W_store(const uint buf_idx, const uint idx, const bool ok)
+{
+    if (LOAD_VEC == 8u)
+    {
+        f16mat2x4 aa = ok ? readW8(idx) : f16mat2x4(0.0);
+        tileA[buf_idx    ] = aa[0].xy;
+        tileA[buf_idx + 1] = aa[0].zw;
+        tileA[buf_idx + 2] = aa[1].xy;
+        tileA[buf_idx + 3] = aa[1].zw;
+    }
+    else if (LOAD_VEC == 4u)
+    {
+        f16vec4 aa = ok ? readW4(idx) : f16vec4(0.0hf);
+        tileA[buf_idx    ] = aa.xy;
+        tileA[buf_idx + 1] = aa.zw;
+    }
+    else
+        tileA[buf_idx] = ok ? readW2(idx) : f16vec2(0.0hf);
+}
+
+void I_store(const uint buf_idx, const uint idx, const bool ok)
+{
+    if (LOAD_VEC == 8u)
+    {
+        f16mat2x4 bb = ok ? readI8(idx) : f16mat2x4(0.0);
+        tileB[buf_idx    ] = bb[0].xy;
+        tileB[buf_idx + 1] = bb[0].zw;
+        tileB[buf_idx + 2] = bb[1].xy;
+        tileB[buf_idx + 3] = bb[1].zw;
+    }
+    else if (LOAD_VEC == 4u)
+    {
+        f16vec4 bb = ok ? readI4(idx) : f16vec4(0.0hf);
+        tileB[buf_idx    ] = bb.xy;
+        tileB[buf_idx + 1] = bb.zw;
+    }
+    else
+        tileB[buf_idx] = ok ? readI2(idx) : f16vec2(0.0hf);
+}
+
+// Full k-block (block + wgK <= endK): the vector path needs the row guard only.
+void W_to_tileA_full(const uint pos_a, const uint row, const uint col, const uint idx_n)
+{
+    W_store(col * SHMEM_STRIDE + row * (LOAD_VEC / 2), pos_a + col * (K / LOAD_VEC) + row,
+            robustBufferAccess != 0 || idx_n < N);
+}
+void I_to_tileB_full(const uint pos_b, const uint row, const uint col, const uint idx_m)
+{
+    I_store(col * SHMEM_STRIDE + row * (LOAD_VEC / 2), pos_b + col * (K / LOAD_VEC) + row,
+            robustBufferAccess != 0 || idx_m < M);
+}
+
+// Tail k-block: vectors at or beyond endK read zeros (K % LOAD_VEC == 0, so a vector is fully in or
+// fully out).
+void W_to_tileA_tail(const uint pos_a, const uint row, const uint col, const uint idx_n,
+                     const uint block, const uint endK)
+{
+    W_store(col * SHMEM_STRIDE + row * (LOAD_VEC / 2), pos_a + col * (K / LOAD_VEC) + row,
+            (robustBufferAccess != 0 || idx_n < N) && block + row * LOAD_VEC < endK);
+}
+void I_to_tileB_tail(const uint pos_b, const uint row, const uint col, const uint idx_m,
+                     const uint block, const uint endK)
+{
+    I_store(col * SHMEM_STRIDE + row * (LOAD_VEC / 2), pos_b + col * (K / LOAD_VEC) + row,
+            (robustBufferAccess != 0 || idx_m < M) && block + row * LOAD_VEC < endK);
+}
+
+// Scalar path (aligned == 0, odd K): 2 values per call, always guarded.
+void W_to_tileA_scalar(const uint pos_a, const uint row, const uint col, const uint idx_n,
+                       const uint block, const uint endK)
+{
+    const uint idx     = pos_a + col * K + row * 2;
+    const uint buf_idx = col * SHMEM_STRIDE + row;
+    if ((robustBufferAccess != 0 || idx_n < N) && block + row * 2 + 1 < endK)
+        tileA[buf_idx] = f16vec2(readW(idx), readW(idx + 1));
+    else if ((robustBufferAccess != 0 || idx_n < N) && block + row * 2 < endK)
+        tileA[buf_idx] = f16vec2(readW(idx), 0.0hf);
+    else
+        tileA[buf_idx] = f16vec2(0.0hf);
+}
+void I_to_tileB_scalar(const uint pos_b, const uint row, const uint col, const uint idx_m,
+                       const uint block, const uint endK)
+{
+    const uint idx     = pos_b + col * K + row * 2;
+    const uint buf_idx = col * SHMEM_STRIDE + row;
+    if ((robustBufferAccess != 0 || idx_m < M) && block + row * 2 + 1 < endK)
+        tileB[buf_idx] = f16vec2(readI(idx), readI(idx + 1));
+    else if ((robustBufferAccess != 0 || idx_m < M) && block + row * 2 < endK)
+        tileB[buf_idx] = f16vec2(readI(idx), 0.0hf);
+    else
+        tileB[buf_idx] = f16vec2(0.0hf);
+}
+
+void main()
+{
+    const uint nTile = gl_WorkGroupID.x;   // which wgN-wide slice of N this workgroup owns
+    const uint mTile = gl_WorkGroupID.y;   // which wgM-wide slice of M this workgroup owns
+
+    // Split-K: this workgroup's K span.
+    const uint startK = gl_WorkGroupID.z * splitSize;
+    const uint endK   = min(K, startK + splitSize);
+
+    // Cooperative loading (as linear-tile.comp).
+    const uint loadr      = gl_LocalInvocationID.x % (wgK / LOAD_VEC / LOAD_VEC_BATCH);
+    const uint loadc      = gl_LocalInvocationID.x / (wgK / LOAD_VEC / LOAD_VEC_BATCH);
+    const uint loadstride = wgSize * LOAD_VEC * LOAD_VEC_BATCH / wgK;
+
+    uint pos_a = nTile * wgN * (K / LOAD_VEC) + startK / LOAD_VEC;   // read cursor into W (LOAD_VEC units)
+    uint pos_b = mTile * wgM * (K / LOAD_VEC) + startK / LOAD_VEC;   // read cursor into I (LOAD_VEC units)
+
+    // Subgroup placement by gl_SubgroupID (full subgroups of the device size).
+    const uint warpIdx = gl_SubgroupID;
+    const uint sg_n = warpIdx % (wgN / sgN);   // subgroup position in the workgroup tile, along N
+    const uint sg_m = warpIdx / (wgN / sgN);   // subgroup position in the workgroup tile, along M
+
+    const uint cmsN = sgN / tN;   // coopmat tiles per subgroup tile, along N (ggml cms_per_row)
+    const uint cmsM = sgM / tM;   // coopmat tiles per subgroup tile, along M (ggml cms_per_col)
+
+    // Both accumulator dtypes are declared; the unused array vanishes at compile time.
+    accT32 sums_f32[cmsN * cmsM];
+    accT16 sums_f16[cmsN * cmsM];
+
+    [[unroll]] for (uint i = 0; i < cmsN * cmsM; i++)
+    {
+        if (accType == DTYPE_F32) sums_f32[i] = accT32(0.0);
+        else               sums_f16[i] = accT16(0.0hf);
+    }
+
+    // Per k-block: stage W and I, accumulate.
+    for (uint block = startK; block < endK; block += wgK)
+    {
+        if (aligned == 0u)
+        {
+            [[unroll]] for (uint l = 0; l < wgN; l += loadstride)
+                W_to_tileA_scalar(pos_a, loadr, loadc + l, nTile * wgN + loadc + l, block, endK);
+            [[unroll]] for (uint l = 0; l < wgM; l += loadstride)
+                I_to_tileB_scalar(pos_b, loadr, loadc + l, mTile * wgM + loadc + l, block, endK);
+        }
+        else if (block + wgK <= endK)   // uniform: a full k-block keeps the plain vector loads
+        {
+            [[unroll]] for (uint l = 0; l < wgN; l += loadstride)
+                W_to_tileA_full(pos_a, loadr, loadc + l, nTile * wgN + loadc + l);
+            [[unroll]] for (uint l = 0; l < wgM; l += loadstride)
+                I_to_tileB_full(pos_b, loadr, loadc + l, mTile * wgM + loadc + l);
+        }
+        else                            // the tail k-block: vectors past endK read zeros
+        {
+            [[unroll]] for (uint l = 0; l < wgN; l += loadstride)
+                W_to_tileA_tail(pos_a, loadr, loadc + l, nTile * wgN + loadc + l, block, endK);
+            [[unroll]] for (uint l = 0; l < wgM; l += loadstride)
+                I_to_tileB_tail(pos_b, loadr, loadc + l, mTile * wgM + loadc + l, block, endK);
+        }
+
+        barrier();
+
+        pos_a += wgK / LOAD_VEC;
+        pos_b += wgK / LOAD_VEC;
+
+        // tK-deep slices; staged offsets are f16vec2 slots (i / 2, tK even).
+        [[unroll]] for (uint i = 0; i < wgK; i += tK)
+        {
+            [[unroll]] for (uint a = 0; a < cmsN; a++)
+            {
+                matA ca;
+                coopMatLoad(ca, tileA, (sg_n * sgN + a * tN) * SHMEM_STRIDE + i / 2,
+                            SHMEM_STRIDE, gl_CooperativeMatrixLayoutRowMajor);
+
+                [[unroll]] for (uint b = 0; b < cmsM; b++)
+                {
+                    matB cb;
+                    coopMatLoad(cb, tileB, (sg_m * sgM + b * tM) * SHMEM_STRIDE + i / 2,
+                                SHMEM_STRIDE, gl_CooperativeMatrixLayoutColumnMajor);
+
+                    if (accType == DTYPE_F32) sums_f32[b * cmsN + a] = coopMatMulAdd(ca, cb, sums_f32[b * cmsN + a]);
+                    else               sums_f16[b * cmsN + a] = coopMatMulAdd(ca, cb, sums_f16[b * cmsN + a]);
+                }
+            }
+        }
+
+        barrier();
+    }
+
+    // Clamp fp16 accumulators so inf never reaches the output.
+    if (accType == DTYPE_F16)
+    {
+        [[unroll]] for (uint i = 0; i < cmsN * cmsM; i++)
+            [[unroll]] for (uint e = 0; e < sums_f16[i].length(); e++)
+                sums_f16[i][e] = clamp(sums_f16[i][e], -FP16_MAX, FP16_MAX);
+    }
+
+    // Store to O[m * N + n], or to the split's partial P[z].
+    const uint n0   = nTile * wgN + sg_n * sgN;   // this subgroup's first output along N (global)
+    const uint m0   = mTile * wgM + sg_m * sgM;   // this subgroup's first output along M (global)
+    const uint zOff = gl_WorkGroupID.z * M * N;
+
+    // Direct coopMatStore needs a 16-byte-aligned row stride and origin (tN carries the origin
+    // part).
+    const bool oAligned = (typeO == DTYPE_F32) ? (N % 4u == 0u && tN % 4u == 0u)
+                                        : (N % 8u == 0u && tN % 8u == 0u);
+
+    const uint storeStride = sgSize / tN;              // lanes striding one staged tile: sgSize = tN * storeStride
+    const uint storeR = gl_SubgroupInvocationID % tN;  // this lane's n offset within a tile
+    const uint storeC = gl_SubgroupInvocationID / tN;  // this lane's m offset within a pass
+    const uint stageBase = warpIdx * tN * tM;          // this subgroup's cmStage slice
+
+    [[unroll]] for (uint a = 0; a < cmsN; a++)
+    {
+        [[unroll]] for (uint b = 0; b < cmsM; b++)
+        {
+            const uint n = n0 + a * tN;
+            const uint m = m0 + b * tM;
+            const bool inBounds = n + tN <= N && m + tM <= M;
+
+            if (oAligned && inBounds)
+            {
+                // In bounds and aligned: straight from the accumulator (column-major, stride N).
+                if (typeO == DTYPE_F32)
+                {
+                    accT32 v;
+                    if (accType == DTYPE_F32) v = sums_f32[b * cmsN + a];
+                    else               v = accT32(sums_f16[b * cmsN + a]);
+                    coopMatStore(v, bufferO_f32, zOff + m * N + n, N, gl_CooperativeMatrixLayoutColumnMajor);
+                }
+                else
+                {
+                    accT16 v;
+                    if (accType == DTYPE_F32) v = accT16(sums_f32[b * cmsN + a]);
+                    else               v = sums_f16[b * cmsN + a];
+                    coopMatStore(v, bufferO_f16, zOff + m * N + n, N, gl_CooperativeMatrixLayoutColumnMajor);
+                }
+            }
+            else if (n < N && m < M)
+            {
+                // Staged through this subgroup's cmStage slice, then per lane, masked at the M / N
+                // edge (subgroup-scope barriers, so branching around them is legal).
+                if (accType == DTYPE_F32)
+                    coopMatStore(sums_f32[b * cmsN + a], cmStage, stageBase, tN, gl_CooperativeMatrixLayoutColumnMajor);
+                else
+                    coopMatStore(accT32(sums_f16[b * cmsN + a]), cmStage, stageBase, tN, gl_CooperativeMatrixLayoutColumnMajor);
+
+                controlBarrier(gl_ScopeSubgroup, gl_ScopeSubgroup, gl_StorageSemanticsShared, gl_SemanticsAcquireRelease);
+
+                if (inBounds)
+                {
+                    [[unroll]] for (uint c = 0; c < tM; c += storeStride)
+                        writeO(zOff + (m + c + storeC) * N + n + storeR,
+                               cmStage[stageBase + (c + storeC) * tN + storeR]);
+                }
+                else
+                {
+                    [[unroll]] for (uint c = 0; c < tM; c += storeStride)
+                        if (m + c + storeC < M && n + storeR < N)
+                            writeO(zOff + (m + c + storeC) * N + n + storeR,
+                                   cmStage[stageBase + (c + storeC) * tN + storeR]);
+                }
+
+                controlBarrier(gl_ScopeSubgroup, gl_ScopeSubgroup, gl_StorageSemanticsShared, gl_SemanticsAcquireRelease);
+            }
+        }
+    }
+}
