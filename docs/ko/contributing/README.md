@@ -230,7 +230,7 @@ const float pad = float(M) / float(CEIL_DIV(M, b) * b);   // NOLINT(bugprone-int
 | `refactor` | 동작을 유지하는 구조 변경 | `refactor(graph): extract shape helpers` |
 | `docs` | 문서 수정 | `docs: clarify build requirements` |
 | `test` | 테스트만 변경 | `test(loader): cover empty model files` |
-| `build` | 빌드와 의존성 변경 | `build: require CMake 3.16` |
+| `build` | 빌드와 의존성 변경 | `build: require CMake 3.20` |
 | `ci` | CI 변경 | `ci: add compiler checks` |
 | `style` | 동작과 무관한 서식 변경 | `style: format public headers` |
 | `chore` | 그 밖의 유지보수 | `chore: update the issue templates` |

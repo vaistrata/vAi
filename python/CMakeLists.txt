@@ -14,14 +14,8 @@ endif()
 ################################################################################
 # Toolchain — Python + nanobind
 ################################################################################
-if(CMAKE_VERSION VERSION_LESS 3.18)
-    set(DEV_MODULE Development)
-else()
-    set(DEV_MODULE Development.Module)
-endif()
-
 find_package(Python 3.9
-    COMPONENTS Interpreter ${DEV_MODULE}
+    COMPONENTS Interpreter Development.Module
     REQUIRED
 )
 

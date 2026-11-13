@@ -47,7 +47,7 @@ Issues   = "https://github.com/vaistrata/vAi/issues"
 
 [tool.scikit-build]
 minimum-version    = "0.10"
-cmake.version      = ">=3.16"
+cmake.version      = ">=3.20"
 cmake.build-type   = "Release"
 build-dir          = "build/{wheel_tag}"
 wheel.packages     = ["python/pyvai"]

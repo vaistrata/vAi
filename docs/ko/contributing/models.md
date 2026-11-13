@@ -227,7 +227,7 @@ CPU에서 매 호출 갱신할 값은 모델의 실행 메서드에서 처리합
 다음은 [GPT-2 빌드 구성](../../../models/production/gpt2/CMakeLists.txt)입니다.
 
 ```cmake
-cmake_minimum_required(VERSION 3.16)
+cmake_minimum_required(VERSION 3.20)
 
 project(demo-gpt2)
 

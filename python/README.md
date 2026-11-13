@@ -29,7 +29,7 @@ No PyPI release, build from source.
 
 - **Runtime**: a GPU driver that supports Vulkan 1.3 or newer (the API version the engine asks for)
 - **Vulkan SDK**: 1.3.x or newer, for the headers, the loader and `glslc`, which compiles the shaders
-- **Toolchain**: CMake ≥ 3.16, Ninja, a C++23 compiler (GCC 14 or newer: the core uses deducing `this`)
+- **Toolchain**: CMake ≥ 3.20, Ninja, a C++23 compiler (GCC 14 or newer: the core uses deducing `this`)
 
 **Python**: 3.9 – 3.14. pip supplies the packages:
 
