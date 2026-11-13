@@ -1,5 +1,5 @@
-#ifndef VAI_GRAPH_CONTROLLER_H
-#define VAI_GRAPH_CONTROLLER_H
+#ifndef VAI_ENGINE_GRAPH_CONTROLLER_H
+#define VAI_ENGINE_GRAPH_CONTROLLER_H
 
 #include "vai/nodes/gate.h"
 #include <vector>
@@ -280,4 +280,4 @@ inline bool GraphController::fanInIsGateMergeOnly() const
 
 } // namespace vai
 
-#endif // VAI_GRAPH_CONTROLLER_H
+#endif   // VAI_ENGINE_GRAPH_CONTROLLER_H

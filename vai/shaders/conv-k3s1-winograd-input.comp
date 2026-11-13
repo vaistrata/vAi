@@ -5,7 +5,8 @@
   Output: 4×4
  typeW selects transform precision; typeI selects input storage.
  Bindings: O=0, I=1.
- Dispatch covers pc.ci*Winograd tiles.
+ Dispatch covers pc.ci*Winograd tiles in x, z=pc.batch images.
+ Per image, O holds 36 * pc.ci * storage tiles.
  Push constants: PushConstants.
 =============================================================================*/
 #version 450
@@ -38,12 +39,19 @@ layout(push_constant) uniform PushConstants {
     uint splitCount;
     uint kernel;
     uint stride;
+    uint batch;             // images, stacked on the dispatch z axis
 } pc;
+
+#include "common/conv_batch.h"
 
 const float16_t H2 = float16_t(2.0);
 const float16_t H4 = float16_t(4.0);
 const float16_t H5 = float16_t(5.0);
 const uint WINOGRAD_SIZE = 6u;
+
+// The workgroup's image within I and within the transformed O.
+uint imageInputBase = 0u;
+uint imageTransformedBase = 0u;
 
 uint transformedIndex(
     uint transform,
@@ -67,7 +75,7 @@ void writeTransformed(
     uint transform, uint ci, uint numTiles,
     uint c, uint tileIdx, float value)
 {
-    bufferO_f32[
+    bufferO_f32[imageTransformedBase +
         transformedIndex(transform, ci, numTiles, c, tileIdx)] = value;
 }
 
@@ -75,7 +83,7 @@ void writeTransformed(
     uint transform, uint ci, uint numTiles,
     uint c, uint tileIdx, float16_t value)
 {
-    bufferO_f16[
+    bufferO_f16[imageTransformedBase +
         transformedIndex(transform, ci, numTiles, c, tileIdx)] = value;
 }
 
@@ -84,7 +92,7 @@ float readInputF(int h, int w, uint c, uint hi, uint wi)
     if (uint(h) >= hi || uint(w) >= wi)
         return 0.0;
 
-    uint index = (c * hi + uint(h)) * wi + uint(w);
+    uint index = imageInputBase + (c * hi + uint(h)) * wi + uint(w);
     return typeI == DTYPE_F32
         ? bufferI_f32[index]
         : float(bufferI_f16[index]);
@@ -95,7 +103,7 @@ float16_t readInputH(int h, int w, uint c, uint hi, uint wi)
     if (uint(h) >= hi || uint(w) >= wi)
         return float16_t(0.0);
 
-    uint index = (c * hi + uint(h)) * wi + uint(w);
+    uint index = imageInputBase + (c * hi + uint(h)) * wi + uint(w);
     return typeI == DTYPE_F32
         ? float16_t(bufferI_f32[index])
         : bufferI_f16[index];
@@ -280,6 +288,10 @@ void main()
     uint idx = gl_GlobalInvocationID.x;
     if (idx >= pc.ci * storageTiles)
         return;
+
+    const uint image = convImage(pc.batch);
+    imageInputBase = image * pc.ci * pc.hi * pc.wi;
+    imageTransformedBase = image * 36u * pc.ci * storageTiles;
 
     uint c = idx / storageTiles;
     uint tileIdx = idx % storageTiles;

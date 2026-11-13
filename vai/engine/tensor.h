@@ -1,5 +1,5 @@
-#ifndef TENSOR_H
-#define TENSOR_H
+#ifndef VAI_ENGINE_TENSOR_H
+#define VAI_ENGINE_TENSOR_H
 
 
 #include "error.h"
@@ -119,15 +119,6 @@ class Tensor
     std::vector<uint32_t> shape_;
     uint32_t baseOffset_ = 0;   // in elements, not bytes; != 0 means this is a slice()
 
-    void bindBuffer(vai::PooledBuffer buf, uint32_t baseOffset = 0)
-    {
-        VAI_ASSERT(data_ && baseOffset_ == 0);
-        data_->buffer_.release();
-        data_->buffer_ = std::move(buf);
-        baseOffset_ = baseOffset;
-        VAI_ASSERT(!data_->buffer_ || byteOffset() + numBytes() <= data_->buffer_.buffer.size());
-    }
-
     bool hostUploaded() const { return data_ && data_->hostUploaded_; }
     void markHostUploaded() { VAI_ASSERT(data_); data_->hostUploaded_ = true; }
 
@@ -150,6 +141,15 @@ public:
     Tensor(Tensor&&) = default;
     Tensor& operator=(const Tensor&) = default;
     Tensor& operator=(Tensor&&) = default;
+
+    void bindBuffer(vai::PooledBuffer buf, uint32_t baseOffset = 0)
+    {
+        VAI_ASSERT(data_ && baseOffset_ == 0);
+        data_->buffer_.release();
+        data_->buffer_ = std::move(buf);
+        baseOffset_ = baseOffset;
+        VAI_ASSERT(!data_->buffer_ || byteOffset() + numBytes() <= data_->buffer_.buffer.size());
+    }
 
     // Ingest float data, converting fp32 -> this tensor's dtype.
     Tensor& setFloats(const std::vector<float>& inData);
@@ -463,4 +463,4 @@ inline Tensor Tensor::concat(const Ts&... others) const
 
 } // namespace vai
 
-#endif // TENSOR_H
+#endif   // VAI_ENGINE_TENSOR_H

@@ -3,30 +3,32 @@
 vAi로 구현한 모델들입니다.
 
 ```
-models/<model>/
-├── model.h                      모델 정의 및 NodeGroup 정의
+models/<impl>/<model>/
+├── net.h                        모델 정의 및 NodeGroup 정의
 ├── <배포명>-weights.h             배포 체크포인트 → 그래프 슬롯 매핑 (loadWeights<"배포명">)
 ├── nodes/                        모델 전용 노드 (있는 경우)
-└── shaders/                      전용 노드의 커널 (있는 경우)
-
-examples/<model>/
+├── shaders/                      전용 노드의 커널 (있는 경우)
 ├── demo.cpp                      demo-<model> - 모델 추론 및 추론 시간 측정
 └── CMakeLists.txt
 
-data/<model>/                     체크포인트 및 관련 데이터
+data/ckpts/<model>/<배포명>/      체크포인트
+data/tokenizers/<model>/          토크나이저
+data/images/                      입력 이미지
 ```
 
 ## 가중치 로딩
 
 ```cpp
 // GPT-2 예시
-#include "model.h"
+#include "net.h"
 #include "openai-weights.h"
 
-gpt2::Model model({ .device = device, .defaultDtype = Dtype::Fp16 },
-                  gpt2::ModelConfig::_124M());
+namespace gpt2 = model::production::gpt2;
 
-loadWeights<"openai">(model);
+gpt2::Net net({ .device = device, .defaultDtype = Dtype::Fp16 },
+              gpt2::ModelConfig::_124M());
+
+loadWeights<"openai">(net);
 ```
 
 [`vai/engine/weights.h`](../../../vai/engine/weights.h)가 `loadWeights<Name, Model>`를 선언만 해두고 각 모델이 배포명별 특수화를 제공합니다.

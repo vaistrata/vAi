@@ -7,7 +7,7 @@
      O[m, n] = s * epilogue( sum_z P[z, m, n] + B[m, n] + R[m, n] )    residualOrder 1
 
      P [splitCount, M, N] partial sums and O [M, N] are typeO. The bias B
-     (typeW) is [N] or [M, N]; the residual R (typeO)
+     (typeB) is [N] or [M, N]; the residual R (typeO)
      is [M, N]. A [M, N] operand may be shorter rows that repeat over M
      (biasElems / residualElems). Each invocation folds four consecutive
      elements; the vec4 path needs the four in bounds and in one row of every
@@ -30,7 +30,7 @@ layout(constant_id = 2) const uint hasResidual = 0;    // 1: residual[M, N]
 layout(constant_id = 3) const uint residualElems = 0;  // 0: the residual covers O; else it repeats
 layout(constant_id = 4) const uint residualOrder = 0;  // 0: after the epilogue, 1: before it
 layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0;  // O, P and residual dtype
-layout(constant_id = SPEC_ID_TYPE_W) const uint typeW = 0;  // bias dtype
+layout(constant_id = 5) const uint typeB = 0;          // bias dtype
 
 layout(set = 0, binding = 0) writeonly buffer O_BUF_F32  { float bufferO_f32[]; };
 layout(set = 0, binding = 0) writeonly buffer O_BUF_F16  { float16_t bufferO_f16[]; };
@@ -65,8 +65,8 @@ vec4  readP4(uint i4)    { return (typeO == DTYPE_F32) ? bufferP_4f32[i4] : vec4
 uint biasIdx(uint i)     { return (biasElems == 0u) ? i : i % biasElems; }
 uint residualIdx(uint i) { return (residualElems == 0u) ? i : i % residualElems; }
 
-float readBias(uint i)   { return (hasBias == 0u) ? 0.0 : ((typeW == DTYPE_F32) ? bufferBias_f32[biasIdx(i)] : float(bufferBias_f16[biasIdx(i)])); }
-vec4  readBias4(uint i)  { return (hasBias == 0u) ? vec4(0.0) : ((typeW == DTYPE_F32) ? bufferBias_4f32[biasIdx(i) / 4] : vec4(bufferBias_4f16[biasIdx(i) / 4])); }
+float readBias(uint i)   { return (hasBias == 0u) ? 0.0 : ((typeB == DTYPE_F32) ? bufferBias_f32[biasIdx(i)] : float(bufferBias_f16[biasIdx(i)])); }
+vec4  readBias4(uint i)  { return (hasBias == 0u) ? vec4(0.0) : ((typeB == DTYPE_F32) ? bufferBias_4f32[biasIdx(i) / 4] : vec4(bufferBias_4f16[biasIdx(i) / 4])); }
 float readR(uint i)      { return (hasResidual == 0u) ? 0.0 : ((typeO == DTYPE_F32) ? bufferR_f32[residualIdx(i)] : float(bufferR_f16[residualIdx(i)])); }
 vec4  readR4(uint i)     { return (hasResidual == 0u) ? vec4(0.0) : ((typeO == DTYPE_F32) ? bufferR_4f32[residualIdx(i) / 4] : vec4(bufferR_4f16[residualIdx(i) / 4])); }
 void writeO(uint i, float v)   { if (typeO == DTYPE_F32) bufferO_f32[i] = v; else bufferO_f16[i] = float16_t(v); }

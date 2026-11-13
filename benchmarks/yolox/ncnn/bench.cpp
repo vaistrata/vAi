@@ -15,11 +15,11 @@
 #include <vector>
 
 #if !NCNN_VULKAN
-#error "bench-yolox-ncnn requires an ncnn build with Vulkan enabled"
+    #error "bench-yolox-ncnn requires an ncnn build with Vulkan enabled"
 #endif
 
 #ifndef YOLOX_WEIGHTS_DIR
-#define YOLOX_WEIGHTS_DIR ""
+    #define YOLOX_WEIGHTS_DIR ""
 #endif
 
 namespace {

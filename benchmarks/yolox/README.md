@@ -5,9 +5,9 @@
 Runs YOLOX under vAI and six other runtimes on the same GPU and compares inference latency.
 
 - Checkpoint: one official Megvii YOLOX checkpoint for every runtime. PyTorch reads the `.pth`; the other runtimes use files [converted](#model-preparation) from it.
-- Conditions: batch 1, 640x640, `data/yolox/dog.jpg` letterboxed into the input tensor, and the timed stretch ends at a decoded `[1, 8400, 85]` output. Warmup and repetition counts follow the [shared conditions](../README.md#shared-conditions-vision-frameworks).
+- Conditions: batch 1, 640x640, `data/images/dog.jpg` letterboxed into the input tensor, and the timed stretch ends at a decoded `[1, 8400, 85]` output. Warmup and repetition counts follow the [shared conditions](../README.md#shared-conditions-vision-frameworks).
 
-| framework | file (`data/yolox/`) |
+| framework | file (`data/benchmarks/yolox/`) |
 |---|---|
 | vAI | `yolox_<size>.safetensors` |
 | PyTorch | `yolox_<size>.pth` |
@@ -19,16 +19,16 @@ Runs YOLOX under vAI and six other runtimes on the same GPU and compares inferen
 
 ## Model preparation
 
-Begin once the YOLOX checkpoint (`data/yolox/yolox_l.pth`) is in place. Convert it along the routes in [Model conversion](../README.md#model-conversion). ncnn needs `pnnx` on `PATH`, ExecuTorch needs `vulkaninfo` on `PATH`, and FP16 ONNX export needs the Python `onnxruntime` package. 
+Begin once the YOLOX checkpoint (`data/benchmarks/yolox/yolox_l.pth`) is in place. Convert it along the routes in [Model conversion](../README.md#model-conversion). ncnn needs `pnnx` on `PATH`, ExecuTorch needs `vulkaninfo` on `PATH`, and FP16 ONNX export needs the Python `onnxruntime` package. 
 
-Run them from the repository root; they build the Large FP32 and FP16 files into `data/yolox/` as `yolox_l.*`. Swap `l` for another model size (`s` `m` `x`) to measure a different size. The vAi benchmark needs only the `.safetensors` file. The other conversions are for the comparison benchmarks.
+Run them from the repository root; they build the Large FP32 and FP16 files into `data/benchmarks/yolox/` as `yolox_l.*`. Swap `l` for another model size (`s` `m` `x`) to measure a different size. The vAi benchmark needs only the `.safetensors` file. The other conversions are for the comparison benchmarks.
 
 Export scripts accept multiple model sizes with `--sizes s l` to convert Small and Large in one invocation.
 
 **vAI**: the `.pth` into `.safetensors`, shared by FP32 and FP16
 
 ```bash
-python models/yolox/megvii-weights-convertor.py l
+python models/experimental/yolox/megvii-weights-convertor.py l
 ```
 
 **ONNX Runtime · MIGraphX**: the `.pth` into one `.onnx` per precision
@@ -57,10 +57,10 @@ python benchmarks/yolox/executorch/export.py --sizes l --precision fp16 --gpu 0
 **TensorRT**: each ONNX into an `.engine`
 
 ```bash
-trtexec --onnx=data/yolox/yolox_l.fp32.onnx --noTF32 --skipInference \
-  --saveEngine=data/yolox/yolox_l.fp32.tf32_off.engine
-trtexec --onnx=data/yolox/yolox_l.fp16.onnx --fp16 --skipInference \
-  --saveEngine=data/yolox/yolox_l.fp16.engine
+trtexec --onnx=data/benchmarks/yolox/yolox_l.fp32.onnx --noTF32 --skipInference \
+  --saveEngine=data/benchmarks/yolox/yolox_l.fp32.tf32_off.engine
+trtexec --onnx=data/benchmarks/yolox/yolox_l.fp16.onnx --fp16 --skipInference \
+  --saveEngine=data/benchmarks/yolox/yolox_l.fp16.engine
 ```
 
 ## Building and running
@@ -80,14 +80,14 @@ build/bin/bench-yolox-onnxruntime
 
 A bench whose runtime CMake cannot find is [left out of the build](../README.md#model-files).
 
-*With no arguments a bench takes `data/yolox/dog.jpg` as input and runs YOLOX Large · FP32 on GPU 0. PyTorch and ONNX Runtime use the CUDA backend by default.*
+*With no arguments a bench takes `data/images/dog.jpg` as input and runs YOLOX Large · FP32 on GPU 0. PyTorch and ONNX Runtime use the CUDA backend by default.*
 
 Options:
 
 - `--size s|m|l|x`: model size (default: `l`)
 - `--precision fp32|fp16`: model precision (default: `fp32`)
 - `--warmup N`, `--iterations N`: warmup and timed run counts (default: `1000`, `100`)
-- `--image PATH`: input image (default: `data/yolox/dog.jpg`)
+- `--image PATH`: input image (default: `data/images/dog.jpg`)
 - `--gpu N`: GPU index (default: `0`)
 - `--backend cuda|rocm`: backend for PyTorch and ONNX Runtime (default: `cuda`). The PyTorch bench also takes `cpu`, at FP32 only
 - `--IO fp32|fp16`: vAI input/output precision (default: `fp32`)

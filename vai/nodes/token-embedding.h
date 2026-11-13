@@ -2,7 +2,7 @@
 #define VAI_NODES_TOKEN_EMBEDDING_H
 
 // Token (+ optional positional) embedding lookup.
-#include "vai/nodes/node-common.h"
+#include "node-common.h"
 
 namespace vai::node {
 
@@ -41,8 +41,6 @@ public:
         uint32_t embedDim;
         uint32_t posTableSize = 0;          // learned positional table rows; 0 = token only
         float scale = 1.0f;                 // multiplies the looked-up embedding
-        vai::Dtype wDtype = vai::Dtype::None;
-        vai::Dtype oDtype = vai::Dtype::None;   // None: oDefaultDtype
     } config_;
 
     TokenEmbedding(Config config);
@@ -63,25 +61,23 @@ inline TokenEmbedding::TokenEmbedding(Config config)
     addSlot("out0", NodeSlot::output);
     addSlot("in0",  NodeSlot::input);
     addSlot("weight", NodeSlot::persistent);
-    if (config_.posTableSize) addSlot("posWeight", NodeSlot::persistent);
-
-    config_.wDtype = (config_.wDtype == Dtype::None) ? wDefaultDtype() : config_.wDtype;
-    config_.oDtype = (config_.oDtype == Dtype::None) ? oDefaultDtype() : config_.oDtype;
+    if (config_.posTableSize)
+        addSlot("posWeight", NodeSlot::persistent);
 }
 
 inline void TokenEmbedding::prepare()
 {
+    const Dtype oDtype = (oDtype_ == Dtype::None) ? oDefaultDtype() : oDtype_;
     const Tensor& inTen   = (*this)["in0"];
     const Tensor& wTen = (*this)["weight"];
 
     VAI_ASSERT(inTen.validShape());
-    VAI_ASSERT(wTen.dtype() == config_.wDtype);
     VAI_ASSERT(wTen.isShapeOf(config_.vocabSize, config_.embedDim));
 
     if (config_.posTableSize)
     {
         const Tensor& posWTen = (*this)["posWeight"];
-        VAI_ASSERT(posWTen.dtype() == config_.wDtype);
+        VAI_ASSERT(posWTen.dtype() == wTen.dtype());
         VAI_ASSERT(posWTen.isShapeOf(config_.posTableSize, config_.embedDim));
     }
 
@@ -89,7 +85,7 @@ inline void TokenEmbedding::prepare()
     const uint32_t seqCount = outerSize(inShape);
     std::vector<uint32_t> outShape = inShape;
     outShape.push_back(config_.embedDim);
-    (*this)["out0"] = Tensor(std::move(outShape), config_.oDtype);
+    (*this)["out0"] = Tensor(std::move(outShape), oDtype);
 
     // Only more than one sequence makes a position wrap. The flag is baked in, so
     // a lone sequence runs the kernel it always did.
@@ -97,12 +93,14 @@ inline void TokenEmbedding::prepare()
     if (!pipe || p != pipeParams)
     {
         pipeParams = p;
+        // clang-format off
         pipe = pipelinePool().request("token-embedding", {
             eva::constant_id<0>(config_.posTableSize ? 1u : 0u),   // hasPosEmbed
             eva::constant_id<1>(p.batched ? 1u : 0u),              // batched
-            eva::constant_id<SPEC_ID_TYPE_O>(config_.oDtype),      // typeO
-            eva::constant_id<SPEC_ID_TYPE_W>(config_.wDtype)       // typeW (W & posW)
+            eva::constant_id<SPEC_ID_TYPE_O>(oDtype),      // typeO
+            eva::constant_id<SPEC_ID_TYPE_W>(wTen.dtype())         // typeW (W & posW)
         });
+        // clang-format on
         if (!descSet)
             descSet = gVaiDestSetPool(pipe.descSetLayout(0));
     }

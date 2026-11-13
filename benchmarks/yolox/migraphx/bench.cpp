@@ -4,7 +4,7 @@
 #include <migraphx/migraphx.hpp>
 
 #if defined(VAI_YOLOX_HAVE_HIP_RUNTIME)
-#include <hip/hip_runtime_api.h>
+    #include <hip/hip_runtime_api.h>
 #endif
 
 #include <cstdlib>
@@ -18,11 +18,11 @@
 #include <vector>
 
 #ifndef MIGRAPHX_GPU_HIP_FLAGS_DEFAULT
-#define MIGRAPHX_GPU_HIP_FLAGS_DEFAULT ""
+    #define MIGRAPHX_GPU_HIP_FLAGS_DEFAULT ""
 #endif
 
 #ifndef YOLOX_WEIGHTS_DIR
-#define YOLOX_WEIGHTS_DIR ""
+    #define YOLOX_WEIGHTS_DIR ""
 #endif
 
 namespace {

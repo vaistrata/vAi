@@ -1,7 +1,7 @@
 #ifndef VAI_NODES_ROPE_H
 #define VAI_NODES_ROPE_H
 
-#include "vai/nodes/node-common.h"
+#include "node-common.h"
 
 namespace vai::node {
 
@@ -37,8 +37,7 @@ public:
 
     struct Config {
         RopeConfig cfg;         // frequencies; describe the whole model
-        uint32_t   headDim;     // Dh, must be even
-        vai::Dtype oDtype = vai::Dtype::None;   // None: oDefaultDtype
+        uint32_t headDim;       // Dh, must be even
     } config_;
 
     Rope(Config config);
@@ -92,13 +91,12 @@ inline Rope::Rope(Config config)
             freqData[d] = freq;
         }
     }
-    (*this)["freqs"] = Tensor({halfDh}, Dtype::Fp32).setFloats(std::move(freqData));
-
-    config_.oDtype = (config_.oDtype == Dtype::None) ? oDefaultDtype() : config_.oDtype;
+    (*this)["freqs"] = Tensor({ halfDh }, Dtype::Fp32).setFloats(std::move(freqData));
 }
 
 inline void Rope::prepare()
 {
+    const Dtype oDtype = (oDtype_ == Dtype::None) ? oDefaultDtype() : oDtype_;
     const Tensor& inTen = (*this)["in0"];
 
     const Dtype iDtype = inTen.dtype();
@@ -107,10 +105,12 @@ inline void Rope::prepare()
     if (!pipe || p != pipeParams)
     {
         pipeParams = p;
+        // clang-format off
         pipe = pipelinePool().request("rope", {
-            eva::constant_id<SPEC_ID_TYPE_O>(config_.oDtype),   // typeO
+            eva::constant_id<SPEC_ID_TYPE_O>(oDtype),   // typeO
             eva::constant_id<SPEC_ID_TYPE_I>(iDtype)            // typeI
         });
+        // clang-format on
         if (!descSet)
             descSet = gVaiDestSetPool(pipe.descSetLayout(0));
     }
@@ -118,7 +118,7 @@ inline void Rope::prepare()
     VAI_ASSERT(inTen.shape().size() >= 3);
     VAI_ASSERT(inTen.shape().back() == config_.headDim);
 
-    (*this)["out0"] = Tensor(inTen.shape(), config_.oDtype);
+    (*this)["out0"] = Tensor(inTen.shape(), oDtype);
 }
 
 inline void Rope::run(eva::CommandBuffer cmdBuff)

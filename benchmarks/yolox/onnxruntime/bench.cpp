@@ -3,12 +3,12 @@
 #include "onnxruntime_cxx_api.h"
 
 #if defined(VAI_YOLOX_HAVE_CUDA_RUNTIME)
-#include <cuda_runtime_api.h>
+    #include <cuda_runtime_api.h>
 #endif
 
 
 #if defined(_WIN32)
-#include <windows.h>
+    #include <windows.h>
 #endif
 
 #include <cstdlib>
@@ -22,7 +22,7 @@
 #include <vector>
 
 #ifndef YOLOX_WEIGHTS_DIR
-#define YOLOX_WEIGHTS_DIR ""
+    #define YOLOX_WEIGHTS_DIR ""
 #endif
 
 namespace {
@@ -515,7 +515,7 @@ public:
 };
 
 #ifndef ONNX_MIGRAPHX_GPU_HIP_FLAGS
-#define ONNX_MIGRAPHX_GPU_HIP_FLAGS ""
+    #define ONNX_MIGRAPHX_GPU_HIP_FLAGS ""
 #endif
 
 OnnxEp parseBackend(const std::string& value)

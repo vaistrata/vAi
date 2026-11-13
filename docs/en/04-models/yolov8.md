@@ -2,14 +2,16 @@
 
 YOLOv8 (Ultralytics, 2023) is a single-pass object detection model. It consists of a CSPDarknet backbone, a PANet neck, and an anchor-free detection head based on DFL (Distribution Focal Loss), and produces boxes and class probabilities at three scales (strides 8, 16, and 32). It uses a COCO 80-class checkpoint.
 
-**References**: [Repository](https://github.com/ultralytics/ultralytics), [Checkpoint (HuggingFace)](https://huggingface.co/Ultralytics/YOLOv8), [Documentation](https://docs.ultralytics.com/models/yolov8/)
+**References**: [Repository](https://github.com/ultralytics/ultralytics), [Checkpoint (HuggingFace)](https://huggingface.co/Ultralytics/YOLOv8), [Documentation](https://docs.ultralytics.com/models/production/yolov8/)
 
 ## Configuration
 
 ```cpp
+namespace yolov8 = model::internal::yolov8;
+
 auto cfg = yolov8::getConfigCOCO(yolov8::Tier::LARGE);
 
-yolov8::Model model({
+yolov8::Net net({
     .device       = device,
     .defaultDtype = Dtype::Fp16,
 }, cfg, {
@@ -55,7 +57,7 @@ This contains the input resolution and post-processing thresholds. A value of 64
 In vAi, the model is a DAG created by connecting nodes with `-`. See the [Node](../03-usage/node.md) and [NodeGroup](../03-usage/node-group.md) documentation for details.
 
 The built-in [`Convolution`](../06-nodes.md#convolution) handles every `conv` in the detection backbone.
-The weight loader computes BN `scale` and `bias` on the CPU. The node uses `hasScale`, `hasBias`, and SiLU and selects the Winograd, implicit GEMM, or GEMM
+The weight loader computes BN `scale` and `bias` on the CPU and fills those slots. The node uses the filled slots and SiLU and selects the Winograd, implicit GEMM, or GEMM
 path according to the kernel shape. The only dedicated nodes left in the model folder are the set of operations specific to YOLO.
 
 *`H` and `W`: input resolution, `N`: total number of anchors across all scales (8,400 for 640x640).*
@@ -74,7 +76,7 @@ detector - output("out0");           // [4 + numClasses, N]
 ```
 
 The output is a raw tensor of shape `[84, 8400]` (4 rows of boxes + 80 rows of per-class probabilities). NMS runs outside the GPU
-during post-processing ([`examples/yolov8/processing.h`](../../../examples/yolov8/processing.h)).
+during post-processing ([`models/internal/yolov8/processing.h`](../../../models/internal/yolov8/processing.h)).
 It has the same shape as the YOLOv8 output from the comparison frameworks (ncnn, ONNX Runtime, and the rest), so the benches share one post-processing path.
 
 ### NodeGroup
@@ -84,11 +86,11 @@ These [NodeGroups](../03-usage/node-group.md) are defined to implement YOLOv8. `
 
 #### Bottleneck
 
-This is a residual block that connects two 3x3 `conv` operations. When `shortcut` is disabled, data passes through without a residual connection.
+This is a residual block that connects two 3x3 `conv` operations. With `shortcut` enabled, `conv2` adds the input as its `residual`; when disabled, data passes through without a residual connection.
 
 ```cpp
-input - conv1 - conv2 - "in0"/add;
-input                 - "in1"/add;
+input - conv1 - conv2;
+input - "residual"/conv2;   // shortcut only
 ```
 
 #### C2fModule
@@ -105,7 +107,7 @@ concat - convOut;
 
 #### SPPFModule
 
-This is Spatial Pyramid Pooling Fast. Three-stage max pooling and concat are processed by a single kernel in the dedicated `SPPFNode`.
+This is Spatial Pyramid Pooling Fast. Three-stage max pooling and concat are processed by a single kernel in the dedicated `node::SPPF`.
 
 ```cpp
 convIn - sppf - convOut;
@@ -118,17 +120,17 @@ convIn - sppf - convOut;
 | `Backbone` | CSPDarknet: one stride-2 `conv` (`p1`), followed by four stages of (stride-2 `conv` + `C2f`) (`p2` through `p5`), ending with SPPF | `in0` -> `out_p3`, `out_p4`, `out_p5` |
 | `Neck` | PANet: a top-down FPN ([`NearestUpsample`](../06-nodes.md#nearestupsample) + concat + `C2f`), followed by a bottom-up PAN (stride-2 `conv` + concat + `C2f`) | `in_p3..5` -> `out_p3..5` |
 | `Head` | Two branches, `reg` and `cls`, per scale (two 3x3 `conv` operations + 1x1 `pred`), flattened per scale and output unchanged | `in_p3..5` -> `reg_p3..5` `[4·regMax, Nₚ]`, `cls_p3..5` `[numClasses, Nₚ]` |
-| `DetectionDecoder` | Decodes the regression and class outputs from three scales with a single `DecodeNode` kernel (DFL -> pixel boxes, `cls` -> `sigmoid`) | `reg_p3..5`, `cls_p3..5` -> `out0` `[4 + numClasses, N]` |
+| `DetectionDecoder` | Decodes the regression and class outputs from three scales with a single `node::Decode` kernel (DFL -> pixel boxes, `cls` -> `sigmoid`) | `reg_p3..5`, `cls_p3..5` -> `out0` `[4 + numClasses, N]` |
 
 ### Dedicated nodes
 
-These operations are specific to YOLO. They are located in [`models/yolov8/nodes/`](../../../models/yolov8/nodes/) and
-[`shaders/`](../../../models/yolov8/shaders/).
+These operations are specific to YOLO. They are located in [`models/internal/yolov8/nodes/`](../../../models/internal/yolov8/nodes/) and
+[`shaders/`](../../../models/internal/yolov8/shaders/).
 
 | Node | Description | Kernel |
 |---|---|---|
-| `SPPFNode` | 3-stage max pooling and concat in a single kernel | `sppf.comp` |
-| `DecodeNode` | Decodes the DFL regression and class output to `[4 + numClasses, N]` | `decode.comp` |
+| `node::SPPF` | 3-stage max pooling and concat in a single kernel | `sppf.comp` |
+| `node::Decode` | Decodes the DFL regression and class output to `[4 + numClasses, N]` | `decode.comp` |
 
 ### Nodes used
 
@@ -142,46 +144,49 @@ These operations are specific to YOLO. They are located in [`models/yolov8/nodes
 
 ## Checkpoint
 
-One checkpoint file for each `tier` is placed directly under `data/yolov8/`. There are no shared files such as a tokenizer,
-and the demo input image is in the same location.
+Each `tier` has its own folder under `data/ckpts/yolov8/ultralytics/`. There are no shared files such as a tokenizer,
+and the demo input image is in `data/images/`.
 
 ```
-data/yolov8/
-├── dog.jpg                     demo input
-├── yolov8l.pt                  Ultralytics original (only the downloaded tier is required)
-├── yolov8l.safetensors         conversion result: file read by the loader
-└── ...
+data/
+├── ckpts/yolov8/ultralytics/
+│   ├── large/
+│   │   ├── model.pt              Ultralytics original (only the downloaded tier is required)
+│   │   └── model.safetensors     conversion result: file read by the loader
+│   └── ...
+└── images/
+    └── dog.jpg                   demo input
 ```
 
 Ultralytics distributes `.pt` files rather than safetensors, so unlike the other models, they must be converted once after downloading.
 The weights are licensed under [AGPL-3.0](https://github.com/ultralytics/ultralytics/blob/main/LICENSE).
 
 1. Download the file from [huggingface.co/Ultralytics/YOLOv8](https://huggingface.co/Ultralytics/YOLOv8) and place it at
-`data/yolov8/yolov8<n|s|m|l|x>.pt`.
+`data/ckpts/yolov8/ultralytics/<nano|small|medium|large|xlarge>/model.pt`.
 
 2. Convert it. The `.pt` file stores the entire module rather than a state dict, so the `ultralytics` package is required
 for unpickling.
 
 ```bash
 pip install ultralytics safetensors
-python models/yolov8/ultralytics-weights-convertor.py        # all files present
-python models/yolov8/ultralytics-weights-convertor.py n l    # specify tiers
+python models/internal/yolov8/ultralytics-weights-convertor.py        # all files present
+python models/internal/yolov8/ultralytics-weights-convertor.py nano large    # specify tiers
 ```
 
-This creates `data/yolov8/yolov8<tier>.safetensors` in the same location.
+This creates `model.safetensors` next to each `model.pt`.
 
 ### Weight loading
 
-The code that maps checkpoints to graph slots is in [`models/yolov8/ultralytics-weights.h`](../../../models/yolov8/ultralytics-weights.h).
+The code that maps checkpoints to graph slots is in [`models/internal/yolov8/ultralytics-weights.h`](../../../models/internal/yolov8/ultralytics-weights.h).
 Only one line is needed at the call site.
 
 ```cpp
-loadWeights<"ultralytics">(model);
+loadWeights<"ultralytics">(net);
 ```
 
 The path is assembled by the specialization from `model.cfg.tier` (`VAI_DATA_DIR "/yolov8/yolov8" + <tier character>`), so the caller
 only needs to set the `tier`. For how distribution-name tags work, see [`distribution-name-weights.h` in Writing custom models](../05-contributing-models.md#distribution-name-weightsh). Mapping Ultralytics `model.<n>` index keys to the `backbone`, `neck`, and `head` members is the core of the loader.
-Both the `conv` weights and `BN` parameters (`gamma`, `beta`, `running mean`/`var`) are read as the node's `wDtype`.
+Both the `conv` weights and `BN` parameters (`gamma`, `beta`, `running mean`/`var`) are read at the net's `wDefaultDtype`.
 The weight loader computes BN `scale` and `bias` before passing them to `Convolution`.
 
 ## Execution
@@ -189,35 +194,35 @@ The weight loader computes BN `scale` and `bias` before passing them to `Convolu
 ### Folder structure
 
 ```
-models/yolov8/
-├── model.h                           model and NodeGroup definitions
+models/internal/yolov8/
+├── net.h                             model and NodeGroup definitions
 ├── nodes/                            dedicated nodes (SPPF, Decode)
 ├── shaders/                          kernels for the dedicated nodes
 ├── ultralytics-weights.h             Ultralytics checkpoint mapping
-└── ultralytics-weights-convertor.py  .pt -> .safetensors conversion
-
-examples/yolov8/
+├── ultralytics-weights-convertor.py  .pt -> .safetensors conversion
 ├── demo.cpp                          demo-yolov8: detection on one image + timing
-├── processing.h  processing.cpp      pre-processing, post-processing (letterbox, NMS)
+├── processing.h                      pre-processing, post-processing (letterbox, NMS)
 └── CMakeLists.txt
 
-data/yolov8/
-├── dog.jpg
-└── yolov8<n|s|m|l|x>.safetensors     Tier: NANO, SMALL, MEDIUM, LARGE, XLARGE
+data/
+├── ckpts/yolov8/ultralytics/
+│   └── <tier>/model.safetensors      Tier: nano, small, medium, large, xlarge
+└── images/
+    └── dog.jpg
 ```
 
 ### Build and run
 
 ```bash
-cmake -B build -DVAI_BUILD_EXAMPLES=ON
+cmake -B build
 cmake --build build --config RelWithDebInfo
 
 # Run
 ./build/bin/demo-yolov8
 ```
 
-This detects objects in `data/yolov8/dog.jpg` using the `LARGE` `tier` and `fp16`, then prints profiles by kernel shape.
-The `tier` and inference settings can be changed at the top of [`demo.cpp`](../../../examples/yolov8/demo.cpp).
+This detects objects in `data/images/dog.jpg` using the `LARGE` `tier` and `fp16`, then prints profiles by kernel shape.
+The `tier` and inference settings can be changed at the top of [`demo.cpp`](../../../models/internal/yolov8/demo.cpp).
 
 ## Benchmark summary
 

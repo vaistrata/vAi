@@ -67,11 +67,12 @@ vai/                        Core engine (vAi library)
 data/                       Model checkpoints · input data, etc.
 
 models/                     Supported models
-  <model-name>/
-    model.h                   Model definition
+  <impl>/<model-name>/
+    net.h                     Model definition
     <distribution-name>-weights.h         Checkpoint loader
+    demo.cpp                  demo-<model-name>
 
-examples/                   Demos for running models (e.g., <model-name>/demo.cpp)
+examples/                   Programs beyond one model's demo (e.g., mnist/, chat-llama3/)
 benchmarks/
 tests/
 external/eva/               Vulkan wrapper (submodule)

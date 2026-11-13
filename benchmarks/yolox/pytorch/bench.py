@@ -11,7 +11,7 @@ from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parents[2]
-DEFAULT_WEIGHTS_DIR = (REPO_ROOT / "data/yolox").resolve()
+DEFAULT_WEIGHTS_DIR = (REPO_ROOT / "data/benchmarks/yolox").resolve()
 DEFAULT_WARMUP = 1000
 DEFAULT_ITERATIONS = 100
 MODEL_SIZES = ("s", "m", "l", "x")
@@ -27,12 +27,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--image",
         type=Path,
-        default=DEFAULT_WEIGHTS_DIR / "dog.jpg",
+        default=REPO_ROOT / "data/images/dog.jpg",
         help="Image input. Loaded and preprocessed once before timing.",
     )
     parser.add_argument("--backend", default="cuda", choices=["cuda", "rocm", "cpu"])
     parser.add_argument("--gpu", type=int, default=0)
-    parser.add_argument("--warmup", type=int, default=DEFAULT_WARMUP, help="Number of warmup iterations.")
+    parser.add_argument(
+        "--warmup", type=int, default=DEFAULT_WARMUP, help="Number of warmup iterations."
+    )
     parser.add_argument(
         "--iterations",
         type=int,
@@ -62,16 +64,86 @@ import torch.nn as nn
 from PIL import Image
 
 COCO_CLASSES = [
-    "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat",
-    "traffic light", "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat",
-    "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe", "backpack",
-    "umbrella", "handbag", "tie", "suitcase", "frisbee", "skis", "snowboard", "sports ball",
-    "kite", "baseball bat", "baseball glove", "skateboard", "surfboard", "tennis racket",
-    "bottle", "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple",
-    "sandwich", "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair",
-    "couch", "potted plant", "bed", "dining table", "toilet", "tv", "laptop", "mouse",
-    "remote", "keyboard", "cell phone", "microwave", "oven", "toaster", "sink", "refrigerator",
-    "book", "clock", "vase", "scissors", "teddy bear", "hair drier", "toothbrush",
+    "person",
+    "bicycle",
+    "car",
+    "motorcycle",
+    "airplane",
+    "bus",
+    "train",
+    "truck",
+    "boat",
+    "traffic light",
+    "fire hydrant",
+    "stop sign",
+    "parking meter",
+    "bench",
+    "bird",
+    "cat",
+    "dog",
+    "horse",
+    "sheep",
+    "cow",
+    "elephant",
+    "bear",
+    "zebra",
+    "giraffe",
+    "backpack",
+    "umbrella",
+    "handbag",
+    "tie",
+    "suitcase",
+    "frisbee",
+    "skis",
+    "snowboard",
+    "sports ball",
+    "kite",
+    "baseball bat",
+    "baseball glove",
+    "skateboard",
+    "surfboard",
+    "tennis racket",
+    "bottle",
+    "wine glass",
+    "cup",
+    "fork",
+    "knife",
+    "spoon",
+    "bowl",
+    "banana",
+    "apple",
+    "sandwich",
+    "orange",
+    "broccoli",
+    "carrot",
+    "hot dog",
+    "pizza",
+    "donut",
+    "cake",
+    "chair",
+    "couch",
+    "potted plant",
+    "bed",
+    "dining table",
+    "toilet",
+    "tv",
+    "laptop",
+    "mouse",
+    "remote",
+    "keyboard",
+    "cell phone",
+    "microwave",
+    "oven",
+    "toaster",
+    "sink",
+    "refrigerator",
+    "book",
+    "clock",
+    "vase",
+    "scissors",
+    "teddy bear",
+    "hair drier",
+    "toothbrush",
 ]
 CONF_THRESHOLD = 0.25
 IOU_THRESHOLD = 0.45
@@ -138,9 +210,7 @@ class MegviiYOLOXBenchmarkModel(nn.Module):
                 torch.full((1, size * size, 1), float(stride), dtype=torch.float32)
             )
         self.register_buffer("decode_grid", torch.cat(grids, dim=1), persistent=False)
-        self.register_buffer(
-            "decode_stride", torch.cat(expanded_strides, dim=1), persistent=False
-        )
+        self.register_buffer("decode_stride", torch.cat(expanded_strides, dim=1), persistent=False)
         try:
             self.yolox_version = importlib.metadata.version("yolox")
         except importlib.metadata.PackageNotFoundError:
@@ -150,9 +220,7 @@ class MegviiYOLOXBenchmarkModel(nn.Module):
         output = self.model(x)
         prediction = output[0] if isinstance(output, tuple) else output
         if not isinstance(prediction, torch.Tensor):
-            raise TypeError(
-                f"YOLOX forward returned {type(prediction).__name__}, expected Tensor"
-            )
+            raise TypeError(f"YOLOX forward returned {type(prediction).__name__}, expected Tensor")
         centers = (prediction[..., 0:2] + self.decode_grid) * self.decode_stride
         sizes = prediction[..., 2:4].exp() * self.decode_stride
         return torch.cat((centers, sizes, prediction[..., 4:]), dim=-1)
@@ -166,7 +234,9 @@ def load_rgb_image(path: Path) -> np.ndarray:
         raise RuntimeError(f"failed to load image with Pillow: {path}: {error}") from error
 
 
-def preprocess_loaded_image(image: np.ndarray, target_size: int = 640) -> tuple[np.ndarray, int, int, int, int, int, int]:
+def preprocess_loaded_image(
+    image: np.ndarray, target_size: int = 640
+) -> tuple[np.ndarray, int, int, int, int, int, int]:
     src_h, src_w = image.shape[:2]
     scale = min(float(target_size) / float(src_w), float(target_size) / float(src_h))
     final_w = int(src_w * scale)
@@ -196,7 +266,9 @@ def preprocess_loaded_image(image: np.ndarray, target_size: int = 640) -> tuple[
     return chw, src_w, src_h, final_w, final_h, 0, 0
 
 
-def preprocess_image(path: Path, target_size: int = 640) -> tuple[np.ndarray, int, int, int, int, int, int]:
+def preprocess_image(
+    path: Path, target_size: int = 640
+) -> tuple[np.ndarray, int, int, int, int, int, int]:
     return preprocess_loaded_image(load_rgb_image(path), target_size)
 
 
@@ -286,7 +358,9 @@ def resolve_backend(backend: str, gpu_index: int) -> tuple[torch.device, str, st
     cuda_version = getattr(torch.version, "cuda", None)
     if backend == "rocm":
         if not hip_version:
-            raise RuntimeError("ROCm requested but this PyTorch build does not report torch.version.hip")
+            raise RuntimeError(
+                "ROCm requested but this PyTorch build does not report torch.version.hip"
+            )
         backend_label = "ROCm"
     else:
         if hip_version:
@@ -295,7 +369,9 @@ def resolve_backend(backend: str, gpu_index: int) -> tuple[torch.device, str, st
                 "Use a CUDA PyTorch environment for NVIDIA GPUs."
             )
         if not cuda_version:
-            raise RuntimeError("CUDA requested but this PyTorch build does not report torch.version.cuda")
+            raise RuntimeError(
+                "CUDA requested but this PyTorch build does not report torch.version.cuda"
+            )
         backend_label = "CUDA"
 
     if not torch.cuda.is_available():

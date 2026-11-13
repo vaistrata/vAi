@@ -28,10 +28,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sizes", nargs="+", choices=("s", "m", "l", "x"), default=["l"])
     parser.add_argument("--image-size", type=int, default=640)
     parser.add_argument(
-        "--weights-dir", type=Path, default=(REPO_ROOT / "data/yolox").resolve()
+        "--weights-dir", type=Path, default=(REPO_ROOT / "data/benchmarks/yolox").resolve()
     )
     parser.add_argument(
-        "--output-dir", type=Path, default=(REPO_ROOT / "data/yolox").resolve()
+        "--output-dir", type=Path, default=(REPO_ROOT / "data/benchmarks/yolox").resolve()
     )
     return parser.parse_args()
 
@@ -58,9 +58,7 @@ def _fold_focus(focus: torch.nn.Module) -> torch.nn.Module:
         # Focus concatenates even/even, odd/even, even/odd, odd/odd pixels.
         # Interleave those input-channel groups into one stride-2 kernel.
         for part, (dy, dx) in enumerate(((0, 0), (1, 0), (0, 1), (1, 1))):
-            folded.weight[:, :, dy::2, dx::2].copy_(
-                conv.weight[:, part * 3:(part + 1) * 3]
-            )
+            folded.weight[:, :, dy::2, dx::2].copy_(conv.weight[:, part * 3 : (part + 1) * 3])
         if conv.bias is not None:
             folded.bias.copy_(conv.bias)
 
@@ -88,9 +86,7 @@ def export_one(
     size_output_dir.mkdir(parents=True, exist_ok=True)
     final_param = size_output_dir / f"yolox_{size}.param"
     final_bin = size_output_dir / f"yolox_{size}.bin"
-    with tempfile.TemporaryDirectory(
-        prefix=f"yolox-{size}-ncnn-", dir=size_output_dir
-    ) as raw_dir:
+    with tempfile.TemporaryDirectory(prefix=f"yolox-{size}-ncnn-", dir=size_output_dir) as raw_dir:
         staging_dir = Path(raw_dir)
         onnx_path = staging_dir / "model.onnx"
         with torch.no_grad():

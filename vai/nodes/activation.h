@@ -1,7 +1,7 @@
 #ifndef VAI_NODES_ACTIVATION_H
 #define VAI_NODES_ACTIVATION_H
 
-#include "vai/nodes/node-common.h"
+#include "node-common.h"
 
 namespace vai::node {
 
@@ -29,7 +29,6 @@ public:
     struct Config {
         vai::Epilogue epilogue = vai::Epilogue::None;
         bool inPlace = false;
-        vai::Dtype oDtype = vai::Dtype::None;   // None: oDefaultDtype
     } config_;
 
     Activation(Config config);
@@ -45,35 +44,36 @@ inline Activation::Activation(Config config)
 : config_(config)
 {
     addSlot("out0", NodeSlot::output);
-    addSlot("in0",  NodeSlot::input);
-
-    config_.oDtype = (config_.oDtype == Dtype::None) ? oDefaultDtype() : config_.oDtype;
+    addSlot("in0", NodeSlot::input);
 }
 
 inline void Activation::prepare()
 {
+    const Dtype oDtype = (oDtype_ == Dtype::None) ? oDefaultDtype() : oDtype_;
     const Tensor& inTen = (*this)["in0"];
     VAI_ASSERT(inTen.validShape());
 
     const Dtype iDtype = inTen.dtype();
     if (config_.inPlace)   // in-place reads and writes the same buffer
-        VAI_ASSERT(config_.oDtype == iDtype);
+        VAI_ASSERT(oDtype == iDtype);
 
     const PipeParams p = { .iDtype = iDtype };
     if (!pipe || p != pipeParams)
     {
         pipeParams = p;
+        // clang-format off
         pipe = pipelinePool().request("activation", {
             eva::constant_id<0>(config_.inPlace ? 1u : 0u),      // inPlace
-            eva::constant_id<SPEC_ID_TYPE_O>(config_.oDtype),    // typeO
+            eva::constant_id<SPEC_ID_TYPE_O>(oDtype),    // typeO
             eva::constant_id<SPEC_ID_TYPE_I>(iDtype),            // typeI
             eva::constant_id<SPEC_ID_EPILOGUE>((uint32_t) config_.epilogue)   // epilogue
         });
+        // clang-format on
         if (!descSet)
             descSet = gVaiDestSetPool(pipe.descSetLayout(0));
     }
 
-    (*this)["out0"] = config_.inPlace ? inTen : Tensor(inTen.shape(), config_.oDtype);
+    (*this)["out0"] = config_.inPlace ? inTen : Tensor(inTen.shape(), oDtype);
 }
 
 inline void Activation::run(eva::CommandBuffer cmdBuff)

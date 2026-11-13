@@ -1,7 +1,7 @@
 #ifndef VAI_NODES_POOL2D_H
 #define VAI_NODES_POOL2D_H
 
-#include "vai/nodes/node-common.h"
+#include "node-common.h"
 
 namespace vai {
 
@@ -50,7 +50,6 @@ public:
         bool ceilMode = false;          // a last window that would start in the right padding is dropped
         bool countIncludePad = true;    // Avg: padding counts in the divisor, as PyTorch's default
         bool channelsLast = false;
-        vai::Dtype oDtype = vai::Dtype::None;   // None: oDefaultDtype
     } config_;
 
     Pool2d(Config config);
@@ -78,8 +77,6 @@ inline Pool2d<mode>::Pool2d(Config config)
 
     VAI_ASSERT(config_.kernelSize >= 1 && config_.stride >= 1);
     VAI_ASSERT(config_.padding * 2 <= config_.kernelSize);
-
-    config_.oDtype = (config_.oDtype == Dtype::None) ? oDefaultDtype() : config_.oDtype;
 }
 
 template<PoolMode mode>
@@ -110,6 +107,7 @@ inline uint32_t Pool2d<mode>::outSize(uint32_t in) const
 template<PoolMode mode>
 inline void Pool2d<mode>::prepare()
 {
+    const Dtype oDtype = (oDtype_ == Dtype::None) ? oDefaultDtype() : oDtype_;
     uint32_t K = config_.kernelSize;
     uint32_t S = config_.stride;
     uint32_t P = config_.padding;
@@ -127,12 +125,13 @@ inline void Pool2d<mode>::prepare()
     const size_t r = outShape.size();
     if (config_.channelsLast) { outShape[r - 3] = Ho; outShape[r - 2] = Wo; }
     else                      { outShape[r - 2] = Ho; outShape[r - 1] = Wo; }
-    (*this)["out0"] = Tensor(outShape, config_.oDtype);
+    (*this)["out0"] = Tensor(outShape, oDtype);
 
     const PipeParams p = { .aligned = config_.channelsLast && C % 4 == 0, .iDtype = iDtype };
     if (!pipe || p != pipeParams)
     {
         pipeParams = p;
+        // clang-format off
         pipe = pipelinePool().request("pool2d", {
             eva::constant_id<0>(config_.channelsLast ? 1u : 0u),      // channelsLast
             eva::constant_id<1>(K),                                   // K
@@ -142,9 +141,10 @@ inline void Pool2d<mode>::prepare()
             eva::constant_id<5>(config_.ceilMode ? 1u : 0u),          // ceilMode
             eva::constant_id<6>(config_.countIncludePad ? 1u : 0u),   // countIncludePad
             eva::constant_id<SPEC_ID_ALIGNED>(p.aligned ? 1u : 0u),   // aligned (vec4 over C)
-            eva::constant_id<SPEC_ID_TYPE_O>(config_.oDtype),         // typeO
+            eva::constant_id<SPEC_ID_TYPE_O>(oDtype),         // typeO
             eva::constant_id<SPEC_ID_TYPE_I>(iDtype)                  // typeI
         });
+        // clang-format on
 
         if (!descSet)
             descSet = gVaiDestSetPool(pipe.descSetLayout(0));

@@ -29,7 +29,9 @@ The workdir is `/opt/vai`, with the demos (`demo-*`) and the venv (`/opt/venv`) 
 ```bash
 demo-mnist                                   # C++ demo
 python python/examples/mnist/main.py \
-    --weights_path data/mnist/ckpts/model.safetensors --image_path data/mnist/0.png
+    --weights_path data/ckpts/mnist/jroot/model.safetensors --image_path data/images/0.png
+pytest -q                                    # the pyvai suite
 ```
 
-After editing the mounted source, `cmake --build build` rebuilds the C++ side and `uv pip install -e .` refreshes the bindings.
+After editing the mounted source, `cmake --build build` rebuilds the C++ side
+and `uv pip install -e .` refreshes the bindings.

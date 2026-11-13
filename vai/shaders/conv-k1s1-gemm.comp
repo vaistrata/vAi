@@ -1,11 +1,12 @@
 /*=============================================================================
  Unified guarded/aligned direct/K-split 1x1 GEMM family.
- Bindings: O=0, I=1, W=2, BIAS=3, SCALE=4.
- Dispatch: x=pc.n tiles, y=pc.co tiles, z=split count.
+ Bindings: O=0, I=1, W=2, BIAS=3, SCALE=4, RESIDUAL=5.
+ Dispatch: x=pc.n tiles, y=pc.co tiles, z=pc.batch images x split count.
  Push constants: PushConstants.
  AFFINE:
    0: O = activation(W * I + bias)
    1: O = activation(scale * (W * I) + bias)
+ shortcut adds the residual after the activation, or before it with residualOrder 1.
 =============================================================================*/
 #version 450
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
@@ -25,6 +26,8 @@ layout(constant_id = 5) const bool alignM = false;
 layout(constant_id = 6) const bool alignN = false;
 layout(constant_id = 7) const bool alignK = false;
 layout(constant_id = 8) const uint splitK = 0u;
+layout(constant_id = 9) const bool shortcut = false;
+layout(constant_id = 10) const uint residualOrder = 0u;  // 0: after the epilogue, 1: before it
 layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0u;
 layout(constant_id = SPEC_ID_TYPE_I) const uint typeI = 0u;
 layout(constant_id = SPEC_ID_TYPE_W) const uint typeW = 0u;
@@ -49,6 +52,8 @@ layout(set = 0, binding = 3) restrict readonly buffer BIAS_BUF_F32 { float buffe
 layout(set = 0, binding = 3) restrict readonly buffer BIAS_BUF_F16 { float16_t bufferBias_f16[]; };
 layout(set = 0, binding = 4) restrict readonly buffer SCALE_BUF_F32 { float bufferScale_f32[]; };
 layout(set = 0, binding = 4) restrict readonly buffer SCALE_BUF_F16 { float16_t bufferScale_f16[]; };
+layout(set = 0, binding = 5) restrict readonly buffer RES_BUF_F32 { float bufferRes_f32[]; };
+layout(set = 0, binding = 5) restrict readonly buffer RES_BUF_F16 { float16_t bufferRes_f16[]; };
 
 layout(push_constant) uniform PushConstants {
     uint hi;
@@ -61,7 +66,10 @@ layout(push_constant) uniform PushConstants {
     uint splitCount;
     uint kernel;
     uint stride;
+    uint batch;             // images, stacked on the dispatch z axis
 } pc;
+
+#include "common/conv_batch.h"
 
 const uint tN = 4u;
 const uint PAD_A = 4u;
@@ -72,12 +80,27 @@ const bool FULL_TILE = alignM && alignN && alignK;
 shared float As[2][wgK * A_STRIDE];
 shared float Bs[2][wgK * wgN];
 
-float readI(uint i) { return typeI == DTYPE_F32 ? bufferI_f32[i] : float(bufferI_f16[i]); }
-vec4 readI4(uint i) { return typeI == DTYPE_F32 ? bufferI_4f32[i] : vec4(bufferI_4f16[i]); }
+// The workgroup's image within I, and within O and the residual.
+uint imageInputBase = 0u;
+uint imageOutputBase = 0u;
+
+float readI(uint i) { i += imageInputBase; return typeI == DTYPE_F32 ? bufferI_f32[i] : float(bufferI_f16[i]); }
+vec4 readI4(uint i) { i += imageInputBase >> 2u; return typeI == DTYPE_F32 ? bufferI_4f32[i] : vec4(bufferI_4f16[i]); }
 float readW(uint i) { return typeW == DTYPE_F32 ? bufferW_f32[i] : float(bufferW_f16[i]); }
+float readResidual(uint i) { i += imageOutputBase; return typeI == DTYPE_F32 ? bufferRes_f32[i] : float(bufferRes_f16[i]); }
+
+// The residual's first `count` elements from i; the rest read as 0.
+vec4 readResidual4(uint i, uint count)
+{
+    return vec4(count > 0u ? readResidual(i) : 0.0,
+                count > 1u ? readResidual(i + 1u) : 0.0,
+                count > 2u ? readResidual(i + 2u) : 0.0,
+                count > 3u ? readResidual(i + 3u) : 0.0);
+}
 
 void writeO(uint i, float v)
 {
+    i += imageOutputBase;
     if (typeO == DTYPE_F32)
         bufferO_f32[i] = v;
     else
@@ -110,7 +133,8 @@ void writePartial4(uint partialBase, uint m, uint n0, vec4 v)
     if (remaining > 3u) bufferO_f32[base + 3u] = v.w;
 }
 
-vec4 applyOutput(uint i, vec4 acc)
+// Output channel i, elements [base, base + count) of O.
+vec4 applyOutput(uint i, uint base, uint count, vec4 acc)
 {
     vec4 value = hasScale == 0u
         ? acc + vec4(typeW == DTYPE_F32
@@ -123,7 +147,13 @@ vec4 applyOutput(uint i, vec4 acc)
               vec4(typeP == DTYPE_F32
                   ? (hasBias != 0u ? bufferBias_f32[i] : 0.0)
                   : (hasBias != 0u ? float(bufferBias_f16[i]) : 0.0)));
-    return applyEpilogue(value);
+    const vec4 residual = shortcut ? readResidual4(base, count) : vec4(0.0);
+    if (shortcut && residualOrder == 1u)
+        value += residual;
+    value = applyEpilogue(value);
+    if (shortcut && residualOrder == 0u)
+        value += residual;
+    return value;
 }
 
 void writeO4(uint m, uint n0, vec4 acc)
@@ -132,13 +162,13 @@ void writeO4(uint m, uint n0, vec4 acc)
         return;
 
     uint base = m * pc.n + n0;
-    vec4 v = applyOutput(m, acc);
+    vec4 v = applyOutput(m, base, alignN ? 4u : min(4u, pc.n - n0), acc);
     if (alignN)
     {
         if (typeO == DTYPE_F32)
-            bufferO_4f32[base >> 2u] = v;
+            bufferO_4f32[(imageOutputBase + base) >> 2u] = v;
         else
-            bufferO_4f16[base >> 2u] = f16vec4(v);
+            bufferO_4f16[(imageOutputBase + base) >> 2u] = f16vec4(v);
         return;
     }
 
@@ -153,7 +183,10 @@ void main()
 {
     uint tileCol = gl_WorkGroupID.x;
     uint tileRow = gl_WorkGroupID.y;
-    uint splitId = splitK != 0u ? gl_WorkGroupID.z : 0u;
+    uint splitId = splitK != 0u ? convImageZ(pc.batch) : 0u;
+    const uint image = convImage(pc.batch);
+    imageInputBase = image * pc.ci * pc.n;
+    imageOutputBase = image * pc.co * pc.n;
     uint t = gl_LocalInvocationID.x;
     uint T = gl_WorkGroupSize.x;
 
@@ -304,7 +337,8 @@ void main()
     uint n0 = tileCol * wgN + threadN * tN;
     if (splitK != 0u)
     {
-        uint partialBase = splitId * pc.co * pc.n;
+        // Image-major partials: [image][split][Co * N].
+        uint partialBase = gl_WorkGroupID.z * pc.co * pc.n;
 
         [[unroll]]
         for (uint tm = 0u; tm < 8u; ++tm)

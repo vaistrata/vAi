@@ -1,7 +1,7 @@
 #ifndef VAI_NODES_ADD_H
 #define VAI_NODES_ADD_H
 
-#include "vai/nodes/node-common.h"
+#include "node-common.h"
 
 namespace vai::node {
 
@@ -25,8 +25,8 @@ public:
         bool operator==(const PipeParams&) const = default;
     };
 
-    struct Config {
-        vai::Dtype oDtype = vai::Dtype::None;   // None: oDefaultDtype
+    struct Config
+    {
     } config_;
 
     Add();
@@ -47,12 +47,11 @@ inline Add::Add(Config config)
     addSlot("out0", NodeSlot::output);
     addSlot("in0", NodeSlot::input);
     addSlot("in1", NodeSlot::input);
-
-    config_.oDtype = (config_.oDtype == Dtype::None) ? oDefaultDtype() : config_.oDtype;
 }
 
 inline void Add::prepare()
 {
+    const Dtype oDtype = (oDtype_ == Dtype::None) ? oDefaultDtype() : oDtype_;
     const Tensor& in0Ten = (*this)["in0"];
     const Tensor& in1Ten = (*this)["in1"];
 
@@ -62,10 +61,12 @@ inline void Add::prepare()
     if (!pipe || p != pipeParams)
     {
         pipeParams = p;
+        // clang-format off
         pipe = pipelinePool().request("add", {
-            eva::constant_id<SPEC_ID_TYPE_O>(config_.oDtype),   // typeO
+            eva::constant_id<SPEC_ID_TYPE_O>(oDtype),   // typeO
             eva::constant_id<SPEC_ID_TYPE_I>(iDtype)            // typeI (in0 & in1)
         });
+        // clang-format on
         if (!descSet)
             descSet = gVaiDestSetPool(pipe.descSetLayout(0));
     }
@@ -73,7 +74,7 @@ inline void Add::prepare()
     VAI_ASSERT(in1Ten.dtype() == in0Ten.dtype());
     VAI_ASSERT(in1Ten.shape() == in0Ten.shape());
 
-    (*this)["out0"] = Tensor(in0Ten.shape(), config_.oDtype);
+    (*this)["out0"] = Tensor(in0Ten.shape(), oDtype);
 }
 
 inline void Add::run(eva::CommandBuffer cmdBuff)

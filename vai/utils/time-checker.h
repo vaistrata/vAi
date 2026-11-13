@@ -7,12 +7,14 @@
     TimeChecker t("Prefill {} tokens in {}ms", n);
 =============================================================================*/
 
-#ifndef TIME_CHECKER_H
-#define TIME_CHECKER_H
+#ifndef VAI_UTILS_TIME_CHECKER_H
+#define VAI_UTILS_TIME_CHECKER_H
 
 #include <chrono>
 #include <format>
 
+
+namespace vai::utils {
 
 class TimeChecker {
     std::string name;
@@ -73,4 +75,7 @@ public:
     }
 };
 
-#endif // TIME_CHECKER_H
+
+}   // namespace vai::utils
+
+#endif   // VAI_UTILS_TIME_CHECKER_H

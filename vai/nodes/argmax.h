@@ -2,7 +2,7 @@
 #define VAI_NODES_ARGMAX_H
 
 // Argmax - row-wise argmax (greedy decode) over a logits tensor.
-#include "vai/nodes/node-common.h"
+#include "node-common.h"
 
 namespace vai::node {
 
@@ -63,9 +63,11 @@ inline void Argmax::prepare()
     if (!pipe || p != pipeParams)
     {
         pipeParams = p;
+        // clang-format off
         pipe = pipelinePool().request("argmax", {
             eva::constant_id<SPEC_ID_TYPE_I>(iDtype)   // typeI (logits)
         });
+        // clang-format on
         if (!descSet)
             descSet = gVaiDestSetPool(pipe.descSetLayout(0));
     }

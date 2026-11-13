@@ -39,13 +39,13 @@ Size presets and weight loaders are covered in the [model list](docs/en/04-model
 | Model | Task | Example |
 |---|---|---|
 | MNIST | Image classification | [Quick Start](docs/en/02-quickstart.md) |
-| YOLOX | Object detection | [demo.cpp](examples/yolox/demo.cpp) |
-| GPT-2 | Text generation | [demo.cpp](examples/gpt2/demo.cpp) |
-| Llama 3.2 | Text generation / multi-turn chat | [demo.cpp](examples/llama3/demo.cpp), [chat.cpp](examples/llama3/chat.cpp) |
-| Gemma 3 | Text generation / multi-turn chat (text and image input) | [demo.cpp](examples/gemma3/demo.cpp), [chat.cpp](examples/gemma3/chat.cpp) |
-| PaliGemma | Text generation from image and text input | [demo.cpp](examples/paligemma/demo.cpp) |
-| π0 | Action chunks from images, instructions and state | [demo.cpp](examples/pi0/demo.cpp) |
-| π0.5 | Action chunks from images, instructions and state | [demo.cpp](examples/pi05/demo.cpp) |
+| YOLOX | Object detection | [demo.cpp](models/experimental/yolox/demo.cpp) |
+| GPT-2 | Text generation | [demo.cpp](models/production/gpt2/demo.cpp) |
+| Llama 3.2 | Text generation / multi-turn chat | [demo.cpp](models/production/llama3/demo.cpp), [chat.cpp](examples/chat-llama3/main.cpp) |
+| Gemma 3 | Text generation / multi-turn chat (text and image input) | [demo.cpp](models/production/gemma3/demo.cpp), [chat.cpp](examples/chat-gemma3/main.cpp) |
+| PaliGemma | Text generation from image and text input | [demo.cpp](models/production/paligemma/demo.cpp) |
+| π0 | Action chunks from images, instructions and state | [demo.cpp](models/production/pi0/demo.cpp) |
+| π0.5 | Action chunks from images, instructions and state | [demo.cpp](models/production/pi05/demo.cpp) |
 
 ## Build
 

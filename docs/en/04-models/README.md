@@ -3,30 +3,32 @@
 These are models implemented with vAi.
 
 ```
-models/<model>/
-├── model.h                      Model and NodeGroup definitions
+models/<impl>/<model>/
+├── net.h                        Model and NodeGroup definitions
 ├── <distribution-name>-weights.h Distribution checkpoint to graph slot mapping (loadWeights<"distribution-name">)
 ├── nodes/                        Dedicated model nodes (if any)
-└── shaders/                      Kernels for dedicated nodes (if any)
-
-examples/<model>/
+├── shaders/                      Kernels for dedicated nodes (if any)
 ├── demo.cpp                      demo-<model> - model inference and inference timing
 └── CMakeLists.txt
 
-data/<model>/                     Checkpoints and related data
+data/ckpts/<model>/<distribution-name>/   Checkpoints
+data/tokenizers/<model>/                  Tokenizer
+data/images/                              Input images
 ```
 
 ## Weight loading
 
 ```cpp
 // GPT-2 example
-#include "model.h"
+#include "net.h"
 #include "openai-weights.h"
 
-gpt2::Model model({ .device = device, .defaultDtype = Dtype::Fp16 },
-                  gpt2::ModelConfig::_124M());
+namespace gpt2 = model::production::gpt2;
 
-loadWeights<"openai">(model);
+gpt2::Net net({ .device = device, .defaultDtype = Dtype::Fp16 },
+              gpt2::ModelConfig::_124M());
+
+loadWeights<"openai">(net);
 ```
 
 [`vai/engine/weights.h`](../../../vai/engine/weights.h) only declares `loadWeights<Name, Model>`, and each model provides a specialization for each distribution name.

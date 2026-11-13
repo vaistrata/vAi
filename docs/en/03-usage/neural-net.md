@@ -9,7 +9,7 @@ struct Block : public vai::NodeGroup {       // NodeGroup
     defineSlot("in0", fc1.slot("in0"));      // Naming an inside slot and exposing it outside
 };
 
-struct Model : public vai::NeuralNet {       // Neural Network
+struct Net : public vai::NeuralNet {       // Neural Network
     input("in0") - fc1;                      // Directly connecting to the input boundary
 };
 ```
@@ -19,12 +19,12 @@ struct Model : public vai::NeuralNet {       // Neural Network
 ## Creation
 
 ```cpp
-struct Model : public vai::NeuralNet {
+struct Net : public vai::NeuralNet {
     vai::node::TokenEmbedding embedding;
     std::vector<TransformerBlock> layers;
     vai::node::Linear lmHead;
 
-    Model(const vai::NeuralNetConfig& netCfg, ModelConfig modelCfg)
+    Net(const vai::NeuralNetConfig& netCfg, ModelConfig modelCfg)
     : NeuralNet(netCfg)
     , embedding({ /* ... */ })
     , lmHead({ modelCfg.embedDim, modelCfg.vocabSize })
@@ -72,19 +72,21 @@ void NeuralNet::operator()(TensorDict inputs, TensorRefDict outputs, bool syncPr
 The key for both input and output is the boundary name. The keys of the `TensorDict` passed correspond to the input boundaries created by `input()`, and the keys of the output `TensorRefDict` correspond to the output boundaries created by `output()`.
 
 ```cpp
-gpt2::Model model({}, gpt2::ModelConfig::_124M());
+namespace gpt2 = model::production::gpt2;
+
+gpt2::Net net({}, gpt2::ModelConfig::_124M());
 
 Tensor tokens = Tensor(/* ... */);
 
 vai::TensorDict in = {{"inTokenIds", tokens}};
 Tensor result;
-model(in, {{"nextTokenId", &result}});
+net(in, {{"nextTokenId", &result}});
 ```
 
 The input dictionary can also be constructed at the call site.
 
 ```cpp
-model({{"inTokenIds", tokens}}, {{"nextTokenId", &result}});
+net({{"inTokenIds", tokens}}, {{"nextTokenId", &result}});
 ```
 
 The call is **asynchronous**. The fact that `model(...)` has returned does not mean that the GPU calculation is complete. On the result tensor, if needed at the time `Tensor::downloadToHost()` or `Tensor::getData<T>()` is called, it waits for completion and then gets the data.
@@ -95,9 +97,9 @@ The internal process of a single call is covered step by step in the [Execution 
 The name passed must exactly match the boundary created by `input()`. An empty input dictionary or an unknown name causes an error. Omitting one of several inputs prunes the branch that starts at that input.
 
 ```cpp
-model({{"inTokenIds", tokens}}, {{"nextTokenId", &result}});                  // OK
-model({}, {{"nextTokenId", &result}});                                        // X: Input is missing.
-model({{"inTokenIds", t}, {"extra", e}}, {{"nextTokenId", &result}});         // X: Non-existent boundary
+net({{"inTokenIds", tokens}}, {{"nextTokenId", &result}});                  // OK
+net({}, {{"nextTokenId", &result}});                                        // X: Input is missing.
+net({{"inTokenIds", t}, {"extra", e}}, {{"nextTokenId", &result}});         // X: Non-existent boundary
 ```
 
 ## `onForwardBegin`

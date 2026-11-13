@@ -4,8 +4,8 @@
   Task         MNIST — classifies a digit image, profiles the evaluation.
                The whole example lives in this file: model definition,
                checkpoint loading and the run.
-  Checkpoint   data/mnist/ckpts/model.safetensors — trained by jroooot, ships with the repo.
-  Assets       data/mnist/0.png
+  Checkpoint   data/ckpts/mnist/jroot/model.safetensors — trained by jroooot, ships with the repo.
+  Assets       data/images/0.png
                  ships with the repo
 =============================================================================*/
 
@@ -26,6 +26,7 @@
 #endif
 
 using namespace vai;
+using namespace vai::utils;
 
 
 namespace mnist {
@@ -41,19 +42,17 @@ struct ConvBlock : public vai::NodeGroup {
 
     ConvBlock(uint32_t inChannels, uint32_t outChannels, uint32_t kernelSize)
     : conv({
-        .inChannels = inChannels,
-        .outChannels = outChannels,
-        .kernelSize = kernelSize,
-        .stride = 1,
-        .hasBias = true,
-        .epilogue = vai::Epilogue::Relu
-    })
-    , maxpool({
-        .kernelSize = 2,
-        .stride = 2
-    })
+          .inChannels = inChannels,
+          .outChannels = outChannels,
+          .kernelSize = kernelSize,
+          .stride = 1,
+          .epilogue = vai::Epilogue::Relu,
+      })
+    , maxpool({ .kernelSize = 2, .stride = 2 })
     {
+        // clang-format off
         conv - maxpool;
+        // clang-format on
         defineSlot("in0", conv.slot("in0"));
         defineSlot("out0", maxpool.slot("out0"));
     }
@@ -77,8 +76,10 @@ struct ConvSequence : public vai::NodeGroup {
         for (uint32_t i = 0; i < nBlocks; ++i)
         {
             blocks.emplace_back(channels[i], channels[i + 1], kernelSize);
+            // clang-format off
             if (i > 0)
                 blocks[i - 1] - blocks[i];
+            // clang-format on
         }
 
         defineSlot("in0", blocks[0].slot("in0"));
@@ -88,22 +89,25 @@ struct ConvSequence : public vai::NodeGroup {
 
 
 /////////////////////////////////////////////////////////////////////////////////////////
-// Model - MNIST classifier: 2x ConvBlock -> flatten -> Linear(10)
+// Net - MNIST classifier: 2x ConvBlock -> flatten -> Linear(10)
 // Input : [1, 28, 28]
 // Output: [10] class logits
 /////////////////////////////////////////////////////////////////////////////////////////
-struct Model : public vai::NeuralNet {
+struct Net : public vai::NeuralNet
+{
     ConvSequence convX2;
     vai::node::Flatten flatten;
     vai::node::Linear linear;
 
-    Model(const vai::NeuralNetConfig& netCfg)
+    Net(const vai::NeuralNetConfig& netCfg)
     : NeuralNet(netCfg)
-    , convX2({1, 32, 64}, 3)
+    , convX2({ 1, 32, 64 }, 3)
     , flatten()
-    , linear({.inDim = 7 * 7 * 64, .outDim = 10, .hasBias = true})
+    , linear({ .inDim = 7 * 7 * 64, .outDim = 10 })
     {
+        // clang-format off
         input("in0") - convX2 - flatten - linear - output("out0");
+        // clang-format on
     }
 };
 
@@ -112,66 +116,61 @@ struct Model : public vai::NeuralNet {
 
 // This checkpoint has no upstream distributor, so the tag names the contributor
 // who trained it.
-template<>
-void loadWeights<"jroot", mnist::Model>(mnist::Model& model)
+template <>
+void loadWeights<"jroot", mnist::Net>(mnist::Net& net)
 {
-    auto ckpt = vai::Checkpoint(VAI_DATA_DIR "/mnist/ckpts");
+    auto ckpt = vai::Checkpoint(VAI_DATA_DIR "/ckpts/mnist/jroot");
 
-    // Each tensor is loaded at the dtype declared by its owning node.
-    // Convolution and Linear share the same config_.wDtype + weight/bias interface.
-    auto load = [&](auto& node, const std::string& wKey, const std::string& bKey)
-    {
-        vai::Dtype dt = node.config_.wDtype;
-        node["weight"] = vai::Tensor(ckpt[wKey], dt);
-        node["bias"]   = vai::Tensor(ckpt[bKey], dt);
+    const vai::Dtype wDt = net.config().wDefaultDtype;
+    auto load = [&](auto& node, const std::string& wKey, const std::string& bKey) {
+        node["weight"] = vai::Tensor(ckpt[wKey], wDt);
+        node["bias"] = vai::Tensor(ckpt[bKey], wDt);
     };
 
     // Conv blocks
-    load(model.convX2.blocks[0].conv, "conv1.weight", "conv1.bias");  // (C1, C0, K, K)
-    load(model.convX2.blocks[1].conv, "conv2.weight", "conv2.bias");  // (C2, C1, K, K)
+    load(net.convX2.blocks[0].conv, "conv1.weight", "conv1.bias");   // (C1, C0, K, K)
+    load(net.convX2.blocks[1].conv, "conv2.weight", "conv2.bias");   // (C2, C1, K, K)
 
     // Fully-connected classification head
-    load(model.linear, "fc.weight", "fc.bias");                       // (10, C2 * H/4 * W/4)
+    load(net.linear, "fc.weight", "fc.bias");   // (10, C2 * H/4 * W/4)
 }
 
 
 #ifdef PROFILE_ON
     // Tag nodes for profiling by name. Same-name nodes are accumulated together;
     // unnamed nodes are excluded from per-name results.
-    void setProfileTags(mnist::Model& model)
+void setProfileTags(mnist::Net& net)
+{
+    // Hierarchical path tags: '.' builds a tree following the member-access
+    // path; each block is kept as its own entry.
+    for (uint32_t i = 0; i < net.convX2.blocks.size(); ++i)
     {
-        // Hierarchical path tags: '.' builds a tree following the member-access
-        // path; each block is kept as its own entry.
-        for (uint32_t i = 0; i < model.convX2.blocks.size(); ++i)
-        {
-            auto& b = model.convX2.blocks[i];
-            std::string p = "convX2.block" + std::to_string(i) + ".";
-            b.conv.setProfileTag(p + "conv");
-            b.maxpool.setProfileTag(p + "maxpool");
-        }
-        model.linear.setProfileTag("linear");
+        auto& b = net.convX2.blocks[i];
+        std::string p = "convX2.block" + std::to_string(i) + ".";
+        b.conv.setProfileTag(p + "conv");
+        b.maxpool.setProfileTag(p + "maxpool");
     }
+    net.linear.setProfileTag("linear");
+}
 #endif
 
 
 int main()
 {
     // Load the 28x28 gray image and normalize it to [0, 1]
-    std::vector<float> inputData = ImageProcessor(VAI_DATA_DIR "/mnist/0.png", 1)
-        .normalize(0.0f, 1.0f)
-        .chw();
+    std::vector<float> inputData = ImageProcessor(VAI_DATA_DIR "/images/0.png", 1).normalize(0.0f, 1.0f).chw();
 
     // Load model. Switch wDefaultDtype to Dtype::Fp32 to run weights in FP32.
-    mnist::Model model({
+    mnist::Net net({
         .wDefaultDtype = Dtype::Fp32,
     });
 
     // Load weights from the "jroot" checkpoint.
-    loadWeights<"jroot">(model); 
+    loadWeights<"jroot">(net);
 
 #ifdef PROFILE_ON
     // Tag nodes for profiling
-    setProfileTags(model);
+    setProfileTags(net);
 #endif
 
     Tensor input = Tensor({1, 28, 28}, Dtype::Fp32).setFloats(std::move(inputData));
@@ -179,8 +178,8 @@ int main()
     
 #ifdef PROFILE_ON
     // Warm-up run (graph setup) — excluded from timing and profiling.
-    model({{"in0", input}}, {{"out0", &output}});
-    model.resetProfileRecords();
+    net({ { "in0", input } }, { { "out0", &output } });
+    net.resetProfileRecords();
 
     // Run the model multiple times to get a stable profile. 
     
@@ -190,16 +189,16 @@ int main()
 
         for (uint32_t i = 0; i < iter; ++i)
         {
-            model({{"in0", input}}, {{"out0", &output}});
+            net({ { "in0", input } }, { { "out0", &output } });
         }
     }
 
     // Print the profile results
-    model.printProfile();
+    net.printProfile();
 
 #else
     // Run the model and get the output logits
-    model({{"in0", input}}, {{"out0", &output}});
+    net({ { "in0", input } }, { { "out0", &output } });
 #endif
 
     // The network output is fp32.

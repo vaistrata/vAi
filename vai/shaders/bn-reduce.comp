@@ -1,5 +1,7 @@
 /*=============================================================================
- K-split partial reduction + optional reorder or bias/hasScale BN + activation.
+ K-split partial reduction + optional reorder or bias/hasScale BN + activation,
+ with the convolution's residual added after the activation, or before it with
+ residualOrder 1.
 
  typeW:
    0: fp32 scalar partials, including row/tensor tails
@@ -10,10 +12,12 @@
    true:  Winograd [transform][split][Co * N] fp32 partials, reduced and
           reordered directly to packed fp16 output
 
- Spec IDs: 3=aligned vec4, 4=reorder, 100=output dtype,
- 102=partial dtype, 104=parameter dtype, 111=hasScale, 112=hasBias.
- Bindings: O=0, I=1, BIAS=2, SCALE=3.
- Dispatch: one thread per four output elements.
+ Spec IDs: 3=aligned vec4, 4=reorder, 5=shortcut, 6=residualOrder,
+ 100=output dtype, 101=residual dtype, 102=partial dtype, 104=parameter dtype,
+ 111=hasScale, 112=hasBias.
+ Bindings: O=0, I=1, BIAS=2, SCALE=3, RESIDUAL=4.
+ Dispatch: one thread per four output elements of an image in x, z=pc.batch images.
+ Per image, I holds pc.splitCount partials of the image's O.
  Push constants: PushConstants.
 =============================================================================*/
 #version 460
@@ -27,7 +31,10 @@ layout(local_size_x = 256) in;
 
 layout(constant_id = 3) const bool alignedN = false;    // N % 4 == 0
 layout(constant_id = 4) const bool reorder = false;
+layout(constant_id = 5) const bool shortcut = false;
+layout(constant_id = 6) const uint residualOrder = 0u;  // 0: after the epilogue, 1: before it
 layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0u;
+layout(constant_id = SPEC_ID_TYPE_I) const uint typeI = 0u;   // the residual's, the convolution input's
 layout(constant_id = SPEC_ID_TYPE_W) const uint typeW = 0u;
 layout(constant_id = SPEC_ID_TYPE_P) const uint typeP = 0u;
 layout(constant_id = SPEC_ID_HAS_SCALE) const uint hasScale = 1u;
@@ -44,6 +51,8 @@ layout(set = 0, binding = 2) restrict readonly buffer BIAS_BUF_F32 { float buffe
 layout(set = 0, binding = 2) restrict readonly buffer BIAS_BUF_F16 { float16_t bufferBias_f16[]; };
 layout(set = 0, binding = 3) restrict readonly buffer SCALE_BUF_F32 { float bufferScale_f32[]; };
 layout(set = 0, binding = 3) restrict readonly buffer SCALE_BUF_F16 { float16_t bufferScale_f16[]; };
+layout(set = 0, binding = 4) restrict readonly buffer RES_BUF_F32 { float bufferRes_f32[]; };
+layout(set = 0, binding = 4) restrict readonly buffer RES_BUF_F16 { float16_t bufferRes_f16[]; };
 
 layout(push_constant) uniform PushConstants {
     uint hi;
@@ -56,10 +65,18 @@ layout(push_constant) uniform PushConstants {
     uint splitCount;
     uint kernel;
     uint stride;
+    uint batch;             // images, stacked on the dispatch z axis
 } pc;
+
+#include "common/conv_batch.h"
+
+// The workgroup's image within O and the residual, and within the partials I.
+uint imageOutputBase = 0u;
+uint imagePartialBase = 0u;
 
 void writeO(uint index, float value)
 {
+    index += imageOutputBase;
     if (typeO == DTYPE_F32)
         bufferO_f32[index] = value;
     else
@@ -68,6 +85,7 @@ void writeO(uint index, float value)
 
 void writeO4(uint index4, vec4 value)
 {
+    index4 += imageOutputBase >> 2u;
     if (typeO == DTYPE_F32)
         bufferO_4f32[index4] = value;
     else
@@ -99,6 +117,33 @@ float applyAffine(uint m, float sum)
         : fma(sum, readScale(m), readBias(m));
 }
 
+float readResidual(uint i) { i += imageOutputBase; return typeI == DTYPE_F32 ? bufferRes_f32[i] : float(bufferRes_f16[i]); }
+vec4 readResidual4(uint i) { return vec4(readResidual(i), readResidual(i + 1u), readResidual(i + 2u), readResidual(i + 3u)); }
+
+// Output channel m, O[index].
+float applyOutput(uint m, uint index, float sum)
+{
+    float value = applyAffine(m, sum);
+    if (shortcut && residualOrder == 1u)
+        value += readResidual(index);
+    value = applyEpilogue(value);
+    if (shortcut && residualOrder == 0u)
+        value += readResidual(index);
+    return value;
+}
+
+// Output channel m, O[base, base + 4).
+vec4 applyOutput(uint m, uint base, vec4 sum)
+{
+    vec4 value = applyAffine(m, sum);
+    if (shortcut && residualOrder == 1u)
+        value += readResidual4(base);
+    value = applyEpilogue(value);
+    if (shortcut && residualOrder == 0u)
+        value += readResidual4(base);
+    return value;
+}
+
 void reduceReorder()
 {
     const uint plane4 = pc.co * pc.n / 4u;
@@ -112,7 +157,7 @@ void reduceReorder()
 
     vec4 sum = vec4(0.0);
     for (uint split = 0u; split < pc.splitCount; ++split)
-        sum += bufferI_4f32[(transform * pc.splitCount + split) * plane4 + inner4];
+        sum += bufferI_4f32[(imagePartialBase >> 2u) + (transform * pc.splitCount + split) * plane4 + inner4];
 
     writeO4(index4, sum);
 }
@@ -126,10 +171,10 @@ void reduceF16()
 
     vec4 sum = vec4(0.0);
     for (uint split = 0u; split < pc.splitCount; ++split)
-        sum += vec4(bufferI_4f16[split * total4 + index4]);
+        sum += vec4(bufferI_4f16[(imagePartialBase >> 2u) + split * total4 + index4]);
 
     const uint m = (index4 * 4u) / pc.n;
-    writeO4(index4, applyEpilogue(applyAffine(m, sum)));
+    writeO4(index4, applyOutput(m, index4 * 4u, sum));
 }
 
 void reduceF32()
@@ -143,10 +188,10 @@ void reduceF32()
 
         vec4 sum = vec4(0.0);
         for (uint split = 0u; split < pc.splitCount; ++split)
-            sum += bufferI_4f32[split * total4 + index4];
+            sum += bufferI_4f32[(imagePartialBase >> 2u) + split * total4 + index4];
 
         const uint m = (index4 * 4u) / pc.n;
-        writeO4(index4, applyEpilogue(applyAffine(m, sum)));
+        writeO4(index4, applyOutput(m, index4 * 4u, sum));
         return;
     }
 
@@ -157,18 +202,18 @@ void reduceF32()
 
     const uint m = index / pc.n;
     const uint n = index % pc.n;
-    if (index + 3u < total && n + 3u < pc.n)
+    if (index + 3u < total && n + 3u < pc.n && (imageOutputBase & 3u) == 0u)
     {
         vec4 sum = vec4(0.0);
         for (uint split = 0u; split < pc.splitCount; ++split)
         {
-            const uint partialIndex = split * total + index;
+            const uint partialIndex = imagePartialBase + split * total + index;
             sum += vec4(bufferI_f32[partialIndex],
                         bufferI_f32[partialIndex + 1u],
                         bufferI_f32[partialIndex + 2u],
                         bufferI_f32[partialIndex + 3u]);
         }
-        writeO4(index >> 2u, applyEpilogue(applyAffine(m, sum)));
+        writeO4(index >> 2u, applyOutput(m, index, sum));
         return;
     }
 
@@ -179,18 +224,23 @@ void reduceF32()
         {
             float sum = 0.0;
             for (uint split = 0u; split < pc.splitCount; ++split)
-                sum += bufferI_f32[split * total + scalarIndex];
+                sum += bufferI_f32[imagePartialBase + split * total + scalarIndex];
 
             const uint scalarM = scalarIndex / pc.n;
             writeO(
                 scalarIndex,
-                applyEpilogue(applyAffine(scalarM, sum)));
+                applyOutput(scalarM, scalarIndex, sum));
         }
     }
 }
 
 void main()
 {
+    const uint image = convImage(pc.batch);
+    const uint imageOutput = (reorder ? 36u : 1u) * pc.co * pc.n;
+    imageOutputBase = image * imageOutput;
+    imagePartialBase = image * pc.splitCount * imageOutput;
+
     if (reorder)
     {
         reduceReorder();

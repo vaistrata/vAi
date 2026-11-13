@@ -1,7 +1,7 @@
 #ifndef VAI_NODES_SLICE_H
 #define VAI_NODES_SLICE_H
 
-#include "vai/nodes/node-common.h"
+#include "node-common.h"
 
 namespace vai::node {
 
@@ -40,7 +40,6 @@ public:
         uint32_t axis = 0;      // the axis to cut; 0 takes a contiguous block
         int64_t  start;         // first index on the axis; negative counts from the end
         uint32_t count = 1;     // how many consecutive indices to take
-        vai::Dtype oDtype = vai::Dtype::None;   // None: oDefaultDtype
     } config_;
 
     Slice(Config config);
@@ -57,13 +56,12 @@ inline Slice::Slice(Config config)
 {
     VAI_ASSERT(config_.count >= 1);
     addSlot("out0", NodeSlot::output);
-    addSlot("in0",  NodeSlot::input);
-
-    config_.oDtype = (config_.oDtype == Dtype::None) ? oDefaultDtype() : config_.oDtype;
+    addSlot("in0", NodeSlot::input);
 }
 
 inline void Slice::prepare()
 {
+    const Dtype oDtype = (oDtype_ == Dtype::None) ? oDefaultDtype() : oDtype_;
     const Tensor& inTen = (*this)["in0"];
     VAI_ASSERT(inTen.validShape());
 
@@ -95,22 +93,24 @@ inline void Slice::prepare()
         if (!pipe || p != pipeParams)
         {
             pipeParams = p;
+            // clang-format off
             pipe = pipelinePool().request("slice", {
-                eva::constant_id<SPEC_ID_TYPE_O>(config_.oDtype),   // typeO
+                eva::constant_id<SPEC_ID_TYPE_O>(oDtype),   // typeO
                 eva::constant_id<SPEC_ID_TYPE_I>(iDtype),           // typeI
             });
+            // clang-format on
             if (!descSet)
                 descSet = gVaiDestSetPool(pipe.descSetLayout(0));
         }
 
-        (*this)["out0"] = Tensor(outShape, config_.oDtype);
+        (*this)["out0"] = Tensor(outShape, oDtype);
         aliased = false;
         return;
     }
 
     // Bytes move as they are on this path, so a declared cast has no kernel to
     // happen in.
-    VAI_ASSERT(config_.oDtype == iDtype);
+    VAI_ASSERT(oDtype == iDtype);
 
     Tensor sliced = inTen.view(outShape, inTen.baseOffset() + startIdx * inner);
 
@@ -134,7 +134,7 @@ inline void Slice::run(eva::CommandBuffer cmdBuff)
         struct {
             uint32_t inner, count, axisSize, start, total;
         } constants = {
-            inner, config_.count, axisSize, startIdx, outer * config_.count * inner
+            inner, config_.count, axisSize, startIdx, outer * config_.count * inner,
         };
 
         descSet.write({ outBuf, inBuf });

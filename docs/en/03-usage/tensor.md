@@ -78,7 +78,7 @@ The purpose is to fill in the data later and create the tensor in advance. Input
 This method is used to upload weights. At this point, you need to pay attention to dtype.
 
 ```cpp
-SafetensorsParser parser(VAI_DATA_DIR "/mnist/model.safetensors");
+SafetensorsParser parser(VAI_DATA_DIR "/ckpts/mnist/jroot/model.safetensors");
 Tensor w(parser["fc.weight"]);                  // The dtype as it is in the file
 Tensor w(parser["fc.weight"], Dtype::Fp16);     // Convert to fp16 and load
 ```
@@ -88,11 +88,11 @@ The shape is taken as recorded in the file, and it starts with the host data fil
 In vAi, you need to explicitly specify the dtype of the tensor for each slot. It won't cast automatically, and if casting is needed, you need to explicitly insert a casting node.
 It is the user's responsibility to insert the right tensor if the node requires a specific dtype. If a different type is inserted, a runtime error may occur or the behavior may become undefined during execution.
 
-However, there is no need to worry too much. Nodes that need weights have an `config_.wDtype` member, and as that value is already determined in the node constructor, you only need to use this value to set the dtype when creating the tensor.
+Weights take their dtype from the tensor itself: a node reads the dtype of the weight it holds. Load weights at the net's `wDefaultDtype` and norm coefficients at fp32.
 
 ```cpp
-linear["weight"] = Tensor(parser["fc.weight"], linear.config_.wDtype);  // Always correct
-linear["weight"] = Tensor(parser["fc.weight"]);   // If the file's dtype and wDtype are different, it could be dangerous
+linear["weight"] = Tensor(parser["fc.weight"], net.config().wDefaultDtype);  // the net's weight dtype
+linear["weight"] = Tensor(parser["fc.weight"]);   // the file's dtype, whatever it is
 ```
 
 The shape is not specified like dtype, but the shape itself recorded in the file becomes the tensor's shape. That shape could be different from the shape that the node wants. In that case, you need to fix it on the host before putting it into the slot.
@@ -149,7 +149,7 @@ All four calculations leave the original as it is and return a new tensor. Howev
 
 ```cpp
 // As c_attn in HF GPT-2 is saved as [in, out], it needs to be transposed
-toQKV["weight"] = Tensor(parser["attn.c_attn.weight"], dt).permute(1, 0);
+projQKV["weight"] = Tensor(parser["attn.c_attn.weight"], dt).permute(1, 0);
 
 // Divide the fused QKV into three
 auto [q, k, v] = Tensor(parser["attn.c_attn.weight"], dt).split(D, 2 * D);
@@ -169,7 +169,7 @@ Forward is asynchronous. If you call `Tensor::downloadToHost()` on the output te
 
 ```cpp
 Tensor out;
-model(inDict, {{"nextTokenId", &out}});
+net(inDict, {{"nextTokenId", &out}});
 uint32_t next = out.getData<uint32_t>()[0];   // From inside downloadToHost()
 ```
 

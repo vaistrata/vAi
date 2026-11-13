@@ -2,7 +2,7 @@
 #define VAI_NODES_TYPE_CAST_H
 
 // TypeCast - element-wise dtype cast.
-#include "vai/nodes/node-common.h"
+#include "node-common.h"
 
 namespace vai::node {
 
@@ -70,10 +70,12 @@ inline void TypeCast::prepare()
     if (!pipe || p != pipeParams)
     {
         pipeParams = p;
+        // clang-format off
         pipe = pipelinePool().request("cast", {
             eva::constant_id<SPEC_ID_TYPE_O>(config_.oDtype),   // typeO
             eva::constant_id<SPEC_ID_TYPE_I>(iDtype)            // typeI
         });
+        // clang-format on
         if (!descSet)
             descSet = gVaiDestSetPool(pipe.descSetLayout(0));
     }

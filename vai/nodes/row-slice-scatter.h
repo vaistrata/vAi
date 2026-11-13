@@ -1,7 +1,7 @@
 #ifndef VAI_NODES_ROW_SLICE_SCATTER_H
 #define VAI_NODES_ROW_SLICE_SCATTER_H
 
-#include "vai/nodes/node-common.h"
+#include "node-common.h"
 #include <utility>
 #include <vector>
 

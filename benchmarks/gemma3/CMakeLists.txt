@@ -2,9 +2,9 @@ cmake_minimum_required(VERSION 3.21)
 
 project(bench-gemma3)
 
-# The model owns its definition (model.h) and checkpoint loader, so the bench
-# and examples/gemma3 always use the same model implementation and weights.
-set(MODEL_DIR ${CMAKE_SOURCE_DIR}/models/gemma3)
+# The model owns its definition (net.h) and checkpoint loader, so the bench
+# and models/production/gemma3/demo.cpp always use the same model implementation and weights.
+set(MODEL_DIR ${CMAKE_SOURCE_DIR}/models/production/gemma3)
 
 ################################################################################
 # vai
@@ -14,7 +14,7 @@ add_executable(bench-gemma3-vai
 )
 
 target_include_directories(bench-gemma3-vai PRIVATE
-    ${MODEL_DIR}                         # model.h
+    ${MODEL_DIR}                         # net.h
     ${CMAKE_CURRENT_SOURCE_DIR}/common   # bench-prompts.h
 )
 

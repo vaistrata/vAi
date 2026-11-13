@@ -3,8 +3,8 @@
   Brief        Checkpoint-distributor tag and the loadWeights<"...">() entry point.
 =============================================================================*/
 
-#ifndef VAI_WEIGHTS_H
-#define VAI_WEIGHTS_H
+#ifndef VAI_ENGINE_WEIGHTS_H
+#define VAI_ENGINE_WEIGHTS_H
 
 #include "safetensors-parser.h"
 #include <algorithm>
@@ -19,7 +19,7 @@
 namespace vai {
 
 // String usable as a template argument (C++20 structural NTTP), so a
-// checkpoint distributor can be spelled at the call site: loadWeights<"meta">(model).
+// checkpoint distributor can be spelled at the call site: loadWeights<"meta">(net).
 template<size_t N>
 struct Ckpt
 {
@@ -58,6 +58,8 @@ public:
             throw std::runtime_error("no *.safetensors under " + dir);
     }
 
+    bool contains(std::string_view key) const { return owner_.contains(std::string(key)); }
+
     vai::SafetensorRef operator[](std::string_view key) const
     {
         auto it = owner_.find(std::string(key));
@@ -70,10 +72,10 @@ public:
 } // namespace vai
 
 // Load `model`'s weights from the checkpoint distributed by `Name`. Declared
-// only — each model ships its own specializations (models/<name>/), which
+// only — each model ships its own specializations (models/<impl>/<model>/), which
 // also own the download location and the on-disk path of that checkpoint.
 // An unimplemented (model, distributor) pair fails at link time.
 template<vai::Ckpt Name, typename Model>
 void loadWeights(Model& model);
 
-#endif // VAI_WEIGHTS_H
+#endif   // VAI_ENGINE_WEIGHTS_H

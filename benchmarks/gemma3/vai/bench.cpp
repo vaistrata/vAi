@@ -1,4 +1,4 @@
-#include "model.h"
+#include "net.h"
 #include "google-weights.h"
 #include "vai/utils/tokenizer.h"
 #include "eva-runtime.h"
@@ -12,7 +12,9 @@
 #include <vector>
 
 using namespace vai;
+using namespace vai::utils;
 using namespace gemma3_bench;
+namespace gemma3 = model::production::gemma3;
 
 struct SizeOption { const char* name; gemma3::ModelConfig (*config)(); };
 
@@ -36,20 +38,18 @@ inline std::vector<int> makePrompt(
 
     const std::vector<int> selected(textTokens.begin(), textTokens.begin() + nText);
 
-    if (!modelCfg.visionCfg)
+    if (!modelCfg.vision)
         return selected;
 
     const int image = tokenizer.pieceToId(imageSoftToken);
 
-    if (tokenizer.pieceToId(startOfImageToken) < 0 ||
-        tokenizer.pieceToId(endOfImageToken) < 0 ||
-        image < 0 ||
-        static_cast<uint32_t>(image) != modelCfg.visionCfg->imageTokenId)
+    if (tokenizer.pieceToId(startOfImageToken) < 0 || tokenizer.pieceToId(endOfImageToken) < 0 || image < 0 ||
+        static_cast<uint32_t>(image) != modelCfg.vision->imageTokenId)
         throw std::runtime_error("tokenizer image tokens do not match the model");
 
     std::vector<int> tokens = tokenizer.encode(std::string(userPromptPrefix) + startOfImageToken);
 
-    tokens.insert(tokens.end(), modelCfg.visionCfg->tokensPerImage, image);
+    tokens.insert(tokens.end(), modelCfg.vision->tokensPerImage, image);
 
     const auto afterImage = tokenizer.encode(std::string(endOfImageToken) + textAfterImage);
     tokens.insert(tokens.end(), afterImage.begin(), afterImage.end());
@@ -111,20 +111,20 @@ int main(int argc, char** argv)
 
     gemma3::ModelConfig modelCfg = size->config();
 
-    const bool hasVision = modelCfg.visionCfg.has_value();
+    const bool hasVision = modelCfg.vision.has_value();
 
     printf("model: gemma3 %s (%s)\n",
            modelCfg.variant, args.precision.c_str());
 
-    gemma3::Model model({
-        .device = device,
-        .wDefaultDtype = precision,
-    }, modelCfg,{
-        .kvCacheDtype = precision,
-        .maxRuntimeContext = gemma3_bench::runtimeContext
-    });
+    gemma3::Net net(
+        {
+            .device = device,
+            .wDefaultDtype = precision,
+        },
+        modelCfg,
+        { .kvCacheDtype = precision, .maxRuntimeContext = gemma3_bench::runtimeContext });
 
-    loadWeights<"google">(model);
+    loadWeights<"google">(net);
 
     const std::string tokenizerPath = std::string(VAI_DATA_DIR "/gemma3/") + modelCfg.variant + "/tokenizer.json";
 
@@ -135,7 +135,7 @@ int main(int argc, char** argv)
     Tensor inImage;
 
     if (hasVision) {
-        const auto& v = modelCfg.visionCfg.value();
+        const auto& v = modelCfg.vision.value();
 
         if (v.imageChannels != gemma3_bench::syntheticImageChannels ||
             v.imageSize != gemma3_bench::syntheticImageSize)
@@ -175,14 +175,12 @@ int main(int argc, char** argv)
 
         const int nPrompt = static_cast<int>(promptTokens.size());
 
-        if (nPrompt + nGen >
-            static_cast<int>(model.runtimeCfg.maxRuntimeContext)) {
-            fprintf(
-                stderr,
-                "error: prompt %d + generation exceeds the %u-token context\n",
-                nPrompt,
-                model.runtimeCfg.maxRuntimeContext
-            );
+        if (nPrompt + nGen > static_cast<int>(net.runtimeCfg.maxRuntimeContext))
+        {
+            fprintf(stderr,
+                    "error: prompt %d + generation exceeds the %u-token context\n",
+                    nPrompt,
+                    net.runtimeCfg.maxRuntimeContext);
             return 1;
         }
 
@@ -190,10 +188,10 @@ int main(int argc, char** argv)
         Tensor outToken;
 
         auto prefill = [&]() -> int {
-            model.resetCache();
+            net.resetCache();
             inTokens.setData(promptTokens.data());
 
-            model.prefill(inImage, inTokens, &outToken);
+            net.prefill(inImage, inTokens, &outToken);
 
             return static_cast<int>(
                 outToken.getData<uint32_t>()[0]
@@ -205,7 +203,7 @@ int main(int argc, char** argv)
         for (int i = 0; i < nWarmPre; ++i) tok = prefill();
 
         for (int i = 0; i < nWarmGen; ++i) {
-            model.decode(&outToken);
+            net.decode(&outToken);
             tok = static_cast<int>(outToken.getData<uint32_t>()[0]);
         }
 
@@ -234,7 +232,7 @@ int main(int argc, char** argv)
 
             for (int gen = 0; gen < nGen; ++gen)
             {
-                model.decode(&outToken);
+                net.decode(&outToken);
                 tok = static_cast<int>(outToken.getData<uint32_t>()[0]);
 
                 if (keep) generated.push_back(tok);

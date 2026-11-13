@@ -1,0 +1,209 @@
+/*=============================================================================
+ linear-tile-intel.comp: Intel scalar path (no coopmat), a port of
+     OpenVINO's fully_connected_gpu_bf_tiled: one subgroup per workgroup, no
+     shared memory, no barrier (tests/linear-tune-intel, variant 21)
+
+     O[m, n] = sum_k I[m, k] * W[n, k]
+
+     M = flattened batch, N = outDim, K = inDim
+     O [M, N] (or split-K partials P[z, M, N]) and I [M, K] are fp32 or fp16
+     via same-binding buffer aliases; the accumulator dtype is accType.
+
+ W comes packed by Linear::packWeightIntel in 32-column blocks, a lane's 2 k x 2
+ columns side by side: W'[n / 32, k / 2, n % 16, (k % 2) * 2 + (n % 32) / 16],
+ N padded up to 32 and K up to 2 with zeros. A k pair of a block is then one
+ run of 128 B (fp16), read with one 8 B load per lane.
+
+ A subgroup owns tileB rows x 32 columns; lane j holds columns outF + j and
+ outF + 16 + j. Rows past M read row M - 1 and are not stored. Per 16 k:
+   - each row's 16 k values load one per lane
+   - per k pair, the lane reads its 2 x 2 weights, and each row's k value
+     reaches every lane by a subgroup broadcast
+   - the 16 k sum into a fresh accumulator, then add onto the running one
+     (OpenVINO's acc_tmp / acc): fp16 accumulation rounds 16-term sums onto
+     the total, not each product
+ K % 16 leftovers add straight onto the running accumulator.
+
+ Order: N-first over bands of bandTiles row tiles. The flat tile index is
+ gid = x * numY + y (Intel walks a 2D grid y-fastest), so the host can fold a
+ grid wider than the x limit: ceil(N / 32) x ceil(ceil(M / tileB) / bandTiles)
+ x bandTiles workgroups.
+
+ Split-K: workgroup z owns the K span [z * splitSize, min(K, (z + 1) *
+ splitSize)), splitSize a multiple of 16, and writes its partials to P[z, M, N]
+ on binding 0; linear-reduce.comp folds them and applies bias / epilogue.
+=============================================================================*/
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_control_flow_attributes : enable
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_ballot : require
+#extension GL_KHR_shader_subgroup_shuffle : require
+#extension GL_EXT_shader_subgroup_extended_types_float16 : require
+#include "common/spec_constants.h"
+
+layout(local_size_x = 16, local_size_y = 1, local_size_z = 1) in;
+
+layout(constant_id = 7)  const uint tileB     = 8;   // rows per subgroup
+layout(constant_id = 10) const uint bandTiles = 1;   // row tiles per band of the N-first order
+layout(constant_id = 11) const uint accType   = 1;   // accumulator dtype (0: fp32, 1: fp16)
+
+layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0;  // O (output) dtype
+layout(constant_id = SPEC_ID_TYPE_I) const uint typeI = 0;  // I (input) dtype
+layout(constant_id = SPEC_ID_TYPE_W) const uint typeW = 1;  // W (weight) dtype
+
+const uint SIMD = 16u;
+const uint OSV  = 32u;   // columns per subgroup = the packed block
+const uint TKO  = 4u;    // weights per lane per k pair
+
+layout(set = 0, binding = 0) writeonly buffer O_BUF_F32 { float bufferO_f32[]; };
+layout(set = 0, binding = 0) writeonly buffer O_BUF_F16 { float16_t bufferO_f16[]; };
+//////////////////////////////////////////////////////////////////////////////
+layout(set = 0, binding = 1) readonly buffer I_BUF_F32 { float bufferI_f32[]; };
+layout(set = 0, binding = 1) readonly buffer I_BUF_F16 { float16_t bufferI_f16[]; };
+//////////////////////////////////////////////////////////////////////////////
+layout(set = 0, binding = 2) readonly buffer W_BUF_F32  { float bufferW_f32[]; };
+layout(set = 0, binding = 2) readonly buffer W_BUF_F16  { float16_t bufferW_f16[]; };
+layout(set = 0, binding = 2) readonly buffer W_BUF_4F16 { uvec2 bufferW_4f16[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint M;
+    uint N;
+    uint K;
+    uint splitSize;   // K span per workgroup z (= K without splitting), a multiple of 16
+};
+
+float     readI(uint i)  { return (typeI == DTYPE_F32) ? bufferI_f32[i] : float(bufferI_f16[i]); }
+float16_t readIh(uint i) { return (typeI == DTYPE_F32) ? float16_t(bufferI_f32[i]) : bufferI_f16[i]; }
+float     readW(uint i)  { return (typeW == DTYPE_F32) ? bufferW_f32[i] : float(bufferW_f16[i]); }
+void writeO(uint i, float v) { if (typeO == DTYPE_F32) bufferO_f32[i] = v; else bufferO_f16[i] = float16_t(v); }
+
+// A lane's 4 weights of packed slot v (= (block * kPairs + pair) * 16 + lane),
+// [k][column group], in the accumulator's dtype: one 8 B load for fp16 W.
+void readW4(uint v, out float16_t w16[TKO], out float w32[TKO])
+{
+    if (typeW == DTYPE_F16)
+    {
+        const uvec2 u = bufferW_4f16[v];
+        const f16vec2 a = unpackFloat2x16(u.x), b = unpackFloat2x16(u.y);
+        w16[0] = a.x; w16[1] = a.y; w16[2] = b.x; w16[3] = b.y;
+        [[unroll]] for (uint j = 0; j < TKO; j++) w32[j] = float(w16[j]);
+    }
+    else
+        [[unroll]] for (uint j = 0; j < TKO; j++) { w32[j] = bufferW_f32[v * TKO + j]; w16[j] = float16_t(w32[j]); }
+}
+
+void main()
+{
+    const uint lane   = gl_SubgroupInvocationID;
+    const uint fTiles = (N + OSV - 1u) / OSV;
+    const uint bTiles = (M + tileB - 1u) / tileB;
+    const uint bands  = (bTiles + bandTiles - 1u) / bandTiles;
+    const uint gid    = gl_WorkGroupID.x * gl_NumWorkGroups.y + gl_WorkGroupID.y;
+    if (gid >= bands * bandTiles * fTiles) return;
+
+    const uint inner = gid % bandTiles, group = gid / bandTiles;
+    const uint outF  = (group % fTiles) * OSV;
+    const uint outB  = ((group / fTiles) * bandTiles + inner) * tileB;
+    if (outB >= M) return;
+
+    // Both accumulator dtypes are declared; accType picks one, the other
+    // vanishes at ISA compilation.
+    float16_t acc16[tileB * 2u], tmp16[tileB * 2u];
+    float     acc32[tileB * 2u], tmp32[tileB * 2u];
+    [[unroll]] for (uint i = 0; i < tileB * 2u; i++) { acc16[i] = 0.0hf; acc32[i] = 0.0; }
+
+    const uint kPairs = (K + 1u) / 2u;
+    const uint startK = gl_WorkGroupID.z * splitSize;
+    const uint spanK  = min(K, startK + splitSize) - startK;
+    uint wSlot = ((outF / OSV) * kPairs + startK / 2u) * SIMD + lane;   // my slot of my first k pair
+
+    const uint trips = spanK / SIMD;
+    [[dont_unroll]]
+    for (uint ni = 0; ni < trips; ni++)
+    {
+        const uint k0 = startK + ni * SIMD;
+        float16_t in16[tileB];
+        float     in32[tileB];
+        [[unroll]] for (uint bi = 0; bi < tileB; bi++)
+        {
+            const uint row = min(outB + bi, M - 1u);
+            if (accType == 0u) in32[bi] = readI(row * K + k0 + lane);
+            else               in16[bi] = readIh(row * K + k0 + lane);
+        }
+        [[unroll]] for (uint i = 0; i < tileB * 2u; i++) { tmp16[i] = 0.0hf; tmp32[i] = 0.0; }
+
+        [[unroll]] for (uint kp = 0; kp < SIMD / 2u; kp++)
+        {
+            float16_t w16[TKO];
+            float     w32[TKO];
+            readW4(wSlot, w16, w32);
+            wSlot += SIMD;
+
+            [[unroll]] for (uint kii = 0; kii < 2u; kii++)
+            {
+                const uint kk = kp * 2u + kii;
+                [[unroll]] for (uint bi = 0; bi < tileB; bi++)
+                {
+                    if (accType == 0u)
+                    {
+                        const float x = subgroupBroadcast(in32[bi], kk);
+                        [[unroll]] for (uint fi = 0; fi < 2u; fi++)
+                            tmp32[bi * 2u + fi] = fma(x, w32[kii * 2u + fi], tmp32[bi * 2u + fi]);
+                    }
+                    else
+                    {
+                        const float16_t x = subgroupBroadcast(in16[bi], kk);
+                        [[unroll]] for (uint fi = 0; fi < 2u; fi++)
+                            tmp16[bi * 2u + fi] = fma(x, w16[kii * 2u + fi], tmp16[bi * 2u + fi]);
+                    }
+                }
+            }
+        }
+
+        [[unroll]] for (uint i = 0; i < tileB * 2u; i++) { acc16[i] += tmp16[i]; acc32[i] += tmp32[i]; }
+    }
+
+    const uint left = spanK % SIMD;
+    if (left != 0u)
+    {
+        const uint k0 = startK + trips * SIMD;
+        float16_t in16[tileB];
+        float     in32[tileB];
+        [[unroll]] for (uint bi = 0; bi < tileB; bi++)
+        {
+            const uint row = min(outB + bi, M - 1u);
+            if (accType == 0u) in32[bi] = (lane < left) ? readI(row * K + k0 + lane) : 0.0;
+            else               in16[bi] = (lane < left) ? readIh(row * K + k0 + lane) : 0.0hf;
+        }
+        for (uint kk = 0; kk < left; kk++)
+        {
+            const uint k = k0 + kk;
+            [[unroll]] for (uint fi = 0; fi < 2u; fi++)
+            {
+                const float wv = readW((((outF / OSV) * kPairs + k / 2u) * SIMD + lane) * TKO + (k % 2u) * 2u + fi);
+                [[unroll]] for (uint bi = 0; bi < tileB; bi++)
+                {
+                    if (accType == 0u)
+                        acc32[bi * 2u + fi] = fma(subgroupShuffle(in32[bi], kk), wv, acc32[bi * 2u + fi]);
+                    else
+                        acc16[bi * 2u + fi] = fma(subgroupShuffle(in16[bi], kk), float16_t(wv), acc16[bi * 2u + fi]);
+                }
+            }
+        }
+    }
+
+    const uint zOff = gl_WorkGroupID.z * M * N;   // partials of split z (0 without splitting)
+    [[unroll]] for (uint bi = 0; bi < tileB; bi++)
+    {
+        const uint row = outB + bi;
+        [[unroll]] for (uint fi = 0; fi < 2u; fi++)
+        {
+            const uint n = outF + fi * SIMD + lane;
+            if (row < M && n < N)
+                writeO(zOff + row * N + n, (accType == 0u) ? acc32[bi * 2u + fi] : float(acc16[bi * 2u + fi]));
+        }
+    }
+}

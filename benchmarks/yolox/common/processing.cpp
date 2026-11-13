@@ -221,8 +221,8 @@ std::vector<float> halfBitsToFloats(const uint16_t* data, size_t count)
 
 std::vector<float> preprocessImage(const std::string& path)
 {
-    return ImageProcessor(path, kInputChannels)
-        .letterbox(kInputHeight, Align::TopLeft, 114.0f)
+    return vai::utils::ImageProcessor(path, kInputChannels)
+        .letterbox(kInputHeight, vai::utils::Align::TopLeft, 114.0f)
         .bgr()
         .chw();
 }

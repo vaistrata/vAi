@@ -1,7 +1,7 @@
 #ifndef VAI_NODES_RMS_NORM_H
 #define VAI_NODES_RMS_NORM_H
 
-#include "vai/nodes/node-common.h"
+#include "node-common.h"
 
 namespace vai::node {
 
@@ -10,11 +10,12 @@ namespace vai::node {
   RmsNorm - RMS normalization over the feature axis, single kernel
   Input : in0    activations [..., D]
   Output: out0   normalized  [..., D]
-  scale / shift   [D] (or [1, D] as an input), present per Config::hasScale /
-                 hasShift; parameters, or inputs computed upstream under
+  scale / shift   [D] (or [1, D] as an input), each applied when present: a
+                 parameter the loader filled, or an input wired upstream under
                  Config::coeffsAsInputs (e.g. pi0.5's adaRMS)
+  residual       [..., D] as in0, an input under Config::acceptResidual
 
-  O[i, j] = I[i, j] * rsqrt(mean(I[i, :]^2) + eps) (* scale[j]) (+ shift[j])
+  O[i, j] = I[i, j] * rsqrt(mean(I[i, :]^2) + eps) (* scale[j]) (+ shift[j]) (+ residual[i, j])
 
   The row statistic is a 1-pass sum of squares accumulated in fp32 regardless
   of I/O dtypes. The workgroup size depends on D, so the pipeline is requested in
@@ -33,22 +34,25 @@ public:
         bool       aligned  = false;  // vec4 I/O loads (fp32, featSize % 4 == 0)
         vai::Dtype iDtype   = vai::Dtype::None;
         vai::Dtype wDtype   = vai::Dtype::None;
+        bool hasScale = false;
+        bool hasShift = false;
 
         bool operator==(const PipeParams&) const = default;
     };
 
     struct Config {
         float eps = 1e-5f;
-        bool hasScale = true;
-        bool hasShift = false;
         bool coeffsAsInputs = false;   // scale / shift are inputs, not parameters
-        vai::Dtype wDtype = vai::Dtype::Fp32;           // persistent scale / shift; None: wDefaultDtype
-        vai::Dtype oDtype = vai::Dtype::None;           // None: oDefaultDtype
+        bool acceptResidual = false;   // input "residual", added to the output
     } config_;
 
     RmsNorm(Config config);
     void prepare() override;
     void run(eva::CommandBuffer cmdBuff) override;
+
+    // The loader filled it, or under coeffsAsInputs it is wired.
+    bool hasScale() const { return (*this)["scale"].validShape(); }
+    bool hasShift() const { return (*this)["shift"].validShape(); }
 
 private:
     PipeParams pipeParams;
@@ -85,18 +89,18 @@ inline RmsNorm::RmsNorm(Config config)
     addSlot("out0", NodeSlot::output);
     addSlot("in0", NodeSlot::input);
     const NodeSlot::Type wSlot = config_.coeffsAsInputs ? NodeSlot::input : NodeSlot::persistent;
-    if (config_.hasScale) addSlot("scale", wSlot);
-    if (config_.hasShift)  addSlot("shift",  wSlot);
-
-    config_.wDtype = (config_.wDtype == Dtype::None) ? wDefaultDtype() : config_.wDtype;
-    config_.oDtype = (config_.oDtype == Dtype::None) ? oDefaultDtype() : config_.oDtype;
+    addSlot("scale", wSlot);
+    addSlot("shift", wSlot);
+    if (config_.acceptResidual)
+        addSlot("residual", NodeSlot::input);
 }
 
 inline void RmsNorm::prepare()
 {
+    const Dtype oDtype = (oDtype_ == Dtype::None) ? oDefaultDtype() : oDtype_;
     const Tensor& inTen = (*this)["in0"];
-    const Tensor* scaleTen  = config_.hasScale ? &(*this)["scale"] : nullptr;
-    const Tensor* shiftTen  = config_.hasShift  ? &(*this)["shift"]  : nullptr;
+    const Tensor* scaleTen = hasScale() ? &(*this)["scale"] : nullptr;
+    const Tensor* shiftTen = hasShift() ? &(*this)["shift"] : nullptr;
 
     uint32_t batchSize = outerSize(inTen.shape());
     uint32_t featSize = inTen.shape().back();
@@ -106,9 +110,9 @@ inline void RmsNorm::prepare()
     // (65535 per axis) devices, so this is defense against a broken query.
     VAI_ASSERT(uint64_t(batchSize) <= uint64_t(device().maxComputeWorkGroupCount()[0])
                                                      * device().maxComputeWorkGroupCount()[1]);
-    // Input scale / shift come at whatever dtype their producer wrote, sharing typeW.
-    const Dtype wDtype = !config_.coeffsAsInputs ? config_.wDtype
-                       : scaleTen ? scaleTen->dtype() : shiftTen ? shiftTen->dtype() : config_.wDtype;
+    // scale / shift share typeW: the loader's dtype, or the producer's under coeffsAsInputs.
+    // Neither present: None, typeW unread.
+    const Dtype wDtype = scaleTen ? scaleTen->dtype() : shiftTen ? shiftTen->dtype() : Dtype::None;
     for (const Tensor* t : {scaleTen, shiftTen})
     {
         if (!t) continue;
@@ -117,36 +121,48 @@ inline void RmsNorm::prepare()
     }
 
     const Dtype iDtype = inTen.dtype();
+    if (config_.acceptResidual)
+    {
+        const Tensor& rTen = (*this)["residual"];
+        VAI_ASSERT(rTen.shape() == inTen.shape());
+        VAI_ASSERT(rTen.dtype() == iDtype);
+    }
 
-    const PipeParams p = rmsTuning(featSize, iDtype, wDtype, config_.oDtype, device());
+    PipeParams p = rmsTuning(featSize, iDtype, wDtype, oDtype, device());
+    p.hasScale = scaleTen != nullptr;
+    p.hasShift = shiftTen != nullptr;
     if (!pipe || p != pipeParams)
     {
         pipeParams = p;
+        // clang-format off
         pipe = pipelinePool().request("rms-norm", {
             eva::constant_id<0>(p.wgSize),                       // wgSize
             eva::constant_id<1>(p.sgReduce ? 1u : 0u),           // sgReduce
-            eva::constant_id<2>(config_.hasScale ? 1u : 0u),     // hasScale
-            eva::constant_id<3>(config_.hasShift ? 1u : 0u),     // hasShift
-            eva::constant_id<SPEC_ID_TYPE_O>(config_.oDtype),    // typeO
+            eva::constant_id<2>(p.hasScale ? 1u : 0u),           // hasScale
+            eva::constant_id<3>(p.hasShift ? 1u : 0u),           // hasShift
+            eva::constant_id<4>(config_.acceptResidual ? 1u : 0u),  // hasResidual
+            eva::constant_id<SPEC_ID_TYPE_O>(oDtype),    // typeO
             eva::constant_id<SPEC_ID_TYPE_I>(iDtype),            // typeI
             eva::constant_id<SPEC_ID_TYPE_W>(wDtype),            // typeW (scale & shift)
             eva::constant_id<SPEC_ID_ALIGNED>(p.aligned ? 1u : 0u)  // aligned (vec4 loads)
         }, { .requiredSubgroupSize = p.sgSize });
+        // clang-format on
         if (!descSet)
             descSet = gVaiDestSetPool(pipe.descSetLayout(0));
     }
 
-    (*this)["out0"] = Tensor(inTen.shape(), config_.oDtype);
+    (*this)["out0"] = Tensor(inTen.shape(), oDtype);
 }
 
 inline void RmsNorm::run(eva::CommandBuffer cmdBuff)
 {
     auto outBuf = (*this)["out0"].buffer();
     auto inBuf  = (*this)["in0"].buffer();
-    auto scaleBuf   = config_.hasScale ? (*this)["scale"].buffer() : eva::Buffer();
-    auto shiftBuf   = config_.hasShift  ? (*this)["shift"].buffer()  : eva::Buffer();
+    auto scaleBuf = pipeParams.hasScale ? (*this)["scale"].buffer() : eva::Buffer();
+    auto shiftBuf = pipeParams.hasShift ? (*this)["shift"].buffer() : eva::Buffer();
+    auto resBuf = config_.acceptResidual ? (*this)["residual"].buffer() : inBuf;
 
-    descSet.write({ outBuf, inBuf, scaleBuf, shiftBuf });
+    descSet.write({ outBuf, inBuf, scaleBuf, shiftBuf, resBuf });
 
     const auto& shape = (*this)["in0"].shape();
     uint32_t batchSize = outerSize(shape);

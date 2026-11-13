@@ -2,14 +2,16 @@
 
 YOLOv8(Ultralytics, 2023)은 단일 패스 객체 검출 모델입니다. CSPDarknet 백본, PANet 넥, DFL(Distribution Focal Loss) 기반 anchor-free 검출 헤드로 이루어지며 세 스케일(stride 8, 16, 32)에서 박스와 클래스 확률을 뽑습니다. COCO 80클래스 체크포인트를 씁니다.
 
-**참고자료**: [저장소](https://github.com/ultralytics/ultralytics), [체크포인트(HuggingFace)](https://huggingface.co/Ultralytics/YOLOv8), [문서](https://docs.ultralytics.com/models/yolov8/)
+**참고자료**: [저장소](https://github.com/ultralytics/ultralytics), [체크포인트(HuggingFace)](https://huggingface.co/Ultralytics/YOLOv8), [문서](https://docs.ultralytics.com/models/production/yolov8/)
 
 ## 설정
 
 ```cpp
+namespace yolov8 = model::internal::yolov8;
+
 auto cfg = yolov8::getConfigCOCO(yolov8::Tier::LARGE);
 
-yolov8::Model model({
+yolov8::Net net({
     .device       = device,
     .defaultDtype = Dtype::Fp16,
 }, cfg, {
@@ -55,8 +57,8 @@ YOLOv8는 기본값을 그대로 씁니다. `conv` 가중치와 `BN` 파라미�
 vAi에서 모델은 노드를 `-`로 이어 만든 DAG입니다. 세부사항은 [노드](../03-usage/node.md)와 [노드그룹](../03-usage/node-group.md) 문서를 참조.
 
 검출 백본의 conv는 전부 빌트인 [`Convolution`](../06-nodes.md#convolution)가 맡습니다.
-가중치 로더가 CPU에서 BN의 `scale`·`bias`를 합성해 전달합니다. 노드는
-`hasScale`·`hasBias`와 SiLU 옵션을 받아 커널 형태에 따라 Winograd, implicit GEMM, GEMM
+가중치 로더가 CPU에서 BN의 `scale`·`bias`를 합성해 슬롯에 넣습니다. 노드는
+채워진 슬롯과 SiLU 옵션으로 커널 형태에 따라 Winograd, implicit GEMM, GEMM
 경로를 스스로 고릅니다. 모델 폴더에 남은 전용 노드는 YOLO에만 있는 연산 셋뿐입니다.
 
 *`H`와 `W`: 입력 해상도, `N`: 전 스케일 앵커 수 (640x640이면 8,400).*
@@ -75,7 +77,7 @@ detector - output("out0");           // [4 + numClasses, N]
 ```
 
 출력은 `[84, 8400]` 형태의 raw 텐서(박스 4행 + 클래스별 확률 80행)입니다. NMS는 GPU 밖
-후처리([`examples/yolov8/processing.h`](../../../examples/yolov8/processing.h))에서 합니다.
+후처리([`models/internal/yolov8/processing.h`](../../../models/internal/yolov8/processing.h))에서 합니다.
 ncnn, ONNX Runtime 등 비교 프레임워크의 YOLOv8 출력과 같은 형태라 벤치에서 후처리를 공유합니다.
 
 ### NodeGroup
@@ -85,11 +87,11 @@ YOLOv8를 구현하며 정의한 [노드그룹](../03-usage/node-group.md)입니
 
 #### Bottleneck
 
-3x3 `conv` 둘을 잇는 잔차 블록입니다. `shortcut`이 꺼지면 잔차 없이 통과합니다.
+3x3 `conv` 둘을 잇는 잔차 블록입니다. `shortcut`이 켜지면 `conv2`가 입력을 `residual`로 받아 더하고, 꺼지면 잔차 없이 통과합니다.
 
 ```cpp
-input - conv1 - conv2 - "in0"/add;
-input                 - "in1"/add;
+input - conv1 - conv2;
+input - "residual"/conv2;   // shortcut일 때만
 ```
 
 #### C2fModule
@@ -106,7 +108,7 @@ concat - convOut;
 
 #### SPPFModule
 
-Spatial Pyramid Pooling Fast입니다. 3단 최대 풀링과 concat을 전용 노드 `SPPFNode` 한 커널로 처리합니다.
+Spatial Pyramid Pooling Fast입니다. 3단 최대 풀링과 concat을 전용 노드 `node::SPPF` 한 커널로 처리합니다.
 
 ```cpp
 convIn - sppf - convOut;
@@ -119,17 +121,17 @@ convIn - sppf - convOut;
 | `Backbone` | CSPDarknet: stride-2 `conv` 하나(`p1`) 뒤 (stride-2 `conv` + `C2f`) 네 단(`p2`~`p5`), 끝에 SPPF | `in0` → `out_p3`, `out_p4`, `out_p5` |
 | `Neck` | PANet: top-down FPN([`NearestUpsample`](../06-nodes.md#nearestupsample) + concat + `C2f`) 뒤 bottom-up PAN(stride-2 `conv` + concat + `C2f`) | `in_p3..5` → `out_p3..5` |
 | `Head` | 스케일마다 `reg`와 `cls` 두 갈래(3x3 `conv` 둘 + 1x1 `pred`), 스케일별로 평탄화해 그대로 내보냄 | `in_p3..5` → `reg_p3..5` `[4·regMax, Nₚ]`, `cls_p3..5` `[numClasses, Nₚ]` |
-| `DetectionDecoder` | 세 스케일의 회귀와 클래스 출력을 `DecodeNode` 한 커널로 디코드 (DFL → 픽셀 박스, `cls` → `sigmoid`) | `reg_p3..5`, `cls_p3..5` → `out0` `[4 + numClasses, N]` |
+| `DetectionDecoder` | 세 스케일의 회귀와 클래스 출력을 `node::Decode` 한 커널로 디코드 (DFL → 픽셀 박스, `cls` → `sigmoid`) | `reg_p3..5`, `cls_p3..5` → `out0` `[4 + numClasses, N]` |
 
 ### 전용 노드
 
-YOLO에만 있는 연산입니다. [`models/yolov8/nodes/`](../../../models/yolov8/nodes/)와
-[`shaders/`](../../../models/yolov8/shaders/)에 있습니다.
+YOLO에만 있는 연산입니다. [`models/internal/yolov8/nodes/`](../../../models/internal/yolov8/nodes/)와
+[`shaders/`](../../../models/internal/yolov8/shaders/)에 있습니다.
 
 | 노드 | 내용 | 커널 |
 |---|---|---|
-| `SPPFNode` | 3단 최대 풀링과 concat을 한 커널로 | `sppf.comp` |
-| `DecodeNode` | DFL 회귀와 클래스 출력을 `[4 + numClasses, N]`로 디코드 | `decode.comp` |
+| `node::SPPF` | 3단 최대 풀링과 concat을 한 커널로 | `sppf.comp` |
+| `node::Decode` | DFL 회귀와 클래스 출력을 `[4 + numClasses, N]`로 디코드 | `decode.comp` |
 
 ### 사용 노드
 
@@ -143,46 +145,49 @@ YOLO에만 있는 연산입니다. [`models/yolov8/nodes/`](../../../models/yolo
 
 ## 체크포인트
 
-체크포인트는 `data/yolov8/` 아래에 둡니다. 모델 크기는 파일명의 `yolov8<tier>`로 구분합니다.
-데모 입력 이미지는 모든 tier가 공유합니다.
+체크포인트는 `data/ckpts/yolov8/ultralytics/` 아래 tier별 폴더에 둡니다.
+데모 입력 이미지는 `data/images/`에 있습니다.
 
 ```
-data/yolov8/
-├── dog.jpg                     공용 데모 입력
-├── yolov8l.pt                  Ultralytics 원본
-├── yolov8l.safetensors         변환 결과: 로더가 읽는 파일
-└── ...
+data/
+├── ckpts/yolov8/ultralytics/
+│   ├── large/
+│   │   ├── model.pt              Ultralytics 원본
+│   │   └── model.safetensors     변환 결과: 로더가 읽는 파일
+│   └── ...
+└── images/
+    └── dog.jpg                   데모 입력
 ```
 
 Ultralytics가 배포하는 것은 safetensors가 아니라 `.pt`라 다른 모델과 달리 받은 뒤 한 번 변환해야
 합니다. 가중치는 [AGPL-3.0](https://github.com/ultralytics/ultralytics/blob/main/LICENSE)을 따릅니다.
 
 1. [huggingface.co/Ultralytics/YOLOv8](https://huggingface.co/Ultralytics/YOLOv8)에서 받아
-`data/yolov8/yolov8<n|s|m|l|x>.pt`로 둡니다.
+`data/ckpts/yolov8/ultralytics/<nano|small|medium|large|xlarge>/model.pt`로 둡니다.
 
 2. 변환합니다. `.pt`는 state dict가 아니라 모듈째 저장된 형식이라 언피클에 `ultralytics` 패키지가
 필요합니다.
 
 ```bash
 pip install ultralytics safetensors
-python models/yolov8/ultralytics-weights-convertor.py        # 있는 것 전부
-python models/yolov8/ultralytics-weights-convertor.py n l    # tier 지정
+python models/internal/yolov8/ultralytics-weights-convertor.py        # 있는 것 전부
+python models/internal/yolov8/ultralytics-weights-convertor.py nano large    # tier 지정
 ```
 
-같은 디렉터리에 `yolov8<tier>.safetensors`가 생깁니다.
+각 `model.pt` 옆에 `model.safetensors`가 생깁니다.
 
 ### 가중치 로딩
 
-체크포인트를 그래프 슬롯에 매핑하는 코드는 [`models/yolov8/ultralytics-weights.h`](../../../models/yolov8/ultralytics-weights.h)에
+체크포인트를 그래프 슬롯에 매핑하는 코드는 [`models/internal/yolov8/ultralytics-weights.h`](../../../models/internal/yolov8/ultralytics-weights.h)에
 있습니다. 실행하는 쪽은 한 줄이면 됩니다.
 
 ```cpp
-loadWeights<"ultralytics">(model);
+loadWeights<"ultralytics">(net);
 ```
 
 경로는 `model.cfg.tier`로 특수화가 조립하므로(`VAI_DATA_DIR "/yolov8/yolov8" + <tier 글자>`) 부르는
 쪽은 `tier`만 정하면 됩니다. 배포명 태그의 원리는 [커스텀 모델 작성의 `배포명-weights.h`](../05-contributing-models.md#배포명-weightsh) 참조. Ultralytics의 `model.<n>` 인덱스 키를 `backbone`, `neck`, `head` 멤버로 옮기는 매핑이 로더의
-본체입니다. `conv` 가중치와 `BN` 파라미터(`gamma`, `beta`, `running mean`/`var`)를 모두 노드의 `wDtype`으로
+본체입니다. `conv` 가중치와 `BN` 파라미터(`gamma`, `beta`, `running mean`/`var`)를 모두 넷의 `wDefaultDtype`으로
 읽습니다. 가중치 로더가 BN의 `scale`·`bias`를 계산해 `Convolution`에 전달합니다.
 
 ## 실행
@@ -190,39 +195,35 @@ loadWeights<"ultralytics">(model);
 ### 폴더 구조
 
 ```
-models/yolov8/
-├── model.h                           모델 정의 및 NodeGroup 정의
+models/internal/yolov8/
+├── net.h                             모델 정의 및 NodeGroup 정의
 ├── nodes/                            전용 노드 (SPPF, Decode)
 ├── shaders/                          전용 노드의 커널
 ├── ultralytics-weights.h             Ultralytics 체크포인트 매핑
-└── ultralytics-weights-convertor.py  .pt -> .safetensors 변환
-
-examples/yolov8/
+├── ultralytics-weights-convertor.py  .pt -> .safetensors 변환
 ├── demo.cpp                          demo-yolov8: 이미지 한 장 검출 + 시간 측정
-├── processing.h  processing.cpp      전처리, 후처리 (letterbox, NMS)
+├── processing.h                      전처리, 후처리 (letterbox, NMS)
 └── CMakeLists.txt
 
-data/yolov8/
-├── dog.jpg
-├── yolov8n.safetensors                NANO
-├── yolov8s.safetensors                SMALL
-├── yolov8m.safetensors                MEDIUM
-├── yolov8l.safetensors                LARGE
-└── yolov8x.safetensors                XLARGE
+data/
+├── ckpts/yolov8/ultralytics/
+│   └── <tier>/model.safetensors      Tier: nano, small, medium, large, xlarge
+└── images/
+    └── dog.jpg
 ```
 
 ### 빌드 및 실행
 
 ```bash
-cmake -B build -DVAI_BUILD_EXAMPLES=ON
+cmake -B build
 cmake --build build --config RelWithDebInfo
 
 # Run
 ./build/bin/demo-yolov8
 ```
 
-`data/yolov8/dog.jpg`를 `LARGE` `tier`, `fp16`으로 검출하고 커널 형태별 프로파일을 찍습니다.
-`tier`와 추론 설정은 [`demo.cpp`](../../../examples/yolov8/demo.cpp) 상단에서 바꿉니다.
+`data/images/dog.jpg`를 `LARGE` `tier`, `fp16`으로 검출하고 커널 형태별 프로파일을 찍습니다.
+`tier`와 추론 설정은 [`demo.cpp`](../../../models/internal/yolov8/demo.cpp) 상단에서 바꿉니다.
 
 ## 벤치마크 요약
 

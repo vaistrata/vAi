@@ -2,8 +2,8 @@
  Unified non-CM K=3/S=2 implicit-GEMM convolution.
  Independent specialization traits select the exact compile-time path instead
  of encoding combinations of those traits in a numeric mode.
- Bindings: O=0, I=1, W=2, BIAS=3, SCALE=4.
- Dispatch: x=N tiles, y=Co tiles, z=split count.
+ Bindings: O=0, I=1, W=2, BIAS=3, SCALE=4, RESIDUAL=5.
+ Dispatch: x=N tiles, y=Co tiles, z=pc.batch images x split count.
  Push constants: PushConstants.
 =============================================================================*/
 #version 450
@@ -24,6 +24,8 @@ layout(constant_id = 5) const bool alignM = false;
 layout(constant_id = 6) const uint splitK = 1u;
 layout(constant_id = 7) const bool alignN = false;
 layout(constant_id = 8) const bool alignK = false;
+layout(constant_id = 9) const bool shortcut = false;
+layout(constant_id = 10) const uint residualOrder = 0u;  // 0: after the epilogue, 1: before it
 // Keep accumulator arrays and their unrolled loops at a literal size of 8.
 // Specialization-constant array sizes or loop bounds regress NVIDIA codegen.
 layout(constant_id = SPEC_ID_TYPE_CI) const uint CI_SPEC = 0u;
@@ -51,6 +53,8 @@ layout(set = 0, binding = 3) restrict readonly buffer BIAS_BUF_F32 { float buffe
 layout(set = 0, binding = 3) restrict readonly buffer BIAS_BUF_F16 { float16_t bufferBias_f16[]; };
 layout(set = 0, binding = 4) restrict readonly buffer SCALE_BUF_F32 { float bufferScale_f32[]; };
 layout(set = 0, binding = 4) restrict readonly buffer SCALE_BUF_F16 { float16_t bufferScale_f16[]; };
+layout(set = 0, binding = 5) restrict readonly buffer RES_BUF_F32 { float bufferRes_f32[]; };
+layout(set = 0, binding = 5) restrict readonly buffer RES_BUF_F16 { float16_t bufferRes_f16[]; };
 
 layout(push_constant) uniform PushConstants {
     uint hi;
@@ -63,7 +67,10 @@ layout(push_constant) uniform PushConstants {
     uint splitCount;
     uint kernel;
     uint stride;
+    uint batch;             // images, stacked on the dispatch z axis
 } pc;
+
+#include "common/conv_batch.h"
 
 const uint KERNEL_TAPS = 9u;
 
@@ -94,8 +101,12 @@ shared float16_t Bs16[typeW == DTYPE_F16 ? TILE_BUFFERS : 1u][B_TILE_ELEMS];
 shared float SharedSplit[SPLIT_SHARED_ALLOC];
 shared float16_t SharedSplit16[SPLIT_SHARED16_ALLOC];
 
-float readI(uint i) { return typeI == DTYPE_F32 ? bufferI_f32[i] : float(bufferI_f16[i]); }
-float16_t readI16(uint i) { return typeI == DTYPE_F32 ? float16_t(bufferI_f32[i]) : bufferI_f16[i]; }
+// The workgroup's image within I, and within O and the residual.
+uint imageInputBase = 0u;
+uint imageOutputBase = 0u;
+
+float readI(uint i) { i += imageInputBase; return typeI == DTYPE_F32 ? bufferI_f32[i] : float(bufferI_f16[i]); }
+float16_t readI16(uint i) { i += imageInputBase; return typeI == DTYPE_F32 ? float16_t(bufferI_f32[i]) : bufferI_f16[i]; }
 float readBias(uint m)
 {
     if (hasBias == 0u) return 0.0;
@@ -103,12 +114,25 @@ float readBias(uint m)
 }
 float readScale(uint m) { return typeP == DTYPE_F32 ? bufferScale_f32[m] : float(bufferScale_f16[m]); }
 float readW(uint i) { return typeW == DTYPE_F32 ? bufferW_f32[i] : float(bufferW_f16[i]); }
+float readResidual(uint i) { i += imageOutputBase; return typeI == DTYPE_F32 ? bufferRes_f32[i] : float(bufferRes_f16[i]); }
 
+// The residual's first `count` elements from i; the rest read as 0.
+vec4 readResidual4(uint i, uint count)
+{
+    return vec4(count > 0u ? readResidual(i) : 0.0,
+                count > 1u ? readResidual(i + 1u) : 0.0,
+                count > 2u ? readResidual(i + 2u) : 0.0,
+                count > 3u ? readResidual(i + 3u) : 0.0);
+}
+
+// O's four elements from element i, a multiple of 4 with the image's base.
 void writeO4(uint i, vec4 v) {
+    i = (imageOutputBase + i) >> 2u;
     if (typeO == DTYPE_F32) bufferO_4f32[i] = v;
     else bufferO_4f16[i] = f16vec4(v);
 }
 void writeO(uint i, float v) {
+    i += imageOutputBase;
     if (typeO == DTYPE_F32) bufferO_f32[i] = v;
     else bufferO_f16[i] = float16_t(v);
 }
@@ -203,12 +227,19 @@ float16_t readConvInput16(uint k, uint hOut, uint wOut, uint Hi, uint Wi)
     return readI16((c * Hi + uint(hIn)) * Wi + uint(wIn));
 }
 
-vec4 applyOutput(uint m, vec4 acc)
+// Output channel m, elements [base, base + count) of O.
+vec4 applyOutput(uint m, uint base, uint count, vec4 acc)
 {
     vec4 value = hasScale == 0u
         ? acc + vec4(readBias(m))
         : fma(vec4(readScale(m)), acc, vec4(readBias(m)));
-    return applyEpilogue(value);
+    const vec4 residual = shortcut ? readResidual4(base, count) : vec4(0.0);
+    if (shortcut && residualOrder == 1u)
+        value += residual;
+    value = applyEpilogue(value);
+    if (shortcut && residualOrder == 0u)
+        value += residual;
+    return value;
 }
 
 void writeOutputRow4(uint m, uint n0, uint N, vec4 v)
@@ -216,11 +247,11 @@ void writeOutputRow4(uint m, uint n0, uint N, vec4 v)
     if (!alignN && n0 >= N)
         return;
     uint base = m * N + n0;
-    vec4 value = applyOutput(m, v);
     uint remaining = alignN ? 4u : N - n0;
-    if (alignN || (remaining >= 4u && (base & 3u) == 0u))
+    vec4 value = applyOutput(m, base, min(remaining, 4u), v);
+    if (alignN || (remaining >= 4u && ((imageOutputBase + base) & 3u) == 0u))
     {
-        writeO4(base >> 2u, value);
+        writeO4(base, value);
         return;
     }
     writeO(base, value.x);
@@ -241,6 +272,9 @@ void main()
     uint Co = CO_SPEC != 0u ? CO_SPEC : pc.co;
     uint N = Ho * Wo;
     uint KK = Ci * KERNEL_TAPS;
+    const uint image = convImage(pc.batch);
+    imageInputBase = image * Ci * Hi * Wi;
+    imageOutputBase = image * Co * N;
 
     // Wide-M path for fully tiled FP32 plans. Keep the established acc[8]
     // paths below unchanged so their specialization codegen remains stable.
@@ -414,7 +448,7 @@ void main()
                 if (rowAligned)
                 {
                     uint base = (m0 + tm) * N + n0;
-                    writeO4(base >> 2u, applyOutput(m0 + tm, acc[tm]));
+                    writeO4(base, applyOutput(m0 + tm, base, 4u, acc[tm]));
                 }
                 else
                 {
@@ -527,7 +561,7 @@ void main()
     // K-split path: write FP32 partial sums without applying the epilogue.
     if (K_SPLIT)
     {
-        uint splitId = gl_WorkGroupID.z;
+        uint splitId = convImageZ(pc.batch);
         uint kPerSplit = (KK + splitK - 1u) / splitK;
         uint kStart = splitId * kPerSplit;
         uint kEnd = min(kStart + kPerSplit, KK);
@@ -627,7 +661,8 @@ void main()
 
         uint m0 = tileRow * wgM + threadM * tM;
         uint n0 = tileCol * wgN + threadN * tN;
-        uint partialOffset = splitId * Co * N;
+        // Image-major partials: [image][split][Co * N].
+        uint partialOffset = gl_WorkGroupID.z * Co * N;
 
         [[unroll]]
         for (uint tm = 0u; tm < 8u; ++tm)
@@ -752,10 +787,10 @@ void main()
             if (alignM || m < Co)
             {
                 uint base = m * N + n0;
-                vec4 v = applyOutput(m, acc[tm]);
-                if ((alignN || n0 + 3u < N) && (base & 3u) == 0u)
+                vec4 v = applyOutput(m, base, n0 < N ? min(4u, N - n0) : 0u, acc[tm]);
+                if ((alignN || n0 + 3u < N) && ((imageOutputBase + base) & 3u) == 0u)
                 {
-                    writeO4(base >> 2u, v);
+                    writeO4(base, v);
                 }
                 else
                 {

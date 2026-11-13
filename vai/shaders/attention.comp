@@ -18,13 +18,20 @@
  inputs, never from the freshly-written cache, so cache writes carry no read
  dependency inside this dispatch.
 
- windowSize > 0 narrows causality to a sliding window: a query at position p
- attends [p - windowSize + 1, p] instead of [0, p]. It only moves the sweep's
- lower bound — the cache still holds every token.
+ The mask's span bounds a query from below (keyStart, a sliding window); it only
+ moves the sweep's lower bound.
+
+ Ring cache (spec kvCacheRing): the cache keeps the last Tmax positions,
+ position p at row p % Tmax. The host holds Tmax to at least span + Tkv - 1, so
+ the append overwrites only positions below every query's span.
 
  kvCaching == 0 drops step 1: the cache and counter descriptors are null, so
  kvCacheCount reads back as 0 and the fusion trick serves the whole sweep
  from the K, V inputs.
+
+ The K, V inputs carry Tkv rows (0 = the cache alone), aligned with the Tq
+ queries at their ends; Tkv > Tq rows append Tq apart across the query
+ threads.
 =============================================================================*/
 #version 450
 #extension GL_GOOGLE_include_directive : require
@@ -34,7 +41,7 @@
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
-layout(constant_id = 0) const uint windowSize = 0;    // sliding-window span (0 = unbounded)
+layout(constant_id = 0) const uint kvCacheRing = 0;   // 1: the cache keeps the last Tmax positions, p at row p % Tmax
 layout(constant_id = 1) const uint typeI      = 0;    // Q / K / V input dtype
 layout(constant_id = 2) const uint typeCache  = 0;    // K / V cache dtype
 layout(constant_id = 3) const uint kvCaching  = 1;    // 0: skip the append; the cache bindings are null
@@ -45,9 +52,9 @@ layout(set = 0, binding = 0) buffer O_BUF_F16      { float16_t bufferO_f16[]; };
 //////////////////////////////////////////////////////////////////////////////
 layout(set = 0, binding = 1) buffer Q_BUF_F32      { float bufferQ_f32[]; };   // query Q [B, Hq, Tq, Dh]
 layout(set = 0, binding = 1) buffer Q_BUF_F16      { float16_t bufferQ_f16[]; };
-layout(set = 0, binding = 2) buffer K_BUF_F32      { float bufferK_f32[]; };   // key   K [B, Hkv, Tq, Dh] (new tokens)
+layout(set = 0, binding = 2) buffer K_BUF_F32      { float bufferK_f32[]; };   // key   K [B, Hkv, Tkv, Dh] (new tokens)
 layout(set = 0, binding = 2) buffer K_BUF_F16      { float16_t bufferK_f16[]; };
-layout(set = 0, binding = 3) buffer V_BUF_F32      { float bufferV_f32[]; };   // value V [B, Hkv, Tq, Dh] (new tokens)
+layout(set = 0, binding = 3) buffer V_BUF_F32      { float bufferV_f32[]; };   // value V [B, Hkv, Tkv, Dh] (new tokens)
 layout(set = 0, binding = 3) buffer V_BUF_F16      { float16_t bufferV_f16[]; };
 //////////////////////////////////////////////////////////////////////////////
 layout(set = 0, binding = 4) buffer KCACHE_BUF_F32 { float bufferKCache_f32[]; };   // K cache [B, Hkv, Tmax, Dh]
@@ -62,12 +69,32 @@ layout(push_constant) uniform PushConstants {
     uint Hq;
     uint groupSize;   // Hq / Hkv: query heads sharing one KV head
     uint Tq;
+    uint Tkv;         // K / V input rows
     uint Tmax;
     float scale;
 };
 
 #define CAUSAL_MASK_BINDING 7
 #include "common/causal_mask.h"
+
+// newTokenEnd among the Tkv new keys, queries and keys aligned at their ends:
+// query t sits at key t + Tkv - Tq.
+uint keyEnd(uint t)
+{
+    return uint(max(int(newTokenEnd(t) + Tkv) - int(Tq), 0));
+}
+
+// Query t's own key position, in the same alignment keyEnd uses.
+uint keyPos(uint t)
+{
+    return kvCacheCount + uint(max(int(t + Tkv) - int(Tq), 0));
+}
+
+// The cache row that holds position p.
+uint cacheRow(uint p)
+{
+    return (kvCacheRing != 0u) ? p % Tmax : p;
+}
 
 float readQ(uint i)      { return (typeI == DTYPE_F32) ? bufferQ_f32[i] : float(bufferQ_f16[i]); }
 float readK(uint i)      { return (typeI == DTYPE_F32) ? bufferK_f32[i] : float(bufferK_f16[i]); }
@@ -105,18 +132,22 @@ void main()
 
     uint kvHead      = z / groupSize;          // = b * Hkv + hq / groupSize
     uint kvCacheBase = kvHead * Tmax  * Dh;
-    uint kvInputBase = kvHead * Tq * Dh;
+    uint kvInputBase = kvHead * Tkv * Dh;
     uint qRowOffset  = (z * Tq + tq) * Dh;
 
     // (A) Persist new K, V into the cache for future dispatches. Element-owned:
     //     one lane per element. No barrier(): attention reads new tokens from
     //     the inputs, not these fresh slots.
+    //     Row tq, then (cross-attention, Tkv > Tq) every Tq-th row after it.
     if (kvCaching != 0u && z % groupSize == 0u)
     {
-        uint srcIdx = kvInputBase + tq * Dh + dh;
-        uint dstIdx = kvCacheBase + (kvCacheCount + tq) * Dh + dh;
-        writeKCache(dstIdx, readK(srcIdx));
-        writeVCache(dstIdx, readV(srcIdx));
+        for (uint t = tq; t < Tkv; t += Tq)
+        {
+            uint srcIdx = kvInputBase + t * Dh + dh;
+            uint dstIdx = kvCacheBase + cacheRow(kvCacheCount + t) * Dh + dh;
+            writeKCache(dstIdx, readK(srcIdx));
+            writeVCache(dstIdx, readV(srcIdx));
+        }
     }
 
     // (B) Online-softmax attention over the range this query owns.
@@ -124,14 +155,13 @@ void main()
     float lPrev = 0.0;
     float acc   = 0.0;
 
-    // My query's position and the oldest token it may attend to.
-    uint qPos     = kvCacheCount + tq;
-    uint sweepPos = (windowSize == 0u || qPos < windowSize) ? 0u : qPos + 1u - windowSize;
+    // The oldest token my query may attend to.
+    uint sweepPos = keyStart(keyPos(tq));
 
     // Phase 1: cached tokens  j ∈ [sweepPos, kvCacheCount)
     for (uint j = sweepPos; j < kvCacheCount; ++j)
     {
-        uint kBase = kvCacheBase + j * Dh;
+        uint kBase = kvCacheBase + cacheRow(j) * Dh;
         float qk = 0.0;
         for (uint dh_ = 0u; dh_ < Dh; ++dh_)
             qk += readQ(qRowOffset + dh_) * readKCache(kBase + dh_);
@@ -139,7 +169,7 @@ void main()
     }
 
     // Phase 2: this dispatch's new tokens  j ∈ [sweepPos - cached, newEnd)
-    uint newEnd = newTokenEnd(tq);
+    uint newEnd = keyEnd(tq);
 
     for (uint j = max(sweepPos, kvCacheCount) - kvCacheCount; j < newEnd; ++j)
     {

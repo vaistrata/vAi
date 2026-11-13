@@ -1,7 +1,7 @@
 #ifndef VAI_NODES_TIME_EMBEDDING_H
 #define VAI_NODES_TIME_EMBEDDING_H
 
-#include "vai/nodes/node-common.h"
+#include "node-common.h"
 #include <vector>
 
 namespace vai::node {
@@ -31,7 +31,6 @@ public:
         float minPeriod;                // the fastest sinusoid, in units of t
         float maxPeriod;                // ... and the slowest
         uint32_t numSteps;              // runs before t is back at 1
-        vai::Dtype oDtype = vai::Dtype::None;   // None: oDefaultDtype
     } config_;
 
     TimeEmbedding(Config config);
@@ -56,16 +55,15 @@ inline TimeEmbedding::TimeEmbedding(Config config)
     ticketBuffer = device().createBuffer({
         .size = sizeof(uint32_t),
         .usage = eva::BUFFER_USAGE::STORAGE_BUFFER,
-        .reqMemProps = eva::MEMORY_PROPERTY::DEVICE_LOCAL
-                     | eva::MEMORY_PROPERTY::HOST_VISIBLE | eva::MEMORY_PROPERTY::HOST_COHERENT
+        .reqMemProps = eva::MEMORY_PROPERTY::DEVICE_LOCAL | eva::MEMORY_PROPERTY::HOST_VISIBLE |
+                       eva::MEMORY_PROPERTY::HOST_COHERENT,
     });
     resetTime();
-
-    config_.oDtype = (config_.oDtype == Dtype::None) ? oDefaultDtype() : config_.oDtype;
 }
 
 inline void TimeEmbedding::prepare()
 {
+    const Dtype oDtype = (oDtype_ == Dtype::None) ? oDefaultDtype() : oDtype_;
     const Tensor& inTen = (*this)["in0"];
     VAI_ASSERT(inTen.validShape());
     VAI_ASSERT(inTen.shape().size() >= 2);
@@ -73,15 +71,17 @@ inline void TimeEmbedding::prepare()
 
     if (!pipe)
     {
+        // clang-format off
         pipe = pipelinePool().request("time-embedding", {
-            eva::constant_id<SPEC_ID_TYPE_O>(config_.oDtype)    // typeO
+            eva::constant_id<SPEC_ID_TYPE_O>(oDtype)    // typeO
         });
+        // clang-format on
         descSet = gVaiDestSetPool(pipe.descSetLayout(0));
     }
 
     std::vector<uint32_t> outShape = inTen.shape();
     outShape.back() = config_.embedDim;
-    (*this)["out0"] = Tensor(std::move(outShape), config_.oDtype);
+    (*this)["out0"] = Tensor(std::move(outShape), oDtype);
 }
 
 inline void TimeEmbedding::run(eva::CommandBuffer cmdBuff)
@@ -95,9 +95,13 @@ inline void TimeEmbedding::run(eva::CommandBuffer cmdBuff)
         uint32_t rows, D;
         float minPeriod, log2Ratio;
         uint32_t numSteps;
-    } constants = { outerSize((*this)["out0"].shape()), config_.embedDim,
-                    config_.minPeriod, std::log2(config_.maxPeriod / config_.minPeriod),
-                    config_.numSteps };
+    } constants = {
+        outerSize((*this)["out0"].shape()),
+        config_.embedDim,
+        config_.minPeriod,
+        std::log2(config_.maxPeriod / config_.minPeriod),
+        config_.numSteps,
+    };
 
     cmdBuff
         .bindPipeline(pipe)
