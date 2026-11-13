@@ -738,7 +738,7 @@ Source: [`vai/nodes/linear.h`](../../vai/nodes/linear.h)
 | `residualOrder` | `vai::ResidualOrder` | `vai::ResidualOrder::AfterEpilogue` |  |
 | `epilogue` | `vai::Epilogue` | `vai::Epilogue::None` |  |
 | `scalarScale` | `float` | `1.0f` | s, right after the epilogue |
-| `splitSize` | `uint32_t` | `0` | split-K: K length per split (0: ggml auto heuristic) |
+| `splitSize` | `uint32_t` | `0` | split-K: K length per split (0: the vendor's count per shape) |
 
 **Behavior and constraints**
 
@@ -749,7 +749,7 @@ vai naming: O [M, N], I [M, K] (M = flattened batch), W [N, K]
 so K is split across its threads and reduced; bias / epilogue are fused
 in-kernel. See useSlabPath().
 - tile (M > 8): a workgroup owns a wgM x wgN tile. Two kernels share the
-frame, chosen per device in ggmlMulmmTileParams(): scalar
+frame, chosen per device in selectLinearTile(): scalar
 (linear-tile, each thread accumulates its own outputs) and
 cooperative-matrix (linear-cm, subgroup MMA tiles).
 - Intel (useIntelTile; every M, slab included): linear-tile-intel, a port of
@@ -761,7 +761,7 @@ Everything below applies to every tile kernel:
 The tile params are selected per output shape in prepare(); when a shape
 change selects a different tile, the pipeline is re-requested from the pool.
 
-Split-K (splitSize option; 0 selects the ggml heuristic per shape)
+Split-K (splitSize option; 0 selects the vendor's rule per shape)
 accumulates partials P[splitCount, M, N] (oDtype) in a temporary buffer
 and folds them in a second pass (linear-reduce); bias / epilogue / the
 residual live in that reduce pass, so requesting them without splitting still
