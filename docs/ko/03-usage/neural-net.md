@@ -49,7 +49,7 @@ addSlot("weight", NodeSlot::persistent);
 addSlot("workspace", NodeSlot::temporary);
 ```
 
-슬롯의 종류와 기본 역할은 [노드: 슬롯](node.md#슬롯)을 참조하십시오.
+슬롯의 종류와 기본 역할은 [노드: 슬롯](node.md#1-슬롯)을 참조하십시오.
 
 ### 3.2 Slot 타입의 공통 규칙
 

@@ -4,7 +4,7 @@
 
 데이터는 CPU가 사용하는 Host 메모리 또는 GPU 연산에 사용하는 Device 버퍼에 저장됩니다. `Tensor`는 데이터의 Shape와 메모리에 대한 참조를 관리합니다. 실제 Host 메모리 및 Device 버퍼는 내부의 `TensorData`가 관리합니다.
 
-`Tensor`는 [Node의 Slot](node.md#슬롯)에 저장되며, `NodeSlot::getValueRef()`를 통해 접근할 수 있습니다. 또한 `Node::operator[]`를 사용하면 Slot 이름으로 `Tensor`에 직접 접근할 수 있습니다.
+`Tensor`는 [Node의 Slot](node.md#1-슬롯)에 저장되며, `NodeSlot::getValueRef()`를 통해 접근할 수 있습니다. 또한 `Node::operator[]`를 사용하면 Slot 이름으로 `Tensor`에 직접 접근할 수 있습니다.
 
 ```cpp
 linear.slot("out0")                 // NodeSlot& — Slot 객체
@@ -12,7 +12,7 @@ linear.slot("out0").getValueRef()   // Tensor&   — Slot에 저장된 Tensor
 linear["out0"]                      // Tensor&   — Slot 이름으로 Tensor에 직접 접근
 ```
 
-Slot의 구조와 사용 방법에 대한 자세한 내용은 [Node](node.md#값-읽기와-슬롯-얻기)를 참조하십시오.
+Slot의 구조와 사용 방법에 대한 자세한 내용은 [Node](node.md#22-값-읽기와-슬롯-접근)를 참조하십시오.
 
 ## 1. 데이터와 핸들
 
