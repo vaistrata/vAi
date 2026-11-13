@@ -85,9 +85,9 @@ Start by running MNIST with the [Quickstart](02-quickstart.md), then read [Node]
 
 | What to change | Documentation and code locations |
 |---|---|
-| Model composition and connections | [MNIST example](../../examples/mnist/main.cpp), [supported models](../../models/), [Writing custom models](05-contributing-models.md) |
-| Blocks shared by multiple models | [Common groups](../../vai/groups/), [NodeGroup](03-usage/node-group.md), [Writing custom groups](08-contributing-groups.md) |
-| Shape handling and GPU computation for an operation | [Nodes](../../vai/nodes/) and [shaders](../../vai/shaders/), [Writing custom nodes and kernels](07-contributing-nodes.md) |
+| Model composition and connections | [MNIST example](../../examples/mnist/main.cpp), [supported models](../../models/), [Writing custom models](contributing/models.md) |
+| Blocks shared by multiple models | [Common groups](../../vai/groups/), [NodeGroup](03-usage/node-group.md), [Writing custom groups](contributing/groups.md) |
+| Shape handling and GPU computation for an operation | [Nodes](../../vai/nodes/) and [shaders](../../vai/shaders/), [Writing custom nodes and kernels](contributing/nodes.md) |
 | Graph execution and buffer management | [neural-net.cpp](../../vai/engine/neural-net.cpp), [Execution pipeline](03-usage/execution-pipeline.md) |
 
 ## 3. Common code conventions
@@ -162,4 +162,4 @@ namespace rtdetrv2::node
 namespace rtdetrv2::group
 ```
 
-**3.4 Automated checks**: Rules 3.1 and 3.2 are configured in `.clang-format` and `.clang-tidy` at the repository root and checked automatically on commits and PRs. [Contribution workflow and automated checks](10-contributing.md) covers the remaining formatting rules, such as line length and indentation, and how to pass the checks.
+**3.4 Automated checks**: Rules 3.1 and 3.2 are configured in `.clang-format` and `.clang-tidy` at the repository root and checked automatically on commits and PRs. [Contribution workflow and automated checks](contributing/README.md) covers the remaining formatting rules, such as line length and indentation, and how to pass the checks.

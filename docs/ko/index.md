@@ -85,9 +85,9 @@ docs/
 
 | 수정 대상 | 문서 및 코드 위치 |
 |---|---|
-| 모델의 구성·배선 | [MNIST 예제](../../examples/mnist/main.cpp), [제공 모델](../../models/), [커스텀 모델 작성](05-contributing-models.md) |
-| 여러 모델이 공유하는 블록 | [공통 그룹](../../vai/groups/), [노드그룹](03-usage/node-group.md) , [커스텀 그룹 작성](08-contributing-groups.md) |
-| 연산의 형상 처리·GPU 계산 | [노드](../../vai/nodes/)와 [셰이더](../../vai/shaders/), [커스텀 노드와 커널 작성](07-contributing-nodes.md) |
+| 모델의 구성·배선 | [MNIST 예제](../../examples/mnist/main.cpp), [제공 모델](../../models/), [커스텀 모델 작성](contributing/models.md) |
+| 여러 모델이 공유하는 블록 | [공통 그룹](../../vai/groups/), [노드그룹](03-usage/node-group.md) , [커스텀 그룹 작성](contributing/groups.md) |
+| 연산의 형상 처리·GPU 계산 | [노드](../../vai/nodes/)와 [셰이더](../../vai/shaders/), [커스텀 노드와 커널 작성](contributing/nodes.md) |
 | 그래프 실행·버퍼 관리 | [neural-net.cpp](../../vai/engine/neural-net.cpp), [실행 파이프라인](03-usage/execution-pipeline.md) |
 
 ## 3. 공통 코드 컨벤션
@@ -162,4 +162,4 @@ namespace rtdetrv2::node
 namespace rtdetrv2::group
 ```
 
-**3.4 자동 검사**: 3.1과 3.2는 저장소 루트의 `.clang-format`과 `.clang-tidy`에 설정되어 있고, 커밋할 때와 PR을 올릴 때 자동으로 검사합니다. 줄 길이와 들여쓰기 같은 나머지 형식, 검사를 통과하는 방법은 [기여 절차와 자동 검사](10-contributing.md)에서 다룹니다.
+**3.4 자동 검사**: 3.1과 3.2는 저장소 루트의 `.clang-format`과 `.clang-tidy`에 설정되어 있고, 커밋할 때와 PR을 올릴 때 자동으로 검사합니다. 줄 길이와 들여쓰기 같은 나머지 형식, 검사를 통과하는 방법은 [기여 절차와 자동 검사](contributing/README.md)에서 다룹니다.

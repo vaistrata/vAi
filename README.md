@@ -30,7 +30,7 @@ model({{"in0", input}}, {{"out0", &output}});
 - Execution efficiency: GPU commands are reused while execution conditions remain unchanged, reducing repeated CPU work. Kernels are selected for the input shape and device.
 - Flexibility: Nodes manage state that changes during inference, such as the KV cache, so one runtime can handle vision models, LLMs, VLMs and VLAs.
 - Intuitiveness: Operators are declared as C++ members and connected with `-`, expressing model structure and data flow in code.
-- Extensibility: Node subclasses can add [operators and GPU kernels](docs/en/07-contributing-nodes.md) without modifying the engine core.
+- Extensibility: Node subclasses can add [operators and GPU kernels](docs/en/contributing/nodes.md) without modifying the engine core.
 
 ## Supported models
 
@@ -68,9 +68,9 @@ cmake --build build --config Release
 | [Quick Start](docs/en/02-quickstart.md) | Build requirements and limitations, MNIST example |
 | [Using vAi](docs/en/03-usage/README.md) | Node, NodeGroup, NeuralNet and Tensor |
 | [Supported models](docs/en/04-models/README.md) | Implemented presets, examples and weight loaders |
-| [Writing custom models](docs/en/05-contributing-models.md) | Adding a model |
+| [Writing custom models](docs/en/contributing/models.md) | Adding a model |
 | [Built-in nodes](docs/en/06-nodes.md) | Node reference |
-| [Writing custom nodes and kernels](docs/en/07-contributing-nodes.md) | Adding an operator |
+| [Writing custom nodes and kernels](docs/en/contributing/nodes.md) | Adding an operator |
 
 ## Performance
 

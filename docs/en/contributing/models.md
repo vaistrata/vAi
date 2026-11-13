@@ -22,7 +22,7 @@ Separate the model structure, weight loading, and execution example. Changes to 
 
 GPT-2 uses `gpt2` as the model name and `openai` as the checkpoint distribution name. To support another distributor's checkpoint for the same model structure, add a new loader.
 
-Before implementing a custom model, identify the required nodes and check the [Built-in nodes](06-nodes.md) and [Common groups](../../vai/groups/). Implement new ones if the built-in nodes and common groups do not provide what is needed. [Using vAi](03-usage/README.md) covers creating new nodes and groups. This document focuses on building a custom model from those nodes and groups, along with the additional rules for submission to the official repository.
+Before implementing a custom model, identify the required nodes and check the [Built-in nodes](../06-nodes.md) and [Common groups](../../../vai/groups/). Implement new ones if the built-in nodes and common groups do not provide what is needed. [Using vAi](../03-usage/README.md) covers creating new nodes and groups. This document focuses on building a custom model from those nodes and groups, along with the additional rules for submission to the official repository.
 
 ## 2. Building the graph
 
@@ -36,7 +36,7 @@ First, check the original model's operation order and inputs and outputs. The nu
 | `RuntimeConfig` | Runtime settings selected by the user | KV cache dtype, maximum runtime context length |
 | `vai::NeuralNetConfig` | Device and engine resources | Device, default weight and output dtypes, buffer pool |
 
-Define the `Config` structures in [`model.h`](../../models/gpt2/model.h). The model constructor then receives these configurations and passes them to each component.
+Define the `Config` structures in [`model.h`](../../../models/gpt2/model.h). The model constructor then receives these configurations and passes them to each component.
 ```cpp
 
 Model(const vai::NeuralNetConfig& netCfg,
@@ -68,7 +68,7 @@ If the model structure is fixed, `ModelConfig` can be omitted. If there is also 
 
 ### 2.2 Assembling nodes and groups
 
-Choose the model's input and output names, then connect nodes and groups in the constructor. The following code is an excerpt from the [GPT-2 model](../../models/gpt2/model.h)'s members and constructor.
+Choose the model's input and output names, then connect nodes and groups in the constructor. The following code is an excerpt from the [GPT-2 model](../../../models/gpt2/model.h)'s members and constructor.
 ```cpp
 namespace gpt2 {
 
@@ -100,7 +100,7 @@ The model holds nodes and groups as members. In the constructor, connect them fr
 
 Connect the model's boundaries with `input()` and `output()`. In addition to the main path, match the slot names for residual paths and multiple inputs.
 
-The addresses of connected nodes and groups must remain stable. Declaring members by value is recommended. For vectors, reserve space with `reserve()` before constructing elements with `emplace_back()`. For other ownership options, see [Precautions when using containers](03-usage/node-group.md#4-precautions-when-using-containers).
+The addresses of connected nodes and groups must remain stable. Declaring members by value is recommended. For vectors, reserve space with `reserve()` before constructing elements with `emplace_back()`. For other ownership options, see [Precautions when using containers](../03-usage/node-group.md#4-precautions-when-using-containers).
 
 ### 2.3 Managing state across repeated execution
 
@@ -120,7 +120,7 @@ After building the graph, assign the trained weights to each `Node`. The checkpo
 
 ### 3.1 Mapping checkpoint keys to slots
 
-A tensor's name in a checkpoint is called its key. The checkpoint loader maps these keys to the model's weight slots. Keep this mapping in the loader so that the same model structure can be used when keys or the file layout change. The following excerpt from the [GPT-2 loader](../../models/gpt2/openai-weights.h) assigns weights to slots. The loading function receives `model` and `ckpt` as arguments.
+A tensor's name in a checkpoint is called its key. The checkpoint loader maps these keys to the model's weight slots. Keep this mapping in the loader so that the same model structure can be used when keys or the file layout change. The following excerpt from the [GPT-2 loader](../../../models/gpt2/openai-weights.h) assigns weights to slots. The loading function receives `model` and `ckpt` as arguments.
 
 ```cpp
 vai::Dtype edt = model.embedding.config_.wDtype;
@@ -133,14 +133,14 @@ model.embedding["posWeight"] = vai::Tensor(ckpt["wpe.weight"], edt);
 ### 3.2 Converting weight shapes and values
 
 First, check the shape and dtype required by the target slot. Even if slot names match, axis order or the meaning of stored values may differ.
-Check slot requirements in [Built-in nodes](06-nodes.md) and the corresponding node implementation. The table below shows checkpoint loaders that handle different shapes and value semantics. Each example is in the code for a model included with vAi.
+Check slot requirements in [Built-in nodes](../06-nodes.md) and the corresponding node implementation. The table below shows checkpoint loaders that handle different shapes and value semantics. Each example is in the code for a model included with vAi.
 
 | Difference | Checkpoint loader action | Implementation |
 |---|---|---|
-| Axes and shapes differ | Use `permute()` to reorder axes. Use `reshape()` to change the shape or `vai::slice()` to read the required rows. | [PaliGemma loader](../../models/paligemma/google-weights.h) |
-| Weights are stored separately | Combine them with `vai::concat()` in the order the target node reads them. | [Llama 3 loader](../../models/llama3/meta-weights.h) |
-| Values have different meanings | Compute values according to the formula used by the node. | [Gemma 3 loader](../../models/gemma3/google-weights.h), [YOLOv8 loader](../../models/yolov8/ultralytics-weights.h) |
-| Two slots share weights | Assign the same `Tensor` to both slots. | [GPT-2 loader](../../models/gpt2/openai-weights.h) |
+| Axes and shapes differ | Use `permute()` to reorder axes. Use `reshape()` to change the shape or `vai::slice()` to read the required rows. | [PaliGemma loader](../../../models/paligemma/google-weights.h) |
+| Weights are stored separately | Combine them with `vai::concat()` in the order the target node reads them. | [Llama 3 loader](../../../models/llama3/meta-weights.h) |
+| Values have different meanings | Compute values according to the formula used by the node. | [Gemma 3 loader](../../../models/gemma3/google-weights.h), [YOLOv8 loader](../../../models/yolov8/ultralytics-weights.h) |
+| Two slots share weights | Assign the same `Tensor` to both slots. | [GPT-2 loader](../../../models/gpt2/openai-weights.h) |
 
 Complete conversions before the first execution. After conversion, check that the target slots have the correct shapes and dtypes.
 
@@ -153,7 +153,7 @@ If the original files are not `.safetensors`, also provide a conversion script n
 Provide a function so that calling code can load weights with `loadWeights<"distribution">(model)`.
 This function opens the checkpoint and fills the model's weight slots.
 
-The following code is an excerpt from the [GPT-2 loader](../../models/gpt2/openai-weights.h).
+The following code is an excerpt from the [GPT-2 loader](../../../models/gpt2/openai-weights.h).
 
 ```cpp
 template<>
@@ -181,7 +181,7 @@ data/gpt2/ckpts/774M/
 data/gpt2/ckpts/1.5B/
 ```
 
-`vai::Checkpoint` opens all `.safetensors` files in a directory and finds tensors by key. The same code therefore works when weights are split across multiple files. If other checkpoints or validation `.safetensors` files are present, specify a list of files to read. See [weights.h](../../vai/engine/weights.h) for how to specify that list.
+`vai::Checkpoint` opens all `.safetensors` files in a directory and finds tensors by key. The same code therefore works when weights are split across multiple files. If other checkpoints or validation `.safetensors` files are present, specify a list of files to read. See [weights.h](../../../vai/engine/weights.h) for how to specify that list.
 
 ## 4. Running the model
 
@@ -200,7 +200,7 @@ Make the following information available to users.
 
 After preprocessing the original input, create a `Tensor` that meets these requirements. Floating-point inputs can be written with `setFloats()`, which converts them to the tensor's dtype. Since `setData<T>()` copies data without dtype conversion, also check that the storage format matches.
 
-The following example illustrates the call syntax of [`NeuralNet::operator()`](../../vai/engine/neural-net.h). It assumes that `model` and `input` are ready and all required state updates have been made. The input and output names are `in0` and `out0`, and the output dtype is FP32.
+The following example illustrates the call syntax of [`NeuralNet::operator()`](../../../vai/engine/neural-net.h). It assumes that `model` and `input` are ready and all required state updates have been made. The input and output names are `in0` and `out0`, and the output dtype is FP32.
 
 ```cpp
 vai::Tensor output;
@@ -214,7 +214,7 @@ Pass each input as a name and tensor pair. Specify each output by the address of
 
 If repeated calls require preparation, combine the preparation code and graph call in one method. Keep cache and counter management inside the model. The demo then only needs to call the execution and reset methods.
 
-[GPT-2's `prefill()` and `decode()`](../../models/gpt2/model.h) are examples of this execution interface.
+[GPT-2's `prefill()` and `decode()`](../../../models/gpt2/model.h) are examples of this execution interface.
 
 The engine reuses recorded GPU commands, so a node's command-recording code does not run on every call.
 Handle values that the CPU must update on every call in the model's execution methods. Before changing GPU-readable state on the CPU, wait for the previous GPU work to complete.
@@ -228,7 +228,7 @@ Values retained between executions and reset conditions follow the rules defined
 Register the executable target in `examples/<model>/CMakeLists.txt`.
 Name it `demo-<model>`.
 
-The following example shortens comments and line breaks from the [GPT-2 build configuration](../../examples/gpt2/CMakeLists.txt) to show the registration pattern.
+The following example shortens comments and line breaks from the [GPT-2 build configuration](../../../examples/gpt2/CMakeLists.txt) to show the registration pattern.
 
 ```cmake
 cmake_minimum_required(VERSION 3.16)
@@ -236,19 +236,19 @@ project(demo-gpt2)
 add_executable(${PROJECT_NAME} demo.cpp)
 ```
 
-Add `add_subdirectory(<model>)` to [examples/CMakeLists.txt](../../examples/CMakeLists.txt).
+Add `add_subdirectory(<model>)` to [examples/CMakeLists.txt](../../../examples/CMakeLists.txt).
 Examples under this directory link to `vAi` through the parent configuration.
 Include model-specific headers in the files that use them.
 
-If there are model-specific kernels, add `add_dependencies(demo-<model> <model>-shaders)` to the executable target. The [model build configuration](../../models/CMakeLists.txt) collects `models/<model>/shaders/*.comp` and creates this shader target. The compiled kernel path is passed through the `<MODEL>_SHADER_OUTPUT_DIR` macro.
+If there are model-specific kernels, add `add_dependencies(demo-<model> <model>-shaders)` to the executable target. The [model build configuration](../../../models/CMakeLists.txt) collects `models/<model>/shaders/*.comp` and creates this shader target. The compiled kernel path is passed through the `<MODEL>_SHADER_OUTPUT_DIR` macro.
 
-The [YOLOv8 build configuration](../../examples/yolov8/CMakeLists.txt) is an example.
+The [YOLOv8 build configuration](../../../examples/yolov8/CMakeLists.txt) is an example.
 
-[Writing custom nodes and kernels](07-contributing-nodes.md) explains how nodes use this path.
+[Writing custom nodes and kernels](nodes.md) explains how nodes use this path.
 
 ### 5.2 Building the demo and comparing reference outputs
 
-See [Quickstart](02-quickstart.md) for the build environment. The example below builds a demo target. Run the commands from the repository root. For a new model, replace the target name with that model's name.
+See [Quickstart](../02-quickstart.md) for the build environment. The example below builds a demo target. Run the commands from the repository root. For a new model, replace the target name with that model's name.
 
 ```bash
 cmake -S . -B build -DVAI_BUILD_EXAMPLES=ON
@@ -268,7 +268,7 @@ Check the following before submitting.
 
 | Item | Rule |
 |---|---|
-| Code style | Follow the [Common code conventions](index.md#3-common-code-conventions). |
+| Code style | Follow the [Common code conventions](../index.md#3-common-code-conventions). |
 | Models and groups | Put models and model-specific groups in a dedicated namespace. Use `struct`, with models inheriting publicly from `vai::NeuralNet` and groups from `vai::NodeGroup`. |
 | Model name | Always name the model structure `Model`. Distinguish models by namespace, as in `gpt2::Model` and `llama3::Model`. |
 | Header stamp | Put a block comment in the form `/* === ... === */` at the top of the file. The first field is `Written by`. |

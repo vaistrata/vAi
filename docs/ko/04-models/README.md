@@ -33,7 +33,7 @@ loadWeights<"openai">(net);
 
 [`vai/engine/weights.h`](../../../vai/engine/weights.h)가 `loadWeights<Name, Model>`를 선언만 해두고 각 모델이 배포명별 특수화를 제공합니다.
 
-새로운 모델 작성은 [커스텀 모델 작성](../05-contributing-models.md) 참조.
+새로운 모델 작성은 [커스텀 모델 작성](../contributing/models.md) 참조.
 
 ## 목록
 

@@ -2,9 +2,9 @@
 
 A group combines `Node` objects and their connections into a reusable component. Create and connect the component `Node` objects inside the group, then specify the inputs and outputs exposed to the outside. Other models or groups can connect to these inputs and outputs to reuse the same configuration.
 
-Groups inherit from `vai::NodeGroup`. As described in the custom node guide, a `Node` is a unit of computation in the graph. A group combines `Node` objects, so the actual computation runs in the `Node` objects inside it. A group can be regarded as a small model built from these `Node` objects. New GPU computations require a new `Node` and kernel; see [Writing custom nodes and kernels](07-contributing-nodes.md).
+Groups inherit from `vai::NodeGroup`. As described in the custom node guide, a `Node` is a unit of computation in the graph. A group combines `Node` objects, so the actual computation runs in the `Node` objects inside it. A group can be regarded as a small model built from these `Node` objects. New GPU computations require a new `Node` and kernel; see [Writing custom nodes and kernels](nodes.md).
 
-The main example in this guide is [`FeedForward`](../../vai/groups/feed-forward.h), used by the `Classic` configuration of `Transformer`. The implementation takes the contributor's configuration, creates two `Linear` `Node` objects, connects them internally, and exposes the group's inputs and outputs. The normalization `Node` objects in [`MultiHeadAttention`](../../vai/groups/multi-head-attention.h) illustrate how to add or omit `Node` objects according to the desired configuration. The layer structure of [`Transformer`](../../vai/groups/transformer.h) illustrates how to create multiple instances of the same block and connect them in sequence.
+The main example in this guide is [`FeedForward`](../../../vai/groups/feed-forward.h), used by the `Classic` configuration of `Transformer`. The implementation takes the contributor's configuration, creates two `Linear` `Node` objects, connects them internally, and exposes the group's inputs and outputs. The normalization `Node` objects in [`MultiHeadAttention`](../../../vai/groups/multi-head-attention.h) illustrate how to add or omit `Node` objects according to the desired configuration. The layer structure of [`Transformer`](../../../vai/groups/transformer.h) illustrates how to create multiple instances of the same block and connect them in sequence.
 
 ## 1. Define the group boundary and inputs and outputs
 
@@ -59,7 +59,7 @@ Depth and dimensions are values passed to the constructor. Decide whether to use
 
 ### 2.2 Select node and subgroup types
 
-The types of `Node` objects or subgroups can change while keeping the same connection structure. The `Classic` and `Default` configurations of [`TransformerLayer`](../../vai/groups/transformer-layer.h) share a connection structure but use different normalization `Node` and `FeedForward` group types.
+The types of `Node` objects or subgroups can change while keeping the same connection structure. The `Classic` and `Default` configurations of [`TransformerLayer`](../../../vai/groups/transformer-layer.h) share a connection structure but use different normalization `Node` and `FeedForward` group types.
 
 The following type selection code is in the `vai::group` namespace.
 
@@ -87,7 +87,7 @@ Template arguments can select the type of a `Node` or subgroup. These types are 
 
 A group template can be specialized when the number of required `Node` objects or the connection paths differ. Write separate members, constructors, and connection code for each specialization.
 
-The following excerpt shows selected members from the two specializations of [`MultiHeadAttention`](../../vai/groups/multi-head-attention.h).
+The following excerpt shows selected members from the two specializations of [`MultiHeadAttention`](../../../vai/groups/multi-head-attention.h).
 
 ```cpp
 template<QkvLayout layout> struct MultiHeadAttention;
@@ -174,7 +174,7 @@ The parent group determines the configuration values passed to each subgroup. Ea
 
 ### 3.3 Conditionally construct `optional` members
 
-`Node` objects and subgroups that are added or omitted according to configuration can be `std::optional` members. Check the configuration in the group constructor and construct each member only when needed. The following excerpt from [`MultiHeadAttention`](../../vai/groups/multi-head-attention.h) creates `Node` objects only when required. It includes the member declaration and code from the constructor body.
+`Node` objects and subgroups that are added or omitted according to configuration can be `std::optional` members. Check the configuration in the group constructor and construct each member only when needed. The following excerpt from [`MultiHeadAttention`](../../../vai/groups/multi-head-attention.h) creates `Node` objects only when required. It includes the member declaration and code from the constructor body.
 
 ```cpp
 std::optional<vai::node::RmsNorm> normQ, normK;
@@ -206,7 +206,7 @@ for (uint32_t i = 0; i < config.numLayers; ++i)
 }
 ```
 
-Reserve all required storage first with `reserve()`, then construct groups in place with `emplace_back()`. Avoid subsequent operations that move elements or reallocate the vector. Stable addresses are required for the engine to work. For other ownership options, see [Container precautions](03-usage/node-group.md#4-precautions-when-using-containers).
+Reserve all required storage first with `reserve()`, then construct groups in place with `emplace_back()`. Avoid subsequent operations that move elements or reallocate the vector. Stable addresses are required for the engine to work. For other ownership options, see [Container precautions](../03-usage/node-group.md#4-precautions-when-using-containers).
 
 The parent group determines the repetition count and per-child settings. For example, an option that applies only to the last layer can be set by the parent before constructing that layer.
 
@@ -226,7 +226,7 @@ As shown above, `fc1`'s `out0` connects directly to `fc2`'s `in0`. Connections t
 
 ### 4.2 Connect repeated groups in sequence
 
-Repeated groups in a vector can be connected with a loop that joins each element's output to the next element's input. The following excerpt from [`Transformer`](../../vai/groups/transformer.h) connects the constructed groups in sequence. Run this loop after constructing all groups in the `layers` vector from section 3.
+Repeated groups in a vector can be connected with a loop that joins each element's output to the next element's input. The following excerpt from [`Transformer`](../../../vai/groups/transformer.h) connects the constructed groups in sequence. Run this loop after constructing all groups in the `layers` vector from section 3.
 
 ```cpp
 for (size_t i = 1; i < layers.size(); ++i)
@@ -249,7 +249,7 @@ Use slot names actually provided by the `Node` or group.
 
 ### 4.4 Branch outputs and connect `optional` members
 
-To use one output value in multiple computations, connect the same output slot to each input slot. The following excerpt from [`MultiHeadAttention`](../../vai/groups/multi-head-attention.h) keeps only the connections that start three paths. Subsequent computations on each path are omitted.
+To use one output value in multiple computations, connect the same output slot to each input slot. The following excerpt from [`MultiHeadAttention`](../../../vai/groups/multi-head-attention.h) keeps only the connections that start three paths. Subsequent computations on each path are omitted.
 
 ```cpp
 input - toQ;
@@ -277,7 +277,7 @@ After connecting the internal paths in section 4, expose the inputs and outputs 
 
 ### 5.1 Expose internal slots
 
-The first argument of `defineSlot()` is the name used outside the group. The second is the existing internal slot accessed through that name. This function does not create a new slot or `Tensor`. The following excerpt from the [`FeedForward`](../../vai/groups/feed-forward.h) constructor exposes its slots.
+The first argument of `defineSlot()` is the name used outside the group. The second is the existing internal slot accessed through that name. This function does not create a new slot or `Tensor`. The following excerpt from the [`FeedForward`](../../../vai/groups/feed-forward.h) constructor exposes its slots.
 
 ```cpp
 defineSlot("in0", fc1.slot("in0"));
@@ -306,7 +306,7 @@ The following example illustrates an external connection. `ffn` is a group const
 residualSource - "residual"/ffn;
 ```
 
-With `acceptResidual = false`, this input is not exposed. Specify the input's shape and dtype conditions along with the condition for exposing it. These conditions follow the requirements of the connected internal `Node`. In this example, `residual` uses the same dtype as the group output. See the [`Linear` implementation](../../vai/nodes/linear.h) for supported shapes.
+With `acceptResidual = false`, this input is not exposed. Specify the input's shape and dtype conditions along with the condition for exposing it. These conditions follow the requirements of the connected internal `Node`. In this example, `residual` uses the same dtype as the group output. See the [`Linear` implementation](../../../vai/nodes/linear.h) for supported shapes.
 
 ### 5.3 Expose subgroup slots
 
@@ -328,7 +328,7 @@ Include the group header from the C++ source file or the model or parent group h
 #include "vai/groups/feed-forward.h"
 ```
 
-Building C++ source that includes this header also compiles the required group implementation. A composition of existing `Node` objects and groups does not require a new group-specific kernel. The kernels of the `Node` objects follow their existing build settings. For adding executable targets, see [Writing custom models](05-contributing-models.md#51-registering-an-executable-target); for the build environment and commands, see the [Quickstart](02-quickstart.md).
+Building C++ source that includes this header also compiles the required group implementation. A composition of existing `Node` objects and groups does not require a new group-specific kernel. The kernels of the `Node` objects follow their existing build settings. For adding executable targets, see [Writing custom models](models.md#51-registering-an-executable-target); for the build environment and commands, see the [Quickstart](../02-quickstart.md).
 
 ### 6.2 File placement and rules for code and comments
 
@@ -346,13 +346,13 @@ Stable addresses and correct slot connections are required for the engine to wor
 | Initialization | Initialize `Node` configuration with designated field names. Declare required derived values before the members that use them. |
 | Shared configuration | When multiple implementations accept the same settings, define a shared type and use `using Config = ...;`. |
 | Supported configurations | Make unsupported template choices fail at compile time. |
-| Code style | Put function opening braces on the next line. Follow [Common code conventions](index.md#3-common-code-conventions). |
+| Code style | Put function opening braces on the next line. Follow [Common code conventions](../index.md#3-common-code-conventions). |
 | Headers | Add header guards and include the headers for the `Node` objects and groups used. Mark regular function definitions outside class definitions as `inline`. |
 | Descriptive comments | Describe the computation, inputs and outputs, conditional slots, and supported conditions. |
 
 **Passing external state**
 
-If the group contains a `Node` that needs an external buffer or state, it can provide a method to pass that state to the internal `Node`. Call this method from the model or parent group when needed. For the order of state management calls, see [Model execution methods](05-contributing-models.md#42-managing-state-in-execution-methods).
+If the group contains a `Node` that needs an external buffer or state, it can provide a method to pass that state to the internal `Node`. Call this method from the model or parent group when needed. For the order of state management calls, see [Model execution methods](models.md#42-managing-state-in-execution-methods).
 
 **Helpers for type-specific configuration**
 

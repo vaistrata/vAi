@@ -195,4 +195,4 @@ A node has a two-stage lifecycle. `NeuralNet` calls these methods; they are not 
 
 `Node::run()` records commands rather than executing the operation. The actual computation happens later when the GPU executes those commands. This is why vAi does not traverse the graph again for every inference. Once recorded, the command buffer is reused while the recording conditions remain the same.
 
-When the input shape changes, `Node::prepare()` is called again. Nodes that select kernels based on shape choose their pipelines again at this point. For details, see [prepare() in Writing custom nodes and kernels](../07-contributing-nodes.md#prepare).
+When the input shape changes, `Node::prepare()` is called again. Nodes that select kernels based on shape choose their pipelines again at this point. For details, see [prepare() in Writing custom nodes and kernels](../contributing/nodes.md#prepare).

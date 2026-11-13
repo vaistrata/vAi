@@ -3,13 +3,13 @@
 This document describes the process for getting code changes into `master`.
 It covers one-time setup, checks run on commits and PRs, and how to fix failed checks, in that order.
 
-For writing the code itself, see [Writing custom models](05-contributing-models.md), [Writing custom nodes and kernels](07-contributing-nodes.md), and [Writing custom groups](08-contributing-groups.md).
+For writing the code itself, see [Writing custom models](models.md), [Writing custom nodes and kernels](nodes.md), and [Writing custom groups](groups.md).
 
 ## 1. One-time setup
 
 ### 1.1 Build and commit hooks
 
-Clone the repository with `--recursive` and build it as described in the [Quickstart](02-quickstart.md).
+Clone the repository with `--recursive` and build it as described in the [Quickstart](../02-quickstart.md).
 Then install the commit hooks. The hooks check changes when committing.
 
 ```bash
@@ -62,7 +62,7 @@ Hooks help catch problems early. PRs run the same checks again, so skipping hook
 | `tidy` | PRs that change files outside `python/`, `docs/`, and `*.md` | clang-tidy finds a problem on changed C++ lines in `vai/`, `models/`, or `examples/`. |
 | `vai-linux`, `vai-windows` | PRs that change files outside `python/`, `docs/`, and `*.md` | The C++ build fails. (GCC 14, MSVC.) |
 | `pyvai-linux` | PRs that change files outside `docs/` and `*.md` | The Python package build or `python/tests` fails. |
-| `docs` | PRs that change `docs/`, `mkdocs.yml`, or `vai/nodes/` | [Built-in nodes](06-nodes.md) differs from the `Node` headers, or the documentation site build fails. |
+| `docs` | PRs that change `docs/`, `mkdocs.yml`, or `vai/nodes/` | [Built-in nodes](../06-nodes.md) differs from the `Node` headers, or the documentation site build fails. |
 
 ### 3.2 Checking only changed lines
 
@@ -77,7 +77,7 @@ Until then, the checks are shown as pending.
 
 ## 4. Fixing failed checks
 
-Tool versions are pinned in the [CI configuration](../../.github/workflows/ci.yml). All three tools can be installed with `pip install`.
+Tool versions are pinned in the [CI configuration](../../../.github/workflows/ci.yml). All three tools can be installed with `pip install`.
 
 | Tool | Version |
 |---|---|
@@ -119,7 +119,7 @@ git uses `/` in paths while clang-tidy uses `\`, so checks can pass even when pr
 
 ### 4.4 Node documentation
 
-[Built-in nodes](06-nodes.md) is generated from the descriptive comments in `Node` headers.
+[Built-in nodes](../06-nodes.md) is generated from the descriptive comments in `Node` headers.
 After changing descriptive comments, slots, or `Config`, regenerate the documentation and commit both generated files. Do not edit these documents directly.
 
 ```bash
@@ -132,12 +132,12 @@ The configuration files at the repository root define the rules. This section su
 
 ### 5.1 C++ formatting
 
-Checked by [`.clang-format`](../../.clang-format).
+Checked by [`.clang-format`](../../../.clang-format).
 
 | Item | Rule |
 |---|---|
 | Indentation and line length | Use four spaces, no tabs. Lines are limited to 120 characters. |
-| Opening braces | Follow 3.2 of [Common code conventions](index.md#3-common-code-conventions). |
+| Opening braces | Follow 3.2 of [Common code conventions](../index.md#3-common-code-conventions). |
 | Constructs allowed on one line | Short functions inside classes, empty functions, short lambdas, and short `enum` declarations. Bodies of `if` and `for` always start on the next line. |
 | Pointers and references | Attach `*` and `&` to the type. (Examples: `const char* path`, `Node& node`.) |
 | Includes and comments | Preserve include order and comment line breaks as written. |
@@ -145,13 +145,13 @@ Checked by [`.clang-format`](../../.clang-format).
 
 ### 5.2 C++ naming
 
-Checked by [`.clang-tidy`](../../.clang-tidy). Rules and exceptions are in 3.1 of [Common code conventions](index.md#3-common-code-conventions).
+Checked by [`.clang-tidy`](../../../.clang-tidy). Rules and exceptions are in 3.1 of [Common code conventions](../index.md#3-common-code-conventions).
 
 The tool cannot enforce the rule against prefixing constants with `k`, because `kBeginOfText` also matches `camelCase`. This rule is checked in review.
 
 ### 5.3 C++ bug checks
 
-[`.clang-tidy`](../../.clang-tidy) runs `bugprone-*`, `performance-*`, and `clang-analyzer-*` checks.
+[`.clang-tidy`](../../../.clang-tidy) runs `bugprone-*`, `performance-*`, and `clang-analyzer-*` checks.
 Four checks that are closer to style preferences (`narrowing-conversions`, `exception-escape`, `easily-swappable-parameters`, `enum-size`) are excluded.
 
 If a diagnostic does not apply to a line, disable only that check on that line and explain why.
@@ -164,7 +164,7 @@ Do not use `// NOLINT` without a check name, as it disables all checks on that l
 
 ### 5.4 Python
 
-Follow the configuration in [`pyproject.toml`](../../pyproject.toml).
+Follow the configuration in [`pyproject.toml`](../../../pyproject.toml).
 
 | Item | Rule |
 |---|---|
@@ -174,7 +174,7 @@ Follow the configuration in [`pyproject.toml`](../../pyproject.toml).
 
 ## 6. Files to include when adding a node
 
-[Writing custom nodes and kernels](07-contributing-nodes.md) describes how to write a `Node` and its kernel.
+[Writing custom nodes and kernels](nodes.md) describes how to write a `Node` and its kernel.
 This section covers the other files required in a PR that adds a `Node`.
 
 | Order | File | Location |
@@ -184,12 +184,12 @@ This section covers the other files required in a PR that adds a `Node`.
 | 3 | Test | `python/tests/nodes/test_<name>.py` or `python/tests/models/<model-name>/test_<name>.py` |
 | 4 | Node documentation | `docs/ko/06-nodes.md`, `docs/en/06-nodes.md` |
 
-[`test_node_completeness.py`](../../python/tests/test_node_completeness.py) fails if any binding, registration, or test is missing.
+[`test_node_completeness.py`](../../../python/tests/test_node_completeness.py) fails if any binding, registration, or test is missing.
 
 ### 6.1 Python binding
 
 List the `Config` fields in the binding file and register the binding on the last line. Do not modify lists in other files.
-The following excerpt is from the [`Slice` binding](../../python/bindings/nodes/slice.cpp).
+The following excerpt is from the [`Slice` binding](../../../python/bindings/nodes/slice.cpp).
 
 ```cpp
 static void bindSlice(nb::module_& m)
@@ -213,16 +213,16 @@ PYVAI_NODE_BINDING(bindSlice);
 | `PYVAI_NODE_BINDING(function)` | Registers a common `Node` binding. |
 | `PYVAI_MODEL_NODE_BINDING(model-name, function)` | Registers a model-specific `Node` binding. |
 
-See the comments in [`bind-node.h`](../../python/bindings/nodes/bind-node.h) for details.
+See the comments in [`bind-node.h`](../../../python/bindings/nodes/bind-node.h) for details.
 
 ### 6.2 Name export
 
-For a common `Node`, add the name to the import list and `__all__` in [`python/pyvai/nodes.py`](../../python/pyvai/nodes.py).
+For a common `Node`, add the name to the import list and `__all__` in [`python/pyvai/nodes.py`](../../../python/pyvai/nodes.py).
 
 ### 6.3 Tests
 
 Tests call `check_node()` with a function that creates the `Node`, input shapes, a reference implementation written with `torch`, and a tolerance.
-The following excerpt is from the [`Slice` test](../../python/tests/nodes/test_slice.py).
+The following excerpt is from the [`Slice` test](../../../python/tests/nodes/test_slice.py).
 
 ```python
 def test_slice_axis0_block():
@@ -235,7 +235,7 @@ def test_slice_axis0_block():
 ```
 
 `check_node()` checks that the output matches the reference implementation within tolerance, remains the same on repeated execution, and contains no `NaN` or `Inf`.
-See [`node_check.py`](../../python/tests/node_check.py) for tolerance types and selection criteria.
+See [`node_check.py`](../../../python/tests/node_check.py) for tolerance types and selection criteria.
 
 ### 6.4 Node documentation
 
@@ -246,6 +246,6 @@ Regenerate the documentation as described in [4.4](#44-node-documentation), and 
 | Item | Rule |
 |---|---|
 | Merge path | Changes enter `master` only through PRs. Use merge commits. |
-| Approval | Two approvals from the maintainer team are required. Changes to paths listed in [`CODEOWNERS`](../../.github/CODEOWNERS) must include approval from the relevant code owner. |
+| Approval | Two approvals from the maintainer team are required. Changes to paths listed in [`CODEOWNERS`](../../../.github/CODEOWNERS) must include approval from the relevant code owner. |
 | PR description | Describe the changes and how they were verified. Also mention any checks that failed for reasons unrelated to the changes. |
 | Commit subject | Existing history uses `type(scope): subject`. (Examples: `fix(python): ...`, `ci: ...`, `feat(core): ...`.) |

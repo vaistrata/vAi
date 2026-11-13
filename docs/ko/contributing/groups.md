@@ -2,9 +2,9 @@
 
 그룹은 함께 사용하는 `Node`와 연결을 하나의 부품으로 묶어서 사용할 수 있게 해줍니다. 그룹 안에서 `Node`로 구성요소를 만들고 연결한 뒤, 외부에서 사용할 입출력을 명시해서 다른 모델이나 그룹이 이 입출력에 연결해 같은 구성을 재사용할 수 있도록 합니다.
 
-그룹은 `vai::NodeGroup`을 상속하도록 합니다. 앞서 커스텀 노드 작성 문서에서 `Node`는 그래프의 계산 단위라고 했습니다. `Node`를 하나로 묶은 구현체이기 때문에 실제로 계산할 때 실행되는 것은 그룹 안의 `Node`들입니다. 그룹은 이 `Node`들을 쌓아 만든 하나의 작은 모델이라고 생각하면 됩니다. 새 GPU 계산이 필요하면 `Node`와 커널을 새로 만들어야하고 이 때는 [커스텀 노드와 커널 작성](07-contributing-nodes.md)을 참조하면 됩니다.
+그룹은 `vai::NodeGroup`을 상속하도록 합니다. 앞서 커스텀 노드 작성 문서에서 `Node`는 그래프의 계산 단위라고 했습니다. `Node`를 하나로 묶은 구현체이기 때문에 실제로 계산할 때 실행되는 것은 그룹 안의 `Node`들입니다. 그룹은 이 `Node`들을 쌓아 만든 하나의 작은 모델이라고 생각하면 됩니다. 새 GPU 계산이 필요하면 `Node`와 커널을 새로 만들어야하고 이 때는 [커스텀 노드와 커널 작성](nodes.md)을 참조하면 됩니다.
 
-이 문서에서 커스텀 그룹 구현의 이해를 돕기 위해 따라갈 기본 예제는 `Transformer`의 `Classic` 구성이 사용하는 [`FeedForward`](../../vai/groups/feed-forward.h)입니다. 기여자가 정한 설정을 받아 두 `Linear` `Node`를 만들고, 내부를 연결한 뒤 그룹의 입출력을 공개하는 순서로 구현 내용을 따라갑니다. 기여자가 정하고 싶은 설정에 따라 일부 `Node`를 추가하거나 생략하는 방법은 [`MultiHeadAttention`](../../vai/groups/multi-head-attention.h)의 정규화 `Node`로 설명합니다. 같은 블록을 여러 개 생성하고 차례로 연결하는 방법은 [`Transformer`](../../vai/groups/transformer.h)의 층 구성으로 설명합니다.
+이 문서에서 커스텀 그룹 구현의 이해를 돕기 위해 따라갈 기본 예제는 `Transformer`의 `Classic` 구성이 사용하는 [`FeedForward`](../../../vai/groups/feed-forward.h)입니다. 기여자가 정한 설정을 받아 두 `Linear` `Node`를 만들고, 내부를 연결한 뒤 그룹의 입출력을 공개하는 순서로 구현 내용을 따라갑니다. 기여자가 정하고 싶은 설정에 따라 일부 `Node`를 추가하거나 생략하는 방법은 [`MultiHeadAttention`](../../../vai/groups/multi-head-attention.h)의 정규화 `Node`로 설명합니다. 같은 블록을 여러 개 생성하고 차례로 연결하는 방법은 [`Transformer`](../../../vai/groups/transformer.h)의 층 구성으로 설명합니다.
 
 ## 1. 그룹으로 묶을 범위와 입출력 정하기
 
@@ -59,7 +59,7 @@ struct Config {
 
 ### 2.2 노드·하위 그룹의 타입 선택
 
-같은 연결 구조에서 `Node`나 하위 그룹의 타입만 바꿀 수 있습니다. [`TransformerLayer`](../../vai/groups/transformer-layer.h)의 `Classic`과 `Default`는 연결 구조를 공유하지만, 정규화 `Node`와 `FeedForward` 그룹의 타입이 다릅니다.
+같은 연결 구조에서 `Node`나 하위 그룹의 타입만 바꿀 수 있습니다. [`TransformerLayer`](../../../vai/groups/transformer-layer.h)의 `Classic`과 `Default`는 연결 구조를 공유하지만, 정규화 `Node`와 `FeedForward` 그룹의 타입이 다릅니다.
 
 다음은 `vai::group` 네임스페이스에 있는 타입 선택 코드입니다.
 
@@ -87,7 +87,7 @@ using ClassicLayer = vai::group::TransformerLayer<
 
 필요한 `Node`의 수나 연결 경로가 다르면 그룹 템플릿을 특수화할 수 있습니다. 각 특수화에 멤버, 생성자, 연결 코드를 따로 작성합니다.
 
-다음은 [`MultiHeadAttention`](../../vai/groups/multi-head-attention.h)의 두 특수화에서 일부 멤버만 발췌한 코드입니다.
+다음은 [`MultiHeadAttention`](../../../vai/groups/multi-head-attention.h)의 두 특수화에서 일부 멤버만 발췌한 코드입니다.
 
 ```cpp
 template<QkvLayout layout> struct MultiHeadAttention;
@@ -174,7 +174,7 @@ TransformerLayer(Config config)
 
 ### 3.3 `optional` 멤버의 조건부 생성
 
-설정에 따라 추가하거나 생략할 `Node`와 하위 그룹은 `std::optional` 멤버로 둘 수 있습니다.  그룹 생성자에서 설정을 확인하고, 필요한 경우에만 해당 멤버를 생성합니다. 다음은 [`MultiHeadAttention`](../../vai/groups/multi-head-attention.h)에서 필요한 경우에만 `Node`를 생성하는 코드입니다. 멤버 선언과 생성자 실제 본문에서 발췌했습니다.
+설정에 따라 추가하거나 생략할 `Node`와 하위 그룹은 `std::optional` 멤버로 둘 수 있습니다.  그룹 생성자에서 설정을 확인하고, 필요한 경우에만 해당 멤버를 생성합니다. 다음은 [`MultiHeadAttention`](../../../vai/groups/multi-head-attention.h)에서 필요한 경우에만 `Node`를 생성하는 코드입니다. 멤버 선언과 생성자 실제 본문에서 발췌했습니다.
 
 ```cpp
 std::optional<vai::node::RmsNorm> normQ, normK;
@@ -206,7 +206,7 @@ for (uint32_t i = 0; i < config.numLayers; ++i)
 }
 ```
 
-`reserve()`로 필요한 전체 공간을 먼저 확보하고, `emplace_back()`으로 그 위치에 그룹을 만듭니다. 이후 원소가 이동하거나 벡터가 재할당되는 작업은 피합니다. 주소를 유지하는 것은 엔진 동작에 필요한 조건입니다. 더 참고할 다른 소유 방식은 [컨테이너 사용 시 주의할 점](03-usage/node-group.md#4-컨테이너-사용-시-주의할-점)을 확인하시면 됩니다.
+`reserve()`로 필요한 전체 공간을 먼저 확보하고, `emplace_back()`으로 그 위치에 그룹을 만듭니다. 이후 원소가 이동하거나 벡터가 재할당되는 작업은 피합니다. 주소를 유지하는 것은 엔진 동작에 필요한 조건입니다. 더 참고할 다른 소유 방식은 [컨테이너 사용 시 주의할 점](../03-usage/node-group.md#4-컨테이너-사용-시-주의할-점)을 확인하시면 됩니다.
 
 반복 수와 자식별 설정은 부모 그룹이 정합니다. 예를 들어 마지막 층에만 적용할 옵션은 부모가 해당 층을 생성하기 전에 설정하면 됩니다.
 
@@ -226,7 +226,7 @@ fc1 - fc2;
 
 ### 4.2 반복 그룹의 순차 연결
 
-벡터에 담은 반복 그룹은 반복문을 사용해서 앞 원소의 출력을 다음 원소의 입력에 연결할 수 있습니다. 다음은 [`Transformer`](../../vai/groups/transformer.h)에서 생성한 그룹들을 차례로 연결하는 부분입니다. 3절의 `layers` 벡터에 모든 그룹을 생성한 뒤 이 반복문으로 연결합니다.
+벡터에 담은 반복 그룹은 반복문을 사용해서 앞 원소의 출력을 다음 원소의 입력에 연결할 수 있습니다. 다음은 [`Transformer`](../../../vai/groups/transformer.h)에서 생성한 그룹들을 차례로 연결하는 부분입니다. 3절의 `layers` 벡터에 모든 그룹을 생성한 뒤 이 반복문으로 연결합니다.
 
 ```cpp
 for (size_t i = 1; i < layers.size(); ++i)
@@ -249,7 +249,7 @@ for (size_t i = 1; i < layers.size(); ++i)
 
 ### 4.4 출력 분기와 `optional` 연결
 
-하나의 출력값을 여러 계산에 사용하려면 같은 출력 슬롯을 각 입력 슬롯에 연결합니다. 다음은 [`MultiHeadAttention`](../../vai/groups/multi-head-attention.h)에서 세 경로가 시작되는 연결만 남긴 코드입니다. 각 경로에서 이어지는 계산은 생략했습니다.
+하나의 출력값을 여러 계산에 사용하려면 같은 출력 슬롯을 각 입력 슬롯에 연결합니다. 다음은 [`MultiHeadAttention`](../../../vai/groups/multi-head-attention.h)에서 세 경로가 시작되는 연결만 남긴 코드입니다. 각 경로에서 이어지는 계산은 생략했습니다.
 
 ```cpp
 input - toQ;
@@ -277,7 +277,7 @@ splitQ - normQ - perQ;
 
 ### 5.1 내부 슬롯 공개
 
-`defineSlot()`의 첫 인자는 그룹 외부에서 사용할 이름입니다. 둘째 인자는 그 이름으로 접근할 기존 내부 슬롯입니다. 이 함수는 새 슬롯이나 `Tensor`를 만들지 않습니다. 다음은 [`FeedForward`](../../vai/groups/feed-forward.h) 생성자의 슬롯 공개 부분입니다.
+`defineSlot()`의 첫 인자는 그룹 외부에서 사용할 이름입니다. 둘째 인자는 그 이름으로 접근할 기존 내부 슬롯입니다. 이 함수는 새 슬롯이나 `Tensor`를 만들지 않습니다. 다음은 [`FeedForward`](../../../vai/groups/feed-forward.h) 생성자의 슬롯 공개 부분입니다.
 
 ```cpp
 defineSlot("in0", fc1.slot("in0"));
@@ -306,7 +306,7 @@ defineSlot("out0", fc2.slot("out0"));
 residualSource - "residual"/ffn;
 ```
 
-`acceptResidual = false`이면 이 입력은 공개되지 않습니다. 공개하는 조건과 함께 입력의 형상과 dtype 조건도 명시해야 합니다.  이 조건은 연결되는 내부 `Node`가 요구하는 조건을 따릅니다. 예제의 `residual`은 그룹 출력과 같은 dtype을 사용합니다. 허용하는 형상은 [`Linear` 구현](../../vai/nodes/linear.h)을 참조합니다.
+`acceptResidual = false`이면 이 입력은 공개되지 않습니다. 공개하는 조건과 함께 입력의 형상과 dtype 조건도 명시해야 합니다.  이 조건은 연결되는 내부 `Node`가 요구하는 조건을 따릅니다. 예제의 `residual`은 그룹 출력과 같은 dtype을 사용합니다. 허용하는 형상은 [`Linear` 구현](../../../vai/nodes/linear.h)을 참조합니다.
 
 ### 5.3 하위 그룹의 슬롯 공개
 
@@ -328,7 +328,7 @@ defineSlot("out0", ffn.slot("out0"));
 #include "vai/groups/feed-forward.h"
 ```
 
-이 헤더를 사용하는 C++ 소스를 빌드하면 필요한 그룹 구현도 함께 컴파일됩니다. 기존 `Node`와 그룹만 조합했다면 그룹 전용 커널을 새로 추가할 필요는 없습니다. 사용한 `Node`의 커널은 해당 `Node`의 기존 빌드 설정을 따릅니다. 실행 타겟을 추가하는 방법은 [커스텀 모델 작성](05-contributing-models.md#51-실행-타겟-등록)를, 빌드 환경과 명령은 [빠른 실행](02-quickstart.md)을 참조하시면 됩니다.
+이 헤더를 사용하는 C++ 소스를 빌드하면 필요한 그룹 구현도 함께 컴파일됩니다. 기존 `Node`와 그룹만 조합했다면 그룹 전용 커널을 새로 추가할 필요는 없습니다. 사용한 `Node`의 커널은 해당 `Node`의 기존 빌드 설정을 따릅니다. 실행 타겟을 추가하는 방법은 [커스텀 모델 작성](models.md#51-실행-타겟-등록)를, 빌드 환경과 명령은 [빠른 실행](../02-quickstart.md)을 참조하시면 됩니다.
 
 ### 6.2 파일 배치 그리고 코드와 주석 작성 규칙
 
@@ -346,13 +346,13 @@ defineSlot("out0", ffn.slot("out0"));
 | 초기화 | `Node` 설정은 필드 이름을 지정해 초기화합니다. 필요한 파생값은 사용하는 멤버보다 먼저 선언합니다. |
 | 공통 설정 | 여러 구현이 같은 설정을 받으면 공통 타입을 두고 `using Config = ...;`로 사용합니다. |
 | 지원 범위 | 지원하지 않는 템플릿 선택값이 컴파일 단계에서 드러나게 합니다. |
-| 코드 형식 | 함수의 여는 중괄호는 다음 줄에 둡니다. [공통 코드 컨벤션](index.md#3-공통-코드-컨벤션)을 따릅니다. |
+| 코드 형식 | 함수의 여는 중괄호는 다음 줄에 둡니다. [공통 코드 컨벤션](../index.md#3-공통-코드-컨벤션)을 따릅니다. |
 | 헤더 | 헤더 가드와 사용하는 `Node`·그룹의 헤더 포함문을 둡니다. 클래스 정의 밖의 일반 함수 정의에는 `inline`을 붙입니다. |
 | 설명 주석 | 계산식, 입력과 출력, 조건부 슬롯, 지원 조건을 적습니다. |
 
 **외부 상태 전달**
 
-외부 버퍼나 상태가 필요한 `Node`를 포함하면, 그룹에 이를 내부 `Node`로 전달하는 메서드를 둘 수 있습니다. 해당 메서드는 모델이나 부모 그룹의 코드에서 필요한 시점에 호출합니다. 상태 관리의 호출 순서는 [모델의 실행 메서드](05-contributing-models.md#42-실행-메서드의-상태-관리)를 참조하면 됩니다.
+외부 버퍼나 상태가 필요한 `Node`를 포함하면, 그룹에 이를 내부 `Node`로 전달하는 메서드를 둘 수 있습니다. 해당 메서드는 모델이나 부모 그룹의 코드에서 필요한 시점에 호출합니다. 상태 관리의 호출 순서는 [모델의 실행 메서드](models.md#42-실행-메서드의-상태-관리)를 참조하면 됩니다.
 
 **타입별 설정을 만드는 도우미**
 

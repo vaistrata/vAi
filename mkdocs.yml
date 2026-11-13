@@ -55,12 +55,13 @@ nav:
       - YOLOX: ko/04-models/yolox.md
       - GPT-2: ko/04-models/gpt2.md
       - Llama 3: ko/04-models/llama3.md
-  - 커스텀 모델 작성: ko/05-contributing-models.md
   - 제공 노드들: ko/06-nodes.md
-  - 커스텀 노드와 커널 작성: ko/07-contributing-nodes.md
-  - 커스텀 그룹 작성: ko/08-contributing-groups.md
   - EVA 객체: ko/09-vulkan-objects.md
-  - 기여 절차와 자동 검사: ko/10-contributing.md
+  - 기여하기:
+      - ko/contributing/README.md               # 기여 절차와 자동 검사
+      - 커스텀 모델 작성: ko/contributing/models.md
+      - 커스텀 노드와 커널 작성: ko/contributing/nodes.md
+      - 커스텀 그룹 작성: ko/contributing/groups.md
 
 # docs/ 아래 파일은 nav 에 없어도 페이지가 만들어지고 검색에도 걸린다.
 # 문서는 전부 공개하고, 숨길 것만 적는다 (.gitignore 문법).
@@ -136,11 +137,12 @@ plugins:
                 - YOLOX: en/04-models/yolox.md
                 - GPT-2: en/04-models/gpt2.md
                 - Llama 3: en/04-models/llama3.md
-            - Writing custom models: en/05-contributing-models.md
             - Built-in nodes: en/06-nodes.md
-            - Writing custom nodes and kernels: en/07-contributing-nodes.md
-            - Writing custom groups: en/08-contributing-groups.md
-            - Contribution workflow and automated checks: en/10-contributing.md
+            - Contributing:
+                - en/contributing/README.md
+                - Writing custom models: en/contributing/models.md
+                - Writing custom nodes and kernels: en/contributing/nodes.md
+                - Writing custom groups: en/contributing/groups.md
 
 # 빌드마다 6장을 헤더 스탬프에서 다시 만든다.
 hooks:

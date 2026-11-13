@@ -34,7 +34,7 @@ STRINGS = {
     "ko": {
         "title": "제공 노드들",
         "intro": "빌트인 노드 {n}종. 개념은 [노드(Node)](03-usage/node.md)를, "
-        "새 노드를 만드는 법은 [커스텀 노드와 커널](07-contributing-nodes.md)을 참조하세요.",
+        "새 노드를 만드는 법은 [커스텀 노드와 커널](contributing/nodes.md)을 참조하세요.",
         "list": "목록",
         "list_head": "| 노드 | 요약 | 커널 |",
         "source": "소스:",
@@ -52,7 +52,7 @@ STRINGS = {
     "en": {
         "title": "Built-in nodes",
         "intro": "{n} built-in nodes. See [Node](03-usage/node.md) for the concept and "
-        "[Writing custom nodes and kernels](07-contributing-nodes.md) for instructions "
+        "[Writing custom nodes and kernels](contributing/nodes.md) for instructions "
         "on creating new nodes.",
         "list": "List",
         "list_head": "| Node | Summary | Kernel |",

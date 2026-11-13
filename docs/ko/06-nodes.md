@@ -1,6 +1,6 @@
 # 제공 노드들
 
-빌트인 노드 29종. 개념은 [노드(Node)](03-usage/node.md)를, 새 노드를 만드는 법은 [커스텀 노드와 커널](07-contributing-nodes.md)을 참조하세요.
+빌트인 노드 29종. 개념은 [노드(Node)](03-usage/node.md)를, 새 노드를 만드는 법은 [커스텀 노드와 커널](contributing/nodes.md)을 참조하세요.
 
 ## 목록
 

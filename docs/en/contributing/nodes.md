@@ -6,7 +6,7 @@ GPU commands specify the kernel to run, the buffers it reads and writes, and the
 
 Adding a GPU operation requires C++ `Node` code and GLSL kernel code. The `Node` code prepares `Tensor` objects and records the settings and commands needed to run the kernel. The kernel code implements how the GPU reads values from buffers, computes results, and writes them back. The tensor shapes and dtypes, buffer binding numbers, and data range specified by the `Node` must match the kernel's declarations and computation.
 
-Before implementing an operation, check the [built-in nodes](06-nodes.md). An operation that can be expressed by combining existing nodes can be assembled as a [group](03-usage/node-group.md). If new GPU computation is needed, follow the steps in this document to write a `Node` and kernel. A single `Node` can also run multiple kernels. This chapter follows the implementation of the [`Activation` node](../../vai/nodes/activation.h) and the [activation.comp kernel](../../vai/shaders/activation.comp) to explain how to write custom nodes and kernels. The examples select ReLU as the activation function and use the path that writes results to a separate output.
+Before implementing an operation, check the [built-in nodes](../06-nodes.md). An operation that can be expressed by combining existing nodes can be assembled as a [group](../03-usage/node-group.md). If new GPU computation is needed, follow the steps in this document to write a `Node` and kernel. A single `Node` can also run multiple kernels. This chapter follows the implementation of the [`Activation` node](../../../vai/nodes/activation.h) and the [activation.comp kernel](../../../vai/shaders/activation.comp) to explain how to write custom nodes and kernels. The examples select ReLU as the activation function and use the path that writes results to a separate output.
 
 
 ## 1. Define the operation's inputs and outputs
@@ -34,7 +34,7 @@ vai::node::Activation activation{{.epilogue = vai::Epilogue::Relu}};
 
 ### 2.1 Register slots and store configuration in the constructor
 
-A custom node class publicly inherits from `vai::Node` and implements `prepare()` and `run()`. The node header includes `vai/nodes/node-common.h`. For how to create a node as a model member and connect it to the graph, see [Writing custom models](05-contributing-models.md).
+A custom node class publicly inherits from `vai::Node` and implements `prepare()` and `run()`. The node header includes `vai/nodes/node-common.h`. For how to create a node as a model member and connect it to the graph, see [Writing custom models](models.md).
 
 The following code is taken from the declaration and constructor of `Activation`. The constructor stores the configuration and registers slots for inputs and outputs. This code is in the `vai::node` namespace.
 
@@ -221,7 +221,7 @@ Values passed by the node map to the following locations. Check both the numbers
 | `constant_id<SPEC_ID_EPILOGUE>(...)` | `epilogue` in `common/activation.h`: activation function |
 | Push constant `uint32_t N` | `uint N` in `PushConstants` |
 
-The dtype constants use the shared IDs and values in [common/spec_constants.h](../../vai/shaders/common/spec_constants.h). `activation.comp` declares FP32 and FP16 buffers at the same binding numbers, then uses the dtype constants to select which to use. This preserves the order in which C++ binds buffers. The constant that selects the activation function is declared in `common/activation.h`. Do not redeclare the same ID in the kernel.
+The dtype constants use the shared IDs and values in [common/spec_constants.h](../../../vai/shaders/common/spec_constants.h). `activation.comp` declares FP32 and FP16 buffers at the same binding numbers, then uses the dtype constants to select which to use. This preserves the order in which C++ binds buffers. The constant that selects the activation function is declared in `common/activation.h`. Do not redeclare the same ID in the kernel.
 
 When passing multiple fields as push constants, the byte layout of the C++ struct and GLSL block must also match. Arrays and vectors in particular can have different offsets due to alignment, even if they are declared in the same order.
 
@@ -281,7 +281,7 @@ When a single node runs multiple kernels, record the required barriers between a
 
 The engine reuses recorded GPU commands. It calls `prepare()` and `run()` when recording or rerecording commands. Push constant values therefore remain unchanged while the recorded commands are reused.
 
-Counters or state that change on each call can be passed through a separate buffer. For CPU updates, wait for the previous GPU work to finish, then update the values in the model's execution method. This flow is covered in [State management in the execution method](05-contributing-models.md#42-managing-state-in-execution-methods).
+Counters or state that change on each call can be passed through a separate buffer. For CPU updates, wait for the previous GPU work to finish, then update the values in the model's execution method. This flow is covered in [State management in the execution method](models.md#42-managing-state-in-execution-methods).
 
 An API that changes configuration after construction must also update the recorded commands. If command values or buffer bindings change, call `invalidateCommandBuffer()` on the owning model to request rerecording. If specialization settings change, select the pipeline again as well.
 
@@ -294,13 +294,13 @@ An API that changes configuration after construction must also update the record
 | Operations used by multiple models | `vai/nodes/<name>.h` | `vai/shaders/<name>.comp` |
 | Operations used by a specific model | `models/<model>/nodes/<name>.h` | `models/<model>/shaders/<name>.comp` |
 
-The [root build configuration](../../CMakeLists.txt) collects shared kernels and builds them with `vAi`.
+The [root build configuration](../../../CMakeLists.txt) collects shared kernels and builds them with `vAi`.
 Request them from the node with `pipelinePool().request("kernel name", {...})`, as in the example.
 Include the node header in the C++ file that uses it.
 
-The [model build configuration](../../models/CMakeLists.txt) builds model-specific kernels under the `<model>-shaders` target.
+The [model build configuration](../../../models/CMakeLists.txt) builds model-specific kernels under the `<model>-shaders` target.
 Pass `<MODEL>_SHADER_OUTPUT_DIR` from the node as well.
-The following request is taken from [YOLOv8's SPPF node](../../models/yolov8/nodes/sppf.h).
+The following request is taken from [YOLOv8's SPPF node](../../../models/yolov8/nodes/sppf.h).
 
 ```cpp
 pipe = pipelinePool().request(YOLOV8_SHADER_OUTPUT_DIR, "sppf", {
@@ -310,7 +310,7 @@ pipe = pipelinePool().request(YOLOV8_SHADER_OUTPUT_DIR, "sppf", {
 ```
 
 Also add a build dependency to the executable target that uses the kernel.
-The following code is from the [YOLOv8 demo build configuration](../../examples/yolov8/CMakeLists.txt).
+The following code is from the [YOLOv8 demo build configuration](../../../examples/yolov8/CMakeLists.txt).
 Here, `${PROJECT_NAME}` is `demo-yolov8`.
 
 ```cmake
@@ -330,7 +330,7 @@ Check the following before submitting.
 - If there are paths for shared outputs, in-place operation, or temporary tensors, check those paths too.
 - Record the inputs, reference implementation, dtype, tolerance, and execution method used for comparison.
 
-A PR that adds a node must include Python bindings and tests. The PR checks fail if either is missing. See [What to include when adding a node](10-contributing.md#6-files-to-include-when-adding-a-node) for instructions.
+A PR that adds a node must include Python bindings and tests. The PR checks fail if either is missing. See [What to include when adding a node](README.md#6-files-to-include-when-adding-a-node) for instructions.
 
 ### 6.2 Code and comment conventions
 
@@ -338,7 +338,7 @@ A PR that adds a node must include Python bindings and tests. The PR checks fail
 |---|---|
 | Node declaration | Publicly inherit from `vai::Node`. A `class` declaration is allowed. |
 | Namespace | Place built-in nodes in `vai::node`. Place model-specific nodes in the model's namespace. |
-| C++ names and formatting | Use `PascalCase` for types and `camelCase` for functions and variables. Put a function's opening brace on the next line. Follow the [common code conventions](index.md#3-common-code-conventions). |
+| C++ names and formatting | Use `PascalCase` for types and `camelCase` for functions and variables. Put a function's opening brace on the next line. Follow the [common code conventions](../index.md#3-common-code-conventions). |
 | Header definitions | Use header guards. Add `inline` to regular member functions defined outside the class. |
 | Node comments | Describe the name, computation, input/output/weight slots and shapes, and supported conditions. |
 | Kernel comments | Describe the formula, buffer roles, meanings of specialization constants, and work unit. Choose formatting for the rest of the kernel to suit the implementation. |

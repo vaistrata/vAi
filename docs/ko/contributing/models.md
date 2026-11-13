@@ -22,7 +22,7 @@
 
 GPT-2의 경우 모델 이름으로 `gpt2`, 체크포인트 배포명은 `openai`를 사용합니다. 같은 모델 구조에 다른 배포자의 체크포인트를 지원하려면 새로운 로더를 추가하면 됩니다.
 
-커스텀 모델 구현에 앞서서 필요한 `Node`를 파악한 후 먼저 [제공 노드](06-nodes.md)와 [공통 그룹](../../vai/groups/)을 확인합니다. 지원하는 기본 제공 `Node`와 공통 그룹에 필요한 구현체가 없으면 새로 구현하시면 됩니다. 새로 `Node`와 그룹을 만드는 방법은 [vAi 사용법](03-usage/README.md)에서 다룹니다. 이 문서에서는 제작하신 `Node`와 그룹으로 커스텀 모델을 만드는 과정과 공식 저장소에 올릴 때 추가로 지켜야할 규칙을 위주로 설명드립니다.
+커스텀 모델 구현에 앞서서 필요한 `Node`를 파악한 후 먼저 [제공 노드](../06-nodes.md)와 [공통 그룹](../../../vai/groups/)을 확인합니다. 지원하는 기본 제공 `Node`와 공통 그룹에 필요한 구현체가 없으면 새로 구현하시면 됩니다. 새로 `Node`와 그룹을 만드는 방법은 [vAi 사용법](../03-usage/README.md)에서 다룹니다. 이 문서에서는 제작하신 `Node`와 그룹으로 커스텀 모델을 만드는 과정과 공식 저장소에 올릴 때 추가로 지켜야할 규칙을 위주로 설명드립니다.
 
 ## 2. 그래프 만들기
 
@@ -36,7 +36,7 @@ GPT-2의 경우 모델 이름으로 `gpt2`, 체크포인트 배포명은 `openai
 | `RuntimeConfig` | 사용자가 고르는 실행 설정 | KV 캐시 dtype, 실행할 최대 문맥 길이 |
 | `vai::NeuralNetConfig` | 장치와 엔진 자원 | 장치, 기본 가중치·출력 dtype, 버퍼 풀 |
 
-`Config` 구조체는 [`model.h`](../../models/gpt2/model.h)에서 정의합니다. 이후 모델 생성자가 설정을 받아서 각 구성 요소에 전달합니다.
+`Config` 구조체는 [`model.h`](../../../models/gpt2/model.h)에서 정의합니다. 이후 모델 생성자가 설정을 받아서 각 구성 요소에 전달합니다.
 ```cpp
 
 Model(const vai::NeuralNetConfig& netCfg,
@@ -68,7 +68,7 @@ Model(const vai::NeuralNetConfig& netCfg,
 
 ### 2.2 노드와 그룹 조립
 
-모델의 입출력 이름을 정하고, 생성자에서 `Node`와 그룹을 연결합니다. 아래 코드는 [GPT-2 모델](../../models/gpt2/model.h)의 멤버와 생성자를 발췌한 코드입니다.
+모델의 입출력 이름을 정하고, 생성자에서 `Node`와 그룹을 연결합니다. 아래 코드는 [GPT-2 모델](../../../models/gpt2/model.h)의 멤버와 생성자를 발췌한 코드입니다.
 ```cpp
 namespace gpt2 {
 
@@ -100,7 +100,7 @@ struct Model : public vai::NeuralNet {
 
 전체 모델의 경계는 `input()`과 `output()`으로 연결합니다. 주 경로 외에 잔차 경로와 여러 입력의 슬롯 이름도 마찬가지로 맞춰야 합니다.
 
-연결한 `Node`와 그룹의 주소는 유지해야 합니다. 멤버는 값으로 선언하는 방식을 권장합니다. 또한, 벡터에는 `reserve()`로 공간을 확보한 뒤 `emplace_back()`으로 생성합니다. 다른 소유 방식은 [컨테이너 사용 시 주의할 점](03-usage/node-group.md#4-컨테이너-사용-시-주의할-점)을 참조합니다.
+연결한 `Node`와 그룹의 주소는 유지해야 합니다. 멤버는 값으로 선언하는 방식을 권장합니다. 또한, 벡터에는 `reserve()`로 공간을 확보한 뒤 `emplace_back()`으로 생성합니다. 다른 소유 방식은 [컨테이너 사용 시 주의할 점](../03-usage/node-group.md#4-컨테이너-사용-시-주의할-점)을 참조합니다.
 
 ### 2.3 반복 실행 상태 관리
 
@@ -120,7 +120,7 @@ GPT-2는 `step()`에서 이전 GPU 작업의 완료를 기다린 뒤 위치와 �
 
 ### 3.1 체크포인트 키와 슬롯 대응
 
-체크포인트의 `Tensor` 이름을 키라고 합니다. 체크포인트 로더는 이 키와 모델의 가중치 슬롯을 대응시킵니다. 키나 파일 구성이 바뀌어도 같은 모델 구조를 사용할 수 있도록, 이 대응은 체크포인트 로더에서 처리합니다. 다음은 [GPT-2 로더](../../models/gpt2/openai-weights.h)에서 가중치를 슬롯에 넣는 부분을 발췌한 코드입니다. `model`과 `ckpt`는 로딩 함수가 인자로 받습니다.
+체크포인트의 `Tensor` 이름을 키라고 합니다. 체크포인트 로더는 이 키와 모델의 가중치 슬롯을 대응시킵니다. 키나 파일 구성이 바뀌어도 같은 모델 구조를 사용할 수 있도록, 이 대응은 체크포인트 로더에서 처리합니다. 다음은 [GPT-2 로더](../../../models/gpt2/openai-weights.h)에서 가중치를 슬롯에 넣는 부분을 발췌한 코드입니다. `model`과 `ckpt`는 로딩 함수가 인자로 받습니다.
 
 ```cpp
 vai::Dtype edt = model.embedding.config_.wDtype;
@@ -133,14 +133,14 @@ model.embedding["posWeight"] = vai::Tensor(ckpt["wpe.weight"], edt);
 ### 3.2 가중치 형상과 값 변환
 
 먼저 대상 슬롯이 요구하는 형상과 dtype을 확인합니다. 슬롯 이름이 같아도 축 순서나 저장된 값의 의미는 다를 수 있습니다.
-슬롯의 조건은 [제공 노드](06-nodes.md)와 해당 `Node`의 구현에서 확인합니다. 아래 표는 형상과 값의 차이에 따라 다르게 구현된 체크포인터 로더의 예시입니다. 모두 vAi가 기본 제공하는 모델의 코드에서 확인할 수 있습니다.
+슬롯의 조건은 [제공 노드](../06-nodes.md)와 해당 `Node`의 구현에서 확인합니다. 아래 표는 형상과 값의 차이에 따라 다르게 구현된 체크포인터 로더의 예시입니다. 모두 vAi가 기본 제공하는 모델의 코드에서 확인할 수 있습니다.
 
 | 차이 | 체크포인트 로더에서 처리할 일 | 실제 구현 |
 |---|---|---|
-| 축과 형상이 다름 | `permute()`로 축을 바꿉니다. `reshape()`로 형상을 바꾸거나 `vai::slice()`로 필요한 행을 읽습니다. | [PaliGemma 로더](../../models/paligemma/google-weights.h) |
-| 가중치가 따로 저장됨 | 대상 `Node`가 읽는 순서로 `vai::concat()`을 사용해 합칩니다. | [Llama 3 로더](../../models/llama3/meta-weights.h) |
-| 값의 의미가 다름 | `Node`가 사용하는 수식에 맞게 값을 계산합니다. | [Gemma 3 로더](../../models/gemma3/google-weights.h), [YOLOv8 로더](../../models/yolov8/ultralytics-weights.h) |
-| 두 슬롯이 가중치를 공유함 | 두 슬롯에 동일한 `Tensor`를 대입합니다. | [GPT-2 로더](../../models/gpt2/openai-weights.h) |
+| 축과 형상이 다름 | `permute()`로 축을 바꿉니다. `reshape()`로 형상을 바꾸거나 `vai::slice()`로 필요한 행을 읽습니다. | [PaliGemma 로더](../../../models/paligemma/google-weights.h) |
+| 가중치가 따로 저장됨 | 대상 `Node`가 읽는 순서로 `vai::concat()`을 사용해 합칩니다. | [Llama 3 로더](../../../models/llama3/meta-weights.h) |
+| 값의 의미가 다름 | `Node`가 사용하는 수식에 맞게 값을 계산합니다. | [Gemma 3 로더](../../../models/gemma3/google-weights.h), [YOLOv8 로더](../../../models/yolov8/ultralytics-weights.h) |
+| 두 슬롯이 가중치를 공유함 | 두 슬롯에 동일한 `Tensor`를 대입합니다. | [GPT-2 로더](../../../models/gpt2/openai-weights.h) |
 
 변환은 첫 실행 전에 완료해야 합니다. 변환 뒤에는 대상 슬롯의 형상과 dtype이 맞는지 확인합니다.
 
@@ -153,7 +153,7 @@ model.embedding["posWeight"] = vai::Tensor(ckpt["wpe.weight"], edt);
 사용하는 코드에서 `loadWeights<"배포명">(model)`으로 가중치를 불러올 수 있도록 작성합니다.
 이 함수는 체크포인트를 열고 모델의 가중치 슬롯을 채웁니다.
 
-다음은 [GPT-2 로더](../../models/gpt2/openai-weights.h)에서 발췌한 코드입니다.
+다음은 [GPT-2 로더](../../../models/gpt2/openai-weights.h)에서 발췌한 코드입니다.
 
 ```cpp
 template<>
@@ -181,7 +181,7 @@ data/gpt2/ckpts/774M/
 data/gpt2/ckpts/1.5B/
 ```
 
-`vai::Checkpoint`는 폴더의 모든 `.safetensors` 파일을 열고 키로 `Tensor`를 찾습니다. 따라서 가중치가 여러 파일에 나뉘어 있어도 같은 코드로 읽을 수 있습니다. 다른 체크포인트나 검증용 `.safetensors` 파일이 함께 있으면 읽을 파일을 목록으로 지정합니다. 파일 목록을 지정하는 방법은 [weights.h](../../vai/engine/weights.h)를 참조하면 됩니다.
+`vai::Checkpoint`는 폴더의 모든 `.safetensors` 파일을 열고 키로 `Tensor`를 찾습니다. 따라서 가중치가 여러 파일에 나뉘어 있어도 같은 코드로 읽을 수 있습니다. 다른 체크포인트나 검증용 `.safetensors` 파일이 함께 있으면 읽을 파일을 목록으로 지정합니다. 파일 목록을 지정하는 방법은 [weights.h](../../../vai/engine/weights.h)를 참조하면 됩니다.
 
 ## 4. 모델 실행하기
 
@@ -200,7 +200,7 @@ data/gpt2/ckpts/1.5B/
 
 원본 입력을 전처리한 뒤 이 조건에 맞는 `Tensor`를 만듭니다. 그리고 부동소수점 입력은 `setFloats()`로 `Tensor`의 dtype에 맞춰 넣을 수 있습니다. `setData<T>()`는 dtype 변환 없이 데이터를 복사하므로 저장 형식이 맞는지도 추가로 확인합니다.
 
-다음은 [`NeuralNet::operator()`](../../vai/engine/neural-net.h)의 호출 형식을 보여주는 설명용 예제입니다. `model`과 `input`은 준비되어 있고, 필요한 상태 갱신도 마친 것으로 가정합니다. 입출력 이름은 `in0`과 `out0`이며 출력 dtype은 FP32입니다.
+다음은 [`NeuralNet::operator()`](../../../vai/engine/neural-net.h)의 호출 형식을 보여주는 설명용 예제입니다. `model`과 `input`은 준비되어 있고, 필요한 상태 갱신도 마친 것으로 가정합니다. 입출력 이름은 `in0`과 `out0`이며 출력 dtype은 FP32입니다.
 
 ```cpp
 vai::Tensor output;
@@ -214,7 +214,7 @@ const float* result = output.getData<float>();
 
 반복 호출에 필요한 준비가 있으면 준비 코드와 그래프 호출을 하나의 메서드로 묶습니다. 이 때 캐시와 카운터의 관리는 모델 내부에 둡니다. 그리고 데모에는 실행 메서드와 초기화 메서드의 호출만 남깁니다.
 
-[GPT-2의 `prefill()`과 `decode()`](../../models/gpt2/model.h)가 이런 실행 인터페이스의 예시입니다.
+[GPT-2의 `prefill()`과 `decode()`](../../../models/gpt2/model.h)가 이런 실행 인터페이스의 예시입니다.
 
 엔진은 기록한 GPU 명령을 재사용하므로, `Node`의 명령 기록 코드는 매 호출 실행되지 않습니다.
 CPU에서 매 호출 갱신할 값은 모델의 실행 메서드에서 처리합니다. 그리고 GPU가 읽는 상태를 CPU에서 바꾸기 전에는 이전 GPU 작업의 완료를 기다립니다.
@@ -228,7 +228,7 @@ CPU에서 매 호출 갱신할 값은 모델의 실행 메서드에서 처리합
 `examples/<모델명>/CMakeLists.txt`에 실행 타겟을 등록합니다.
 타겟 이름은 `demo-<모델명>`으로 정합니다.
 
-다음은 등록 패턴을 보여주기 위해 [GPT-2 빌드 구성](../../examples/gpt2/CMakeLists.txt)의 주석과 줄바꿈을 줄인 예제입니다.
+다음은 등록 패턴을 보여주기 위해 [GPT-2 빌드 구성](../../../examples/gpt2/CMakeLists.txt)의 주석과 줄바꿈을 줄인 예제입니다.
 
 ```cmake
 cmake_minimum_required(VERSION 3.16)
@@ -236,19 +236,19 @@ project(demo-gpt2)
 add_executable(${PROJECT_NAME} demo.cpp)
 ```
 
-[examples/CMakeLists.txt](../../examples/CMakeLists.txt)에 `add_subdirectory(<모델명>)`을 추가합니다.
+[examples/CMakeLists.txt](../../../examples/CMakeLists.txt)에 `add_subdirectory(<모델명>)`을 추가합니다.
 이 경로의 예제는 상위 설정에서 `vAi`를 링크합니다.
 모델 전용 헤더는 사용하는 파일에 포함합니다.
 
-전용 커널이 있으면 실행 타겟에 `add_dependencies(demo-<모델명> <모델명>-shaders)`를 추가합니다. [모델 빌드 설정](../../models/CMakeLists.txt)이 `models/<모델명>/shaders/*.comp`를 수집해 이 셰이더 타겟을 만듭니다. 그리고 컴파일된 커널의 경로는 `<MODEL>_SHADER_OUTPUT_DIR` 매크로로 전달됩니다.
+전용 커널이 있으면 실행 타겟에 `add_dependencies(demo-<모델명> <모델명>-shaders)`를 추가합니다. [모델 빌드 설정](../../../models/CMakeLists.txt)이 `models/<모델명>/shaders/*.comp`를 수집해 이 셰이더 타겟을 만듭니다. 그리고 컴파일된 커널의 경로는 `<MODEL>_SHADER_OUTPUT_DIR` 매크로로 전달됩니다.
 
-[YOLOv8 빌드 구성](../../examples/yolov8/CMakeLists.txt)이 그 예입니다.
+[YOLOv8 빌드 구성](../../../examples/yolov8/CMakeLists.txt)이 그 예입니다.
 
-`Node`에서 이 경로를 사용하는 구체적인 방법은 [커스텀 노드와 커널 작성](07-contributing-nodes.md)에서 다룹니다.
+`Node`에서 이 경로를 사용하는 구체적인 방법은 [커스텀 노드와 커널 작성](nodes.md)에서 다룹니다.
 
 ### 5.2 데모 빌드와 기준 출력 비교
 
-빌드 환경은 [빠른 실행](02-quickstart.md)을 확인하시면 됩니다. 아래 빌드는 데모 타겟을 빌드하는 예제입니다. 명령은 저장소 루트에서 실행하시면 됩니다. 새 모델을 추가했으면 타겟 이름을 해당 모델의 이름으로 바꾸면 됩니다.
+빌드 환경은 [빠른 실행](../02-quickstart.md)을 확인하시면 됩니다. 아래 빌드는 데모 타겟을 빌드하는 예제입니다. 명령은 저장소 루트에서 실행하시면 됩니다. 새 모델을 추가했으면 타겟 이름을 해당 모델의 이름으로 바꾸면 됩니다.
 
 ```bash
 cmake -S . -B build -DVAI_BUILD_EXAMPLES=ON
@@ -268,7 +268,7 @@ cmake --build build --target demo-gpt2 --config Release
 
 | 항목 | 규칙 |
 |---|---|
-| 코드 형식 | [공통 코드 컨벤션](index.md#3-공통-코드-컨벤션)을 따릅니다. |
+| 코드 형식 | [공통 코드 컨벤션](../index.md#3-공통-코드-컨벤션)을 따릅니다. |
 | 모델과 그룹 | 모델과 모델 전용 그룹은 전용 네임스페이스에 둡니다. `struct`를 사용해 모델은 `vai::NeuralNet`, 그룹은 `vai::NodeGroup`을 `public`으로 상속합니다. |
 | 모델 이름 | 모델 구조체 이름은 `Model`로 고정합니다. `gpt2::Model`, `llama3::Model`처럼 네임스페이스로 구분합니다. |
 | 헤더 스탬프 | 파일 상단에 `/* === ... === */` 형식의 블록 주석을 둡니다. 첫 항목은 `Written by`입니다. |

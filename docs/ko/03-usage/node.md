@@ -220,4 +220,4 @@ input - projV - splitV - perV - "V"/attn;
 순회하지 않는 이유가 여기 있습니다. 한 번 만들고 기록 조건이 같으면 커맨드 버퍼를 재사용합니다.
 
 입력 형상이 바뀌면 `Node::prepare()`를 다시 호출니다. 형상에 따라 커널이 갈리는 노드는
-이때 파이프라인을 다시 고릅니다. 더 자세한 내용은 [커스텀 노드와 커널 작성의 prepare()](../07-contributing-nodes.md#prepare) 참조.
+이때 파이프라인을 다시 고릅니다. 더 자세한 내용은 [커스텀 노드와 커널 작성의 prepare()](../contributing/nodes.md#prepare) 참조.

@@ -33,7 +33,7 @@ loadWeights<"openai">(net);
 
 [`vai/engine/weights.h`](../../../vai/engine/weights.h) only declares `loadWeights<Name, Model>`; each model provides specializations for its distributions.
 
-For new models, see [Writing custom models](../05-contributing-models.md).
+For new models, see [Writing custom models](../contributing/models.md).
 
 ## Model list
 

@@ -141,8 +141,8 @@ HuggingFace 저장소의 **Files and versions** 탭에서 `model.safetensors`와
 
 ### 가중치 로딩
 
-체크포인트를 그래프 슬롯에 매핑하는 코드는 [`models/production/llama3/meta-weights.h`](../../../models/production/llama3/meta-weights.h)에 있습니다.
-실행하는 쪽은 한 줄이면 됩니다. 경로는 특수화가 조립하므로(`VAI_DATA_DIR "/ckpts/llama3/meta/" + modelCfg.variant`) 사이즈만 정하면 됩니다. 배포명 태그의 원리는 [커스텀 모델 작성의 `배포명-weights.h`](../05-contributing-models.md#배포명-weightsh) 참조.
+체크포인트를 그래프 슬롯에 매핑하는 코드는 [`models/llama3/meta-weights.h`](../../../models/llama3/meta-weights.h)에 있습니다.
+실행하는 쪽은 한 줄이면 됩니다. 경로는 특수화가 조립하므로(`VAI_DATA_DIR "/llama3/" + modelCfg.variant`) 사이즈만 정하면 됩니다. 배포명 태그의 원리는 [커스텀 모델 작성의 `배포명-weights.h`](../contributing/models.md#배포명-weightsh) 참조.
 
 ```cpp
 loadWeights<"meta">(net);

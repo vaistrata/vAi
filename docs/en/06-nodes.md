@@ -1,6 +1,6 @@
 # Built-in nodes
 
-29 built-in nodes. See [Node](03-usage/node.md) for the concept and [Writing custom nodes and kernels](07-contributing-nodes.md) for instructions on creating new nodes.
+29 built-in nodes. See [Node](03-usage/node.md) for the concept and [Writing custom nodes and kernels](contributing/nodes.md) for instructions on creating new nodes.
 
 ## List
 

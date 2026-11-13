@@ -6,7 +6,7 @@ GPU 명령에는 실행할 커널, 커널이 읽고 쓸 버퍼, 처리할 데이
 
 새 GPU 연산을 추가할 때는 C++ `Node` 코드와 GLSL 커널 코드를 작성합니다. `Node` 코드는 `Tensor`를 준비하고 커널 실행에 필요한 설정과 명령을 기록합니다. 커널 코드는 GPU가 버퍼의 값을 읽고, 계산한 뒤, 결과를 쓰는 방법을 구현합니다. `Node`가 지정하는 `Tensor`의 형상과 dtype, 버퍼의 연결 번호, 처리할 데이터 범위는 커널의 선언과 계산 방식에 맞춰야 합니다.
 
-구현하기에 앞서 먼저 [제공 노드](06-nodes.md)를 확인합니다. 기존 `Node`의 조합으로 만들 수 있는 연산은 [그룹](03-usage/node-group.md)으로 구성하면 됩니다. 새 GPU 계산이 필요하면 이 문서의 순서로 `Node`와 커널을 작성합니다. 물론 `Node` 하나에서 여러 커널을 실행할 수도 있습니다. 이번 장에서는 [`Activation` `Node`](../../vai/nodes/activation.h)와 [activation.comp 커널](../../vai/shaders/activation.comp)의 구현 내용을 따라 가며 커스텀 노드와 커널 작성법을 설명합니다. 활성화 함수는 ReLU를 선택하고, 별도 출력에 결과를 쓰는 경로를 기준으로 설명합니다.
+구현하기에 앞서 먼저 [제공 노드](../06-nodes.md)를 확인합니다. 기존 `Node`의 조합으로 만들 수 있는 연산은 [그룹](../03-usage/node-group.md)으로 구성하면 됩니다. 새 GPU 계산이 필요하면 이 문서의 순서로 `Node`와 커널을 작성합니다. 물론 `Node` 하나에서 여러 커널을 실행할 수도 있습니다. 이번 장에서는 [`Activation` `Node`](../../../vai/nodes/activation.h)와 [activation.comp 커널](../../../vai/shaders/activation.comp)의 구현 내용을 따라 가며 커스텀 노드와 커널 작성법을 설명합니다. 활성화 함수는 ReLU를 선택하고, 별도 출력에 결과를 쓰는 경로를 기준으로 설명합니다.
 
 
 ## 1. 연산의 입력과 출력 정하기
@@ -34,7 +34,7 @@ vai::node::Activation activation{{.epilogue = vai::Epilogue::Relu}};
 
 ### 2.1 생성자의 슬롯 등록과 설정 보관
 
-커스텀 노드 클래스는 `vai::Node`를 `public`으로 상속하고, `prepare()`와 `run()`을 구현합니다. `Node` 헤더는 `vai/nodes/node-common.h`를 포함합니다. `Node`를 모델의 멤버로 생성하고 그래프에 연결하는 방법은 [커스텀 모델 작성](05-contributing-models.md)을 참조하면 됩니다.
+커스텀 노드 클래스는 `vai::Node`를 `public`으로 상속하고, `prepare()`와 `run()`을 구현합니다. `Node` 헤더는 `vai/nodes/node-common.h`를 포함합니다. `Node`를 모델의 멤버로 생성하고 그래프에 연결하는 방법은 [커스텀 모델 작성](models.md)을 참조하면 됩니다.
 
 다음은 `Activation`의 선언과 생성자에서 발췌한 코드입니다. 생성자는 설정을 보관하고, 입력과 출력을 받을 슬롯을 등록합니다. 이 코드는 `vai::node` 네임스페이스 안에서 확인할 수 있습니다.
 
@@ -221,7 +221,7 @@ layout(set = 0, binding = 1) buffer I_BUF_F16 { float16_t bufferI_f16[]; };
 | `constant_id<SPEC_ID_EPILOGUE>(...)` | `common/activation.h`의 `epilogue`: 활성화 함수 |
 | 푸시 상수의 `uint32_t N` | `PushConstants`의 `uint N` |
 
-dtype 상수는 [common/spec_constants.h](../../vai/shaders/common/spec_constants.h)의 공용 ID와 값을 사용합니다. `activation.comp`는 같은 연결 번호에 FP32와 FP16 버퍼를 선언하고, dtype 상수로 사용할 쪽을 선택합니다. 이 방식을 사용하면 C++에서 버퍼를 연결하는 순서를 유지할 수 있습니다. 활성화 함수를 선택하는 상수는 `common/activation.h`가 선언합니다. 커널에서는 같은 ID를 다시 선언하지 않습니다.
+dtype 상수는 [common/spec_constants.h](../../../vai/shaders/common/spec_constants.h)의 공용 ID와 값을 사용합니다. `activation.comp`는 같은 연결 번호에 FP32와 FP16 버퍼를 선언하고, dtype 상수로 사용할 쪽을 선택합니다. 이 방식을 사용하면 C++에서 버퍼를 연결하는 순서를 유지할 수 있습니다. 활성화 함수를 선택하는 상수는 `common/activation.h`가 선언합니다. 커널에서는 같은 ID를 다시 선언하지 않습니다.
 
 여러 필드를 푸시 상수로 전달하면 C++ 구조체와 GLSL 블록의 바이트 배치까지 맞춰야 합니다. 특히 배열과 벡터는 선언 순서만 같아도 정렬에 따라 위치가 다를 수 있습니다.
 
@@ -281,7 +281,7 @@ inline void Activation::run(eva::CommandBuffer cmdBuff)
 
 엔진은 기록한 GPU 명령을 재사용합니다. `prepare()`와 `run()`은 명령을 기록하거나 다시 기록할 때 호출합니다. 따라서 푸시 상수의 값도 기록한 명령을 재사용하는 동안 유지됩니다.
 
-매 호출 달라지는 카운터나 상태는 별도 버퍼로 전달할 수 있습니다. CPU에서 갱신한다면 이전 GPU 작업의 완료를 기다린 뒤 모델의 실행 메서드에서 값을 갱신합니다. 이 흐름은 [모델의 상태 관리](05-contributing-models.md#42-실행-메서드의-상태-관리)에서 더 다루고 있습니다.
+매 호출 달라지는 카운터나 상태는 별도 버퍼로 전달할 수 있습니다. CPU에서 갱신한다면 이전 GPU 작업의 완료를 기다린 뒤 모델의 실행 메서드에서 값을 갱신합니다. 이 흐름은 [모델의 상태 관리](models.md#42-실행-메서드의-상태-관리)에서 더 다루고 있습니다.
 
 생성 후 설정을 바꾸는 API가 필요하면 기록한 명령의 갱신도 처리합니다. 명령에 넣은 값이나 버퍼 연결이 바뀌면 소속 모델의 `invalidateCommandBuffer()`로 재기록을 요청합니다. 특수화 설정이 바뀌면 파이프라인도 다시 선택합니다.
 
@@ -294,13 +294,13 @@ inline void Activation::run(eva::CommandBuffer cmdBuff)
 | 여러 모델에서 쓰는 연산 | `vai/nodes/<이름>.h` | `vai/shaders/<이름>.comp` |
 | 특정 모델에서 쓰는 연산 | `models/<모델명>/nodes/<이름>.h` | `models/<모델명>/shaders/<이름>.comp` |
 
-공용 커널은 [루트 빌드 설정](../../CMakeLists.txt)이 수집해 `vAi`와 함께 빌드합니다.
+공용 커널은 [루트 빌드 설정](../../../CMakeLists.txt)이 수집해 `vAi`와 함께 빌드합니다.
 `Node`에서는 예제처럼 `pipelinePool().request("커널 이름", {...})`로 요청합니다.
 `Node`를 사용하는 C++ 파일에서는 해당 `Node` 헤더를 포함합니다.
 
-모델 전용 커널은 [모델 빌드 설정](../../models/CMakeLists.txt)이 `<모델명>-shaders` 타겟으로 빌드합니다.
+모델 전용 커널은 [모델 빌드 설정](../../../models/CMakeLists.txt)이 `<모델명>-shaders` 타겟으로 빌드합니다.
 `Node`에서 `<MODEL>_SHADER_OUTPUT_DIR`을 함께 전달합니다.
-다음은 [YOLOv8의 SPPF `Node`](../../models/yolov8/nodes/sppf.h)에서 발췌한 요청 코드입니다.
+다음은 [YOLOv8의 SPPF `Node`](../../../models/yolov8/nodes/sppf.h)에서 발췌한 요청 코드입니다.
 
 ```cpp
 pipe = pipelinePool().request(YOLOV8_SHADER_OUTPUT_DIR, "sppf", {
@@ -310,7 +310,7 @@ pipe = pipelinePool().request(YOLOV8_SHADER_OUTPUT_DIR, "sppf", {
 ```
 
 커널을 사용하는 실행 타겟에도 빌드 의존성을 추가합니다.
-다음은 [YOLOv8 데모의 빌드 설정](../../examples/yolov8/CMakeLists.txt)에 있는 코드입니다.
+다음은 [YOLOv8 데모의 빌드 설정](../../../examples/yolov8/CMakeLists.txt)에 있는 코드입니다.
 여기서 `${PROJECT_NAME}`은 `demo-yolov8`입니다.
 
 ```cmake
@@ -330,7 +330,7 @@ add_dependencies(${PROJECT_NAME} yolov8-shaders)
 - 출력 공유, 제자리 연산, 임시 `Tensor`가 있으면 해당 경로도 확인합니다.
 - 비교한 입력, 기준 구현, dtype, 허용 오차, 실행 방법을 기록합니다.
 
-`Node`를 추가하는 PR에는 Python 바인딩과 테스트를 함께 넣습니다. 둘 중 하나가 없으면 PR의 검사가 실패합니다. 작성 방법은 [노드를 추가할 때 함께 넣는 것](10-contributing.md#6-노드를-추가할-때-함께-넣는-것)을 참조하면 됩니다.
+`Node`를 추가하는 PR에는 Python 바인딩과 테스트를 함께 넣습니다. 둘 중 하나가 없으면 PR의 검사가 실패합니다. 작성 방법은 [노드를 추가할 때 함께 넣는 것](README.md#6-노드를-추가할-때-함께-넣는-것)을 참조하면 됩니다.
 
 ### 6.2 코드와 주석 작성 규칙
 
@@ -338,7 +338,7 @@ add_dependencies(${PROJECT_NAME} yolov8-shaders)
 |---|---|
 | `Node` 선언 | `vai::Node`를 `public`으로 상속합니다. `class`를 사용할 수 있습니다. |
 | 네임스페이스 | 기본 제공 `Node`는 `vai::node`에 둡니다. 모델 전용 `Node`는 모델의 네임스페이스에 둡니다. |
-| C++ 이름과 형식 | 타입은 `PascalCase`, 함수와 변수는 `camelCase`로 씁니다. 함수의 여는 중괄호는 다음 줄에 둡니다. [공통 코드 컨벤션](index.md#3-공통-코드-컨벤션)을 따릅니다. |
+| C++ 이름과 형식 | 타입은 `PascalCase`, 함수와 변수는 `camelCase`로 씁니다. 함수의 여는 중괄호는 다음 줄에 둡니다. [공통 코드 컨벤션](../index.md#3-공통-코드-컨벤션)을 따릅니다. |
 | 헤더 정의 | 헤더 가드를 둡니다. 클래스 밖에 정의한 일반 멤버 함수에는 `inline`을 붙입니다. |
 | `Node` 주석 | 이름, 계산, 입력·출력·가중치의 슬롯과 형상, 지원 조건을 적습니다. |
 | 커널 주석 | 계산식, 버퍼 역할, 특수화 상수의 의미, 실행 단위를 적습니다. 커널의 나머지 코드 형식은 구현에 맞게 선택합니다. |
