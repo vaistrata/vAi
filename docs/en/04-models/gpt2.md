@@ -12,9 +12,9 @@ namespace gpt2 = model::production::gpt2;
 auto modelCfg = gpt2::ModelConfig::_124M();
 
 gpt2::Net net({
-    .device       = device,
-    .defaultDtype = Dtype::Fp16,
-    .ioDtypeHint  = Dtype::Fp32,
+    .device        = device,
+    .wDefaultDtype = Dtype::Fp16,
+    .oDefaultDtype = Dtype::Fp32,
 }, modelCfg);
 ```
 
@@ -25,7 +25,7 @@ For details, see [NeuralNet](../03-usage/neural-net.md).
 
 ### ModelConfig
 
-| Factory | `name` | `embedDim` | `numHeads` | `numLayers` |
+| Factory | `variant` | `embedDim` | `numQHeads` | `numLayers` |
 |---|---|---|---|---|
 | `_124M()` | `"124M"` | 768 | 12 | 12 |
 | `_355M()` | `"355M"` | 1024 | 16 | 24 |
@@ -36,11 +36,12 @@ All sizes use `vocabSize` 50,257 and `maxTrainedContext` 1,024.
 
 ### RuntimeConfig
 
-This only determines the amount of KV cache to allocate. If omitted, it uses `maxTrainedContext`; specifying a value allocates only that amount to save memory.
+This determines the dtype and the amount of KV cache to allocate. If `maxRuntimeContext` is omitted, it uses `maxTrainedContext`; specifying a value allocates only that amount to save memory.
 
 | Field | Default |
 |---|---|
-| `maxRuntimeContext` | `0` |
+| `kvCacheDtype` | `Dtype::Fp16` |
+| `maxRuntimeContext` | `uint32_t(-1)`: up to `maxTrainedContext` |
 
 ## vAi graph
 
@@ -51,35 +52,43 @@ In vAi, a model is a DAG built by connecting nodes with `-`. For details, see [N
 ### Model architecture
 
 ```cpp
-input("inTokenIds") - embedding - layers[0];
+input("inTokenIds") - embedding - decoder - lmHead - topkSampling - output("nextTokenId");
+```
+
+`decoder` is the shared [`Transformer`](../../../vai/groups/transformer.h) group. It connects the layers in order and ends with `finalNorm`.
+
+```cpp
 for (size_t i = 1; i < layers.size(); ++i)
     layers[i - 1] - layers[i];
-layers.back() - lastRowSlice - finalNorm - lmHead - topkSampling - output("nextTokenId");
+layers.back() - finalNorm;
 ```
 
 ### NodeGroup
 
-These [node groups](../03-usage/node-group.md) are defined for the GPT-2 implementation.
-`TransformerLayer` contains nested `MultiHeadAttention` and `FeedForward` groups.
+GPT-2 uses these [node groups](../03-usage/node-group.md). All of them are [shared groups](../../../vai/groups/).
+`Transformer` stacks `TransformerLayer` groups, and each `TransformerLayer` contains nested `MultiHeadAttention` and `FeedForward` groups.
 
 #### TransformerLayer
 
 ```cpp
-input - norm1 - "in0"/mhAttn      - norm2 - "in0"/ffn;
-input         - "residual"/mhAttn         - "residual"/ffn;
+input - norm1 -    mhAttn - lastRow - gate/"then" - norm2 -    ffn;
+input - "residual"/mhAttn - lastRow - gate/"then" - "residual"/ffn;
 ```
 
 The final projection in each sublayer accepts the residual through `acceptResidual` and adds it within the kernel, without a separate `Add`.
+`lastRow` and `gate` are `optional` members created by the configuration, and an absent one drops out of the connection. GPT-2 creates `lastRow` only in the last layer, so only the last row, which determines the next token, reaches the FFN.
 
 #### MultiHeadAttention
 
 Q, K, and V are computed with a single `{D, 3D}` projection, then split into three slices along the head axis.
 
 ```cpp
-projQKV - splitHeads - perQKV - sliceQ - "Q"/attn - mergeOut - projOut;
-                     perQKV - sliceK - "K"/attn;
-                     perQKV - sliceV - "V"/attn;
+projQKV - splitHeads - perQKV - sliceQ - normQ - ropeQ - "Q"/attn;
+perQKV - sliceK - normK - ropeK - "K"/attn;
+perQKV - sliceV                 - "V"/attn - mergeOut - projOut;
 ```
+
+`normQ`, `normK`, `ropeQ`, and `ropeK` are `optional` members too. GPT-2 uses neither QK normalization nor RoPE, so none of the four is created.
 
 With `acceptResidual = true`, `projOut` receives the block's residual through `residual` and adds it to the projection result.
 

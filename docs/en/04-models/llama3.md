@@ -12,9 +12,9 @@ namespace llama3 = model::production::llama3;
 auto modelCfg = llama3::ModelConfig::_3_2_1B();
 
 llama3::Net net({
-    .device       = device,
-    .defaultDtype = Dtype::Fp16,
-    .ioDtypeHint  = Dtype::Fp32,
+    .device        = device,
+    .wDefaultDtype = Dtype::Fp16,
+    .oDefaultDtype = Dtype::Fp32,
 }, modelCfg, {
     .maxRuntimeContext = 4096,
 });
@@ -27,20 +27,22 @@ For details, see [NeuralNet](../03-usage/neural-net.md).
 
 ### ModelConfig
 
-| Factory | `name` | `embedDim` | `ffnHiddenDim` | `numHeads` | `numKVHeads` | `numLayers` |
+| Factory | `variant` | `embedDim` | `ffnHiddenDim` | `numQHeads` | `numKVHeads` | `numLayers` |
 |---|---|---|---|---|---|---|
 | `_3_2_1B()` | `"3.2-1B"` | 2048 | 8192 | 32 | 8 | 16 |
 | `_3_2_3B()` | `"3.2-3B"` | 3072 | 8192 | 24 | 8 | 28 |
 
-Both sizes use `vocabSize` 128,256 and `maxTrainedContext` 131,072. They also share the same `ropeConfig` value (`ropeCommon(32.0f)`). The `factor` of 32 is the RoPE frequency scaling factor for the Llama 3 family.
+Both sizes use `vocabSize` 128,256 and `maxTrainedContext` 131,072. They also share the same `ropeCfg` value (`rope(32.0f)`). The `factor` of 32 is the RoPE frequency scaling factor for the Llama 3 family.
 
 ### RuntimeConfig
 
-This only determines the amount of KV cache to allocate. If omitted, it uses `maxTrainedContext`; specifying a value allocates only that amount to save memory. Allocating the full trained context of 131,072 requires too much memory, so the demo and benchmarks reduce it to 4,096 (the same value as `n_ctx` in the llama.cpp benchmark).
+This determines the dtype and the amount of KV cache to allocate, and the unit in which a prompt is fed. If `maxRuntimeContext` is omitted, it uses `maxTrainedContext`; specifying a value allocates only that amount to save memory. Allocating the full trained context of 131,072 requires too much memory, so the demo and benchmarks reduce it to 4,096 (the same value as `n_ctx` in the llama.cpp benchmark).
 
 | Field | Default |
 |---|---|
-| `maxRuntimeContext` | `0` |
+| `kvCacheDtype` | `Dtype::Fp16` |
+| `maxRuntimeContext` | `uint32_t(-1)`: up to `maxTrainedContext` |
+| `prefillChunk` | `0`: the whole prompt in one pass |
 
 ## vAi graph
 
@@ -51,35 +53,43 @@ In vAi, a model is a DAG built by connecting nodes with `-`. For details, see [N
 ### Model architecture
 
 ```cpp
-input("inTokenIds") - embedding - layers[0];
+input("inTokenIds") - embedding - decoder - lmHead - topkSampling - output("nextTokenId");
+```
+
+`decoder` is the shared [`Transformer`](../../../vai/groups/transformer.h) group. It connects the layers in order and ends with `finalNorm`.
+
+```cpp
 for (size_t i = 1; i < layers.size(); ++i)
     layers[i - 1] - layers[i];
-layers.back() - lastRowSlice - finalNorm - lmHead - topkSampling - output("nextTokenId");
+layers.back() - finalNorm;
 ```
 
 ### NodeGroup
 
-These [node groups](../03-usage/node-group.md) are defined for the Llama 3 implementation.
-`TransformerLayer` contains nested `MultiHeadAttention` and `GatedFeedForward` groups.
+Llama 3 uses these [node groups](../03-usage/node-group.md). All of them are [shared groups](../../../vai/groups/).
+`Transformer` stacks `TransformerLayer` groups, and each `TransformerLayer` contains nested `MultiHeadAttention` and `GatedFeedForward` groups.
 
 #### TransformerLayer
 
 ```cpp
-input - norm1 - "in0"/mhAttn      - norm2 - "in0"/ffn;
-input         - "residual"/mhAttn         - "residual"/ffn;
+input - norm1 -    mhAttn - lastRow - gate/"then" - norm2 -    ffn;
+input - "residual"/mhAttn - lastRow - gate/"then" - "residual"/ffn;
 ```
 
 The final projection in each sublayer accepts the residual through `acceptResidual` and adds it within the kernel, without a separate `Add`.
+`lastRow` and `gate` are `optional` members created by the configuration, and an absent one drops out of the connection. Llama 3 creates `lastRow` only in the last layer, so only the last row, which determines the next token, reaches the FFN. `gate` is created in the last layer when `prefillChunk` is set; it closes for a chunk that produces no token and skips the computation from the FFN on.
 
 #### MultiHeadAttention
 
 With GQA, K and V are projected into fewer heads than the queries (`H == 32`, `Hkv == 8`). RoPE applies only to Q and K; V passes through unchanged.
 
 ```cpp
-input - projQ - splitQ - perQ - ropeQ - "Q"/attn - mergeOut - projOut;
-input - projK - splitK - perK - ropeK - "K"/attn;
-input - projV - splitV - perV         - "V"/attn;
+input - projQ - splitQ - normQ - perQ - ropeQ - "Q"/attn;
+input - projK - splitK - normK - perK - ropeK - "K"/attn;
+input - projV - splitV         - perV         - "V"/attn - mergeOut - projOut;
 ```
+
+`normQ` and `normK` are `optional` members created only for models with QK normalization, so Llama 3 does not create them.
 
 With `acceptResidual = true`, `projOut` receives the block's residual through `residual` and adds it to the projection result.
 

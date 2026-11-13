@@ -25,7 +25,7 @@ data/images/                      입력 이미지
 
 namespace gpt2 = model::production::gpt2;
 
-gpt2::Net net({ .device = device, .defaultDtype = Dtype::Fp16 },
+gpt2::Net net({ .device = device, .wDefaultDtype = Dtype::Fp16 },
               gpt2::ModelConfig::_124M());
 
 loadWeights<"openai">(net);

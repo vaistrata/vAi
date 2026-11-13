@@ -12,9 +12,9 @@ namespace gpt2 = model::production::gpt2;
 auto modelCfg = gpt2::ModelConfig::_124M();
 
 gpt2::Net net({
-    .device       = device,
-    .defaultDtype = Dtype::Fp16,
-    .ioDtypeHint  = Dtype::Fp32,
+    .device        = device,
+    .wDefaultDtype = Dtype::Fp16,
+    .oDefaultDtype = Dtype::Fp32,
 }, modelCfg);
 ```
 
@@ -25,7 +25,7 @@ GPT-2는 기본값을 그대로 쓰고, 로더가 각 `LayerNorm`의 계수만 f
 
 ### ModelConfig
 
-| 팩토리 | `name` | `embedDim` | `numHeads` | `numLayers` |
+| 팩토리 | `variant` | `embedDim` | `numQHeads` | `numLayers` |
 |---|---|---|---|---|
 | `_124M()` | `"124M"` | 768 | 12 | 12 |
 | `_355M()` | `"355M"` | 1024 | 16 | 24 |
@@ -36,11 +36,12 @@ GPT-2는 기본값을 그대로 쓰고, 로더가 각 `LayerNorm`의 계수만 f
 
 ### RuntimeConfig
 
-KV 캐시를 얼마나 확보할지만 정합니다. 생략하면 `maxTrainedContext` 값을 그대로 쓰고, 값을 지정하면 그만큼만 할당해 메모리를 아낍니다.
+KV 캐시의 dtype과 크기를 정합니다. `maxRuntimeContext`를 생략하면 `maxTrainedContext` 값을 그대로 쓰고, 값을 지정하면 그만큼만 할당해 메모리를 아낍니다.
 
 | 필드 | 기본값 |
 |---|---|
-| `maxRuntimeContext` | `0` |
+| `kvCacheDtype` | `Dtype::Fp16` |
+| `maxRuntimeContext` | `uint32_t(-1)`: `maxTrainedContext`까지 |
 
 ## vAi 그래프
 
@@ -51,35 +52,43 @@ vAi에서 모델은 노드를 `-`로 이어 만든 DAG입니다. 세부사항은
 ### 모델 아키텍처
 
 ```cpp
-input("inTokenIds") - embedding - layers[0];
+input("inTokenIds") - embedding - decoder - lmHead - topkSampling - output("nextTokenId");
+```
+
+`decoder`는 공통 그룹 [`Transformer`](../../../vai/groups/transformer.h)입니다. 레이어를 차례로 잇고 마지막에 `finalNorm`을 둡니다.
+
+```cpp
 for (size_t i = 1; i < layers.size(); ++i)
     layers[i - 1] - layers[i];
-layers.back() - lastRowSlice - finalNorm - lmHead - topkSampling - output("nextTokenId");
+layers.back() - finalNorm;
 ```
 
 ### NodeGroup
 
-GPT-2를 구현하며 정의한 [노드그룹](../03-usage/node-group.md)입니다.
-`TransformerLayer`가 `MultiHeadAttention`과 `FeedForward`를 담는 중첩 구조입니다.
+GPT-2가 사용하는 [노드그룹](../03-usage/node-group.md)입니다. 모두 [공통 그룹](../../../vai/groups/)에 있습니다.
+`Transformer`가 `TransformerLayer`를 쌓고, `TransformerLayer`가 `MultiHeadAttention`과 `FeedForward`를 담는 중첩 구조입니다.
 
 #### TransformerLayer
 
 ```cpp
-input - norm1 - "in0"/mhAttn      - norm2 - "in0"/ffn;
-input         - "residual"/mhAttn         - "residual"/ffn;
+input - norm1 -    mhAttn - lastRow - gate/"then" - norm2 -    ffn;
+input - "residual"/mhAttn - lastRow - gate/"then" - "residual"/ffn;
 ```
 
 별도 `Add`를 두지 않고 각 서브층의 마지막 투영이 `acceptResidual`로 받아 커널 안에서 더합니다.
+`lastRow`와 `gate`는 설정에 따라 생기는 `optional` 멤버이고, 없으면 연결에서 빠집니다. GPT-2는 마지막 레이어에만 `lastRow`를 두어, 다음 토큰을 정하는 마지막 행만 FFN으로 보냅니다.
 
 #### MultiHeadAttention
 
 Q, K, V를 `{D, 3D}` 투영 하나로 계산한 뒤 헤드 축에서 세 조각으로 잘라냅니다.
 
 ```cpp
-projQKV - splitHeads - perQKV - sliceQ - "Q"/attn - mergeOut - projOut;
-                     perQKV - sliceK - "K"/attn;
-                     perQKV - sliceV - "V"/attn;
+projQKV - splitHeads - perQKV - sliceQ - normQ - ropeQ - "Q"/attn;
+perQKV - sliceK - normK - ropeK - "K"/attn;
+perQKV - sliceV                 - "V"/attn - mergeOut - projOut;
 ```
+
+`normQ`, `normK`, `ropeQ`, `ropeK`도 `optional` 멤버입니다. GPT-2는 QK 정규화와 RoPE를 쓰지 않으므로 이 넷은 생기지 않습니다.
 
 `projOut`이 `acceptResidual = true`라 블록의 잔차를 `residual`로 받아 투영 결과에 더합니다.
 

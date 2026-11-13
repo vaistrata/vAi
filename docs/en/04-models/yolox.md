@@ -18,8 +18,8 @@ namespace yolox = model::experimental::yolox;
 auto cfg = yolox::getConfigCOCO(yolox::Tier::LARGE);
 
 yolox::Net net({
-    .device       = device,
-    .defaultDtype = Dtype::Fp16,
+    .device        = device,
+    .wDefaultDtype = Dtype::Fp16,
 }, cfg, {
     .imageSize     = 640,
     .confThreshold = 0.25f,
@@ -29,7 +29,7 @@ yolox::Net net({
 
 ### NeuralNetConfig
 
-YOLOX uses the defaults. Both conv weights and BN parameters are stored in `defaultDtype` (fp16).
+YOLOX uses the defaults. Both conv weights and BN parameters are stored in `wDefaultDtype` (fp16).
 The weight loader computes BN `scale` and `bias` on the CPU, so there is no separate precision setting.
 For details, see [Using vAi > NeuralNet](../03-usage/neural-net.md).
 
@@ -168,7 +168,6 @@ using `focus-conv-transform.comp`.
 [`Convolution`](../06-nodes.md#convolution),
 [`NearestUpsample`](../06-nodes.md#nearestupsample),
 [`Concat`](../06-nodes.md#concat),
-[`Add`](../06-nodes.md#add),
 [`Identity`](../06-nodes.md#identity)
 
 ## Checkpoints
@@ -218,7 +217,7 @@ Loading takes one line at the call site.
 loadWeights<"megvii">(net);
 ```
 
-The specialization constructs the path from `model.cfg.tier` (`VAI_DATA_DIR "/yolox/yolox_<tier letter>.safetensors"`),
+The specialization constructs the path from `net.cfg.tier` (`VAI_DATA_DIR "/ckpts/yolox/megvii/" + tierName(net.cfg.tier)`),
 so the caller only selects the tier. For distribution tags, see [Supported models > Loading weights](README.md#loading-weights).
 
 The official state dict keys `backbone.backbone`, `backbone`, and `head` map to the backbone, neck, and head members, respectively.

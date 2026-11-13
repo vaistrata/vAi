@@ -12,9 +12,9 @@ namespace llama3 = model::production::llama3;
 auto modelCfg = llama3::ModelConfig::_3_2_1B();
 
 llama3::Net net({
-    .device       = device,
-    .defaultDtype = Dtype::Fp16,
-    .ioDtypeHint  = Dtype::Fp32,
+    .device        = device,
+    .wDefaultDtype = Dtype::Fp16,
+    .oDefaultDtype = Dtype::Fp32,
 }, modelCfg, {
     .maxRuntimeContext = 4096,
 });
@@ -27,20 +27,22 @@ Llama 3는 기본값을 그대로 쓰고, 로더가 각 `RmsNorm`의 scale만 fp
 
 ### ModelConfig
 
-| 팩토리 | `name` | `embedDim` | `ffnHiddenDim` | `numHeads` | `numKVHeads` | `numLayers` |
+| 팩토리 | `variant` | `embedDim` | `ffnHiddenDim` | `numQHeads` | `numKVHeads` | `numLayers` |
 |---|---|---|---|---|---|---|
 | `_3_2_1B()` | `"3.2-1B"` | 2048 | 8192 | 32 | 8 | 16 |
 | `_3_2_3B()` | `"3.2-3B"` | 3072 | 8192 | 24 | 8 | 28 |
 
-`vocabSize` 128,256, `maxTrainedContext` 131,072는 공통입니다. `ropeConfig`도 두 크기가 같은 값(`ropeCommon(32.0f)`)을 씁니다. `factor` 32는 Llama 3 계열의 RoPE 주파수 스케일링 계수입니다.
+`vocabSize` 128,256, `maxTrainedContext` 131,072는 공통입니다. `ropeCfg`도 두 크기가 같은 값(`rope(32.0f)`)을 씁니다. `factor` 32는 Llama 3 계열의 RoPE 주파수 스케일링 계수입니다.
 
 ### RuntimeConfig
 
-KV 캐시를 얼마나 확보할지만 정합니다. 생략하면 `maxTrainedContext` 값을 그대로 쓰고, 값을 지정하면 그만큼만 할당해 메모리를 아낍니다. 학습 컨텍스트 131,072를 그대로 잡으면 메모리를 감당할 수 없어 데모와 벤치에서는 4,096으로 낮춰 잡습니다 (llama.cpp 벤치의 `n_ctx`와 같은 값).
+KV 캐시의 dtype과 크기, 프롬프트를 나눠 넣는 단위를 정합니다. `maxRuntimeContext`를 생략하면 `maxTrainedContext` 값을 그대로 쓰고, 값을 지정하면 그만큼만 할당해 메모리를 아낍니다. 학습 컨텍스트 131,072를 그대로 잡으면 메모리를 감당할 수 없어 데모와 벤치에서는 4,096으로 낮춰 잡습니다 (llama.cpp 벤치의 `n_ctx`와 같은 값).
 
 | 필드 | 기본값 |
 |---|---|
-| `maxRuntimeContext` | `0` |
+| `kvCacheDtype` | `Dtype::Fp16` |
+| `maxRuntimeContext` | `uint32_t(-1)`: `maxTrainedContext`까지 |
+| `prefillChunk` | `0`: 프롬프트 전체를 한 번에 처리 |
 
 ## vAi 그래프
 
@@ -51,35 +53,43 @@ vAi에서 모델은 노드를 `-`로 이어 만든 DAG입니다. 세부사항은
 ### 모델 아키텍처
 
 ```cpp
-input("inTokenIds") - embedding - layers[0];
+input("inTokenIds") - embedding - decoder - lmHead - topkSampling - output("nextTokenId");
+```
+
+`decoder`는 공통 그룹 [`Transformer`](../../../vai/groups/transformer.h)입니다. 레이어를 차례로 잇고 마지막에 `finalNorm`을 둡니다.
+
+```cpp
 for (size_t i = 1; i < layers.size(); ++i)
     layers[i - 1] - layers[i];
-layers.back() - lastRowSlice - finalNorm - lmHead - topkSampling - output("nextTokenId");
+layers.back() - finalNorm;
 ```
 
 ### NodeGroup
 
-Llama 3를 구현하며 정의한 [노드그룹](../03-usage/node-group.md)입니다.
-`TransformerLayer`가 `MultiHeadAttention`과 `GatedFeedForward`를 담는 중첩 구조입니다.
+Llama 3가 사용하는 [노드그룹](../03-usage/node-group.md)입니다. 모두 [공통 그룹](../../../vai/groups/)에 있습니다.
+`Transformer`가 `TransformerLayer`를 쌓고, `TransformerLayer`가 `MultiHeadAttention`과 `GatedFeedForward`를 담는 중첩 구조입니다.
 
 #### TransformerLayer
 
 ```cpp
-input - norm1 - "in0"/mhAttn      - norm2 - "in0"/ffn;
-input         - "residual"/mhAttn         - "residual"/ffn;
+input - norm1 -    mhAttn - lastRow - gate/"then" - norm2 -    ffn;
+input - "residual"/mhAttn - lastRow - gate/"then" - "residual"/ffn;
 ```
 
 별도 `Add`를 두지 않고 각 서브층의 마지막 투영이 `acceptResidual`로 받아 커널 안에서 더합니다.
+`lastRow`와 `gate`는 설정에 따라 생기는 `optional` 멤버이고, 없으면 연결에서 빠집니다. Llama 3는 마지막 레이어에만 `lastRow`를 두어, 다음 토큰을 정하는 마지막 행만 FFN으로 보냅니다. `gate`는 `prefillChunk`를 지정했을 때 마지막 레이어에 생기고, 토큰을 내지 않는 조각에서는 닫혀서 FFN 이후의 계산을 건너뜁니다.
 
 #### MultiHeadAttention
 
 GQA를 쓰기 때문에 K와 V는 쿼리보다 적은 수의 헤드로 투영됩니다(`H == 32`, `Hkv == 8`). RoPE는 Q와 K에만 적용되고 V는 그대로 통과합니다.
 
 ```cpp
-input - projQ - splitQ - perQ - ropeQ - "Q"/attn - mergeOut - projOut;
-input - projK - splitK - perK - ropeK - "K"/attn;
-input - projV - splitV - perV         - "V"/attn;
+input - projQ - splitQ - normQ - perQ - ropeQ - "Q"/attn;
+input - projK - splitK - normK - perK - ropeK - "K"/attn;
+input - projV - splitV         - perV         - "V"/attn - mergeOut - projOut;
 ```
+
+`normQ`와 `normK`는 QK 정규화를 쓰는 모델에서만 생기는 `optional` 멤버이고, Llama 3에서는 생기지 않습니다.
 
 `projOut`이 `acceptResidual = true`라 블록의 잔차를 `residual`로 받아 투영 결과에 더합니다.
 
