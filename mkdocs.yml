@@ -1,6 +1,6 @@
 site_name: vAi                                  # 탭 제목 · 좌상단 로고 옆 이름
 site_description: 그래프 DSL 기반 Vulkan 추론 엔진   # <meta description> — 검색엔진·SNS 미리보기
-repo_url: https://github.com/OWNER/vAi          # 우상단 저장소 링크 (OWNER 확정 필요)
+repo_url: https://github.com/vaistrata/vAi      # 우상단 저장소 링크
 repo_name: vAi                                  # 그 링크에 보일 텍스트
 edit_uri: edit/master/docs/                     # "이 페이지 편집" 버튼이 향할 경로
 
@@ -15,9 +15,8 @@ theme:
     - navigation.top                            # "맨 위로" 버튼
     - navigation.indexes                        # 섹션 제목 자체에 페이지를 붙일 수 있게 (nav 참조)
     - content.code.copy                         # 코드블록 복사 버튼
-    # content.action.edit 은 켜지 않는다 — 페이지마다 GitHub 편집 화면으로 가는
-    # 연필 버튼이 붙는데, repo_url 이 아직 OWNER placeholder 라서 없는 주소로
-    # 간다. repo_url 이 확정되고 외부 기여를 받을 때 다시 켤 것.
+    # content.action.edit 은 아직 켜지 않는다 — 페이지마다 GitHub 편집 화면으로
+    # 가는 연필 버튼이 붙는다. 외부 기여를 받을 준비가 되면 켤 것.
     - search.suggest                            # 검색어 자동완성
   # 팔레트는 한 벌뿐이다 — website/DESIGN.md 는 다크 캔버스 전용이고
   # 라이트 팔레트를 "Known Gap" 으로 남겨 두었다(브랜드 잉크색 ember 가
