@@ -1,9 +1,15 @@
 # Contribution workflow and automated checks
 
 This document describes the process for getting code changes into `master`.
-It covers one-time setup, checks run on commits and PRs, and how to fix failed checks, in that order.
+It covers one-time setup, checks run on commits and PRs, how to fix failed checks, and the rules for branches, commit messages, and versions, in that order.
 
-For writing the code itself, see [Writing custom models](models.md), [Writing custom nodes and kernels](nodes.md), and [Writing custom groups](groups.md).
+For writing the code itself, see the document for what you are adding.
+
+| What you are adding | Document |
+|---|---|
+| Model | [Writing custom models](models.md) |
+| `Node` and kernel | [Writing custom nodes and kernels](nodes.md) |
+| Group | [Writing custom groups](groups.md) |
 
 ## 1. One-time setup
 
@@ -172,80 +178,93 @@ Follow the configuration in [`pyproject.toml`](../../../pyproject.toml).
 | Checks | Run ruff check's `F` (pyflakes), `E4`, `E7`, `E9` (pycodestyle rules closer to errors), and `B` (bugbear). |
 | Exceptions | If a diagnostic does not apply to a line, add `# noqa: <rule>` and explain why. |
 
-## 6. Files to include when adding a node
+## 6. Branches, commit messages, and PRs
 
-[Writing custom nodes and kernels](nodes.md) describes how to write a `Node` and its kernel.
-This section covers the other files required in a PR that adds a `Node`.
+Branches follow [GitHub Flow](https://docs.github.com/en/get-started/using-github/github-flow), and commit messages follow [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/).
 
-| Order | File | Location |
-|---|---|---|
-| 1 | Python binding | `python/bindings/nodes/<name>.cpp` or `python/bindings/models/<model-name>/nodes/<name>.cpp` |
-| 2 | Name export (common `Node` only) | `python/pyvai/nodes.py` |
-| 3 | Test | `python/tests/nodes/test_<name>.py` or `python/tests/models/<model-name>/test_<name>.py` |
-| 4 | Node documentation | `docs/ko/06-nodes.md`, `docs/en/06-nodes.md` |
+### 6.1 Branches
 
-[`test_node_completeness.py`](../../../python/tests/test_node_completeness.py) fails if any binding, registration, or test is missing.
+Create a working branch from `master` and merge it through a PR. There is no `develop` branch.
 
-### 6.1 Python binding
-
-List the `Config` fields in the binding file and register the binding on the last line. Do not modify lists in other files.
-The following excerpt is from the [`Slice` binding](../../../python/bindings/nodes/slice.cpp).
-
-```cpp
-static void bindSlice(nb::module_& m)
-{
-    using C = vai::node::Slice::Config;
-    bindNode<vai::node::Slice>(m, "SliceNode", "Take `count` consecutive indices ...",
-                               required("start", &C::start),
-                               field("count", &C::count).check(atLeast(1u), "must be >= 1"),
-                               field("axis", &C::axis),
-                               field("o_dtype", &C::oDtype));
-}
-PYVAI_NODE_BINDING(bindSlice);
-```
-
-| Function | Meaning |
+| Branch | Purpose |
 |---|---|
-| `field(name, &C::member)` | The default is the value from `Config{}`. Do not repeat defaults in the binding. dtype fields default to `None` in Python; `None` leaves the `Config{}` value unchanged. |
-| `field(name, &C::member, value)` | The binding specifies the default value. |
-| `required(name, &C::member)` | No default value. |
-| `.check(condition, message)` | Raises `ValueError("<Node>: <name> <message>")` if the condition is false. Prevents invalid arguments from reaching the engine's `VAI_ASSERT`. |
-| `PYVAI_NODE_BINDING(function)` | Registers a common `Node` binding. |
-| `PYVAI_MODEL_NODE_BINDING(model-name, function)` | Registers a model-specific `Node` binding. |
+| `master` | Reviewed and checked code |
+| `feat/reshape-op` | New feature |
+| `fix/model-loader-crash` | Bug fix |
+| `docs/build-guide` | Documentation change |
 
-See the comments in [`bind-node.h`](../../../python/bindings/nodes/bind-node.h) for details.
+- Name a branch `<type>/<short-description>`, in lower case with hyphens. The types are those in the table in [6.2](#62-commit-messages).
+- Create one branch and one PR per piece of work.
+- Branch names are not checked for PRs from forks. The same format is recommended.
 
-### 6.2 Name export
+### 6.2 Commit messages
 
-For a common `Node`, add the name to the import list and `__all__` in [`python/pyvai/nodes.py`](../../../python/pyvai/nodes.py).
+The subject has the form `type(scope): description`.
 
-### 6.3 Tests
+- `scope` is the module that changed and can be omitted. (Examples: `python`, `engine`, `linear`, `yolox`.)
+- `description` starts with an English verb in the imperative and states what changed.
 
-Tests call `check_node()` with a function that creates the `Node`, input shapes, a reference implementation written with `torch`, and a tolerance.
-The following excerpt is from the [`Slice` test](../../../python/tests/nodes/test_slice.py).
+| Type | When to use | Example |
+|---|---|---|
+| `feat` | New feature | `feat(graph): add reshape operation` |
+| `fix` | Fix for incorrect behavior | `fix(loader): reject truncated model files` |
+| `perf` | Performance improvement with the same behavior | `perf(vulkan): reduce allocation overhead` |
+| `refactor` | Structural change with the same behavior | `refactor(graph): extract shape helpers` |
+| `docs` | Documentation change | `docs: clarify build requirements` |
+| `test` | Test-only change | `test(loader): cover empty model files` |
+| `build` | Build and dependency change | `build: require CMake 3.16` |
+| `ci` | CI change | `ci: add compiler checks` |
+| `style` | Formatting change that does not affect behavior | `style: format public headers` |
+| `chore` | Other maintenance | `chore: update the issue templates` |
 
-```python
-def test_slice_axis0_block():
-    check_node(
-        lambda: nodes.SliceNode(start=1, count=2, axis=0),
-        {"in0": (4, 5)},
-        lambda in0: in0[1:3],
-        tol=EXACT,
-    )
+Choose the type as follows.
+
+- Use `feat` when the change makes something new possible.
+- Use `fix` when the change corrects incorrect behavior.
+- Use `perf` when the change does the same thing faster.
+
+**A commit has one purpose.** Put a feature and its tests together, and keep unrelated refactoring separate. Split PRs the same way.
+The test is "if only this change is reverted, does the rest still build and pass its tests?" Implementation, call sites, and tests that must be reverted together belong in one unit.
+
+For a change that is incompatible with existing usage, add `!` after the type and describe the impact and the migration after `BREAKING CHANGE:` in the body.
+
+```text
+feat(loader)!: require explicit model format
+
+BREAKING CHANGE: load_model(path) now takes a format argument.
+Change existing calls to load_model(path, format).
 ```
 
-`check_node()` checks that the output matches the reference implementation within tolerance, remains the same on repeated execution, and contains no `NaN` or `Inf`.
-See [`node_check.py`](../../../python/tests/node_check.py) for tolerance types and selection criteria.
-
-### 6.4 Node documentation
-
-Regenerate the documentation as described in [4.4](#44-node-documentation), and commit both generated files with the `Node`.
-
-## 7. Opening and merging a PR
+### 6.3 Opening and merging a PR
 
 | Item | Rule |
 |---|---|
-| Merge path | Changes enter `master` only through PRs. Use merge commits. |
+| Merge path | Changes enter `master` only through PRs. |
+| PR title | Use the commit subject format in [6.2](#62-commit-messages). On merge, this title becomes the commit subject on `master`. |
+| PR description | Describe the changes and how they were verified. Also mention any checks that failed for reasons unrelated to the changes. For an incompatible change, include a `BREAKING CHANGE:` paragraph. |
 | Approval | Two approvals from the maintainer team are required. Changes to paths listed in [`CODEOWNERS`](../../../.github/CODEOWNERS) must include approval from the relevant code owner. |
-| PR description | Describe the changes and how they were verified. Also mention any checks that failed for reasons unrelated to the changes. |
-| Commit subject | Existing history uses `type(scope): subject`. (Examples: `fix(python): ...`, `ci: ...`, `feat(core): ...`.) |
+| Merge method | Use squash merge. The PR's commits enter `master` as one commit. |
+| After merging | Delete the merged working branch. |
+
+## 7. Versions
+
+Tags have the form `vMAJOR.MINOR.PATCH` and follow [SemVer](https://semver.org/).
+
+| Change | Part to increase | Example |
+|---|---|---|
+| Change incompatible with the existing public API | MAJOR | `v1.2.3` → `v2.0.0` |
+| Compatible new feature, deprecation notice for a public API | MINOR | `v1.2.3` → `v1.3.0` |
+| Compatible bug fix, compatible performance improvement | PATCH | `v1.2.3` → `v1.2.4` |
+
+The release version is decided by the types of the commits that entered `master`. Branch names do not affect the version.
+
+| Commit on `master` | Effect on the version |
+|---|---|
+| `!` or `BREAKING CHANGE`, with any type | MAJOR |
+| `feat` | MINOR |
+| `fix`, `perf` | PATCH |
+| Any other type | No release on its own |
+
+- When a release bundles several changes, increase the highest part among them.
+- `0.x` versions come before the API is stable. The two tables above apply from `1.0`.
+- To verify before a full release, use a candidate version such as `v1.0.0-rc.1`.

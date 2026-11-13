@@ -330,7 +330,7 @@ Check the following before submitting.
 - If there are paths for shared outputs, in-place operation, or temporary tensors, check those paths too.
 - Record the inputs, reference implementation, dtype, tolerance, and execution method used for comparison.
 
-A PR that adds a node must include Python bindings and tests. The PR checks fail if either is missing. See [What to include when adding a node](README.md#6-files-to-include-when-adding-a-node) for instructions.
+A PR that adds a node must include Python bindings and tests. The PR checks fail if either is missing. See [7. Files to include in the PR](#7-files-to-include-in-the-pr) for instructions.
 
 ### 6.2 Code and comment conventions
 
@@ -370,3 +370,71 @@ The following example is taken from the comment in `activation.comp`.
    buffer aliases. Dispatch (host): dispatch2(N).
 =============================================================================*/
 ```
+
+## 7. Files to include in the PR
+
+A PR that adds a `Node` must include the following files in addition to the `Node` and its kernel.
+
+| Order | File | Location |
+|---|---|---|
+| 1 | Python binding | `python/bindings/nodes/<name>.cpp` or `python/bindings/models/<model-name>/nodes/<name>.cpp` |
+| 2 | Name export (common `Node` only) | `python/pyvai/nodes.py` |
+| 3 | Test | `python/tests/nodes/test_<name>.py` or `python/tests/models/<model-name>/test_<name>.py` |
+| 4 | Node documentation | `docs/ko/06-nodes.md`, `docs/en/06-nodes.md` |
+
+[`test_node_completeness.py`](../../../python/tests/test_node_completeness.py) fails if any binding, registration, or test is missing.
+
+### 7.1 Python binding
+
+List the `Config` fields in the binding file and register the binding on the last line. Do not modify lists in other files.
+The following excerpt is from the [`Slice` binding](../../../python/bindings/nodes/slice.cpp).
+
+```cpp
+static void bindSlice(nb::module_& m)
+{
+    using C = vai::node::Slice::Config;
+    bindNode<vai::node::Slice>(m, "SliceNode", "Take `count` consecutive indices ...",
+                               required("start", &C::start),
+                               field("count", &C::count).check(atLeast(1u), "must be >= 1"),
+                               field("axis", &C::axis),
+                               field("o_dtype", &C::oDtype));
+}
+PYVAI_NODE_BINDING(bindSlice);
+```
+
+| Function | Meaning |
+|---|---|
+| `field(name, &C::member)` | The default is the value from `Config{}`. Do not repeat defaults in the binding. dtype fields default to `None` in Python; `None` leaves the `Config{}` value unchanged. |
+| `field(name, &C::member, value)` | The binding specifies the default value. |
+| `required(name, &C::member)` | No default value. |
+| `.check(condition, message)` | Raises `ValueError("<Node>: <name> <message>")` if the condition is false. Prevents invalid arguments from reaching the engine's `VAI_ASSERT`. |
+| `PYVAI_NODE_BINDING(function)` | Registers a common `Node` binding. |
+| `PYVAI_MODEL_NODE_BINDING(model-name, function)` | Registers a model-specific `Node` binding. |
+
+See the comments in [`bind-node.h`](../../../python/bindings/nodes/bind-node.h) for details.
+
+### 7.2 Name export
+
+For a common `Node`, add the name to the import list and `__all__` in [`python/pyvai/nodes.py`](../../../python/pyvai/nodes.py).
+
+### 7.3 Tests
+
+Tests call `check_node()` with a function that creates the `Node`, input shapes, a reference implementation written with `torch`, and a tolerance.
+The following excerpt is from the [`Slice` test](../../../python/tests/nodes/test_slice.py).
+
+```python
+def test_slice_axis0_block():
+    check_node(
+        lambda: nodes.SliceNode(start=1, count=2, axis=0),
+        {"in0": (4, 5)},
+        lambda in0: in0[1:3],
+        tol=EXACT,
+    )
+```
+
+`check_node()` checks that the output matches the reference implementation within tolerance, remains the same on repeated execution, and contains no `NaN` or `Inf`.
+See [`node_check.py`](../../../python/tests/node_check.py) for tolerance types and selection criteria.
+
+### 7.4 Node documentation
+
+Regenerate the documentation as described in [4.4 of Contribution workflow and automated checks](README.md#44-node-documentation), and commit both generated files with the `Node`.

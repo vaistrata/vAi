@@ -330,7 +330,7 @@ add_dependencies(${PROJECT_NAME} yolov8-shaders)
 - 출력 공유, 제자리 연산, 임시 `Tensor`가 있으면 해당 경로도 확인합니다.
 - 비교한 입력, 기준 구현, dtype, 허용 오차, 실행 방법을 기록합니다.
 
-`Node`를 추가하는 PR에는 Python 바인딩과 테스트를 함께 넣습니다. 둘 중 하나가 없으면 PR의 검사가 실패합니다. 작성 방법은 [노드를 추가할 때 함께 넣는 것](README.md#6-노드를-추가할-때-함께-넣는-것)을 참조하면 됩니다.
+`Node`를 추가하는 PR에는 Python 바인딩과 테스트를 함께 넣습니다. 둘 중 하나가 없으면 PR의 검사가 실패합니다. 작성 방법은 [7. PR에 함께 넣는 파일](#7-pr에-함께-넣는-파일)에서 다룹니다.
 
 ### 6.2 코드와 주석 작성 규칙
 
@@ -370,3 +370,71 @@ add_dependencies(${PROJECT_NAME} yolov8-shaders)
    buffer aliases. Dispatch (host): dispatch2(N).
 =============================================================================*/
 ```
+
+## 7. PR에 함께 넣는 파일
+
+`Node`를 추가하는 PR에는 `Node`와 커널 외에 다음 파일이 함께 들어가야 합니다.
+
+| 순서 | 파일 | 위치 |
+|---|---|---|
+| 1 | Python 바인딩 | `python/bindings/nodes/<이름>.cpp` 또는 `python/bindings/models/<모델명>/nodes/<이름>.cpp` |
+| 2 | 이름 공개 (공용 `Node`만) | `python/pyvai/nodes.py` |
+| 3 | 테스트 | `python/tests/nodes/test_<이름>.py` 또는 `python/tests/models/<모델명>/test_<이름>.py` |
+| 4 | 노드 문서 | `docs/ko/06-nodes.md`, `docs/en/06-nodes.md` |
+
+바인딩, 등록, 테스트 중 하나라도 없으면 [`test_node_completeness.py`](../../../python/tests/test_node_completeness.py)가 실패합니다.
+
+### 7.1 Python 바인딩
+
+바인딩 파일에는 `Config`의 필드를 나열하고, 마지막 줄에서 등록합니다. 다른 파일의 목록은 고치지 않습니다.
+다음은 [`Slice`의 바인딩](../../../python/bindings/nodes/slice.cpp)에서 발췌한 코드입니다.
+
+```cpp
+static void bindSlice(nb::module_& m)
+{
+    using C = vai::node::Slice::Config;
+    bindNode<vai::node::Slice>(m, "SliceNode", "Take `count` consecutive indices ...",
+                               required("start", &C::start),
+                               field("count", &C::count).check(atLeast(1u), "must be >= 1"),
+                               field("axis", &C::axis),
+                               field("o_dtype", &C::oDtype));
+}
+PYVAI_NODE_BINDING(bindSlice);
+```
+
+| 함수 | 의미 |
+|---|---|
+| `field(이름, &C::멤버)` | 기본값은 `Config{}`의 값입니다. 바인딩에 기본값을 다시 적지 않습니다. dtype 필드는 Python 기본값이 `None`이고, `None`이면 `Config{}`의 값을 그대로 둡니다. |
+| `field(이름, &C::멤버, 값)` | 바인딩이 지정한 값이 기본값입니다. |
+| `required(이름, &C::멤버)` | 기본값이 없습니다. |
+| `.check(조건, 메시지)` | 조건이 거짓이면 `ValueError("<Node>: <이름> <메시지>")`를 발생시킵니다. 잘못된 인자가 엔진의 `VAI_ASSERT`까지 가지 않게 합니다. |
+| `PYVAI_NODE_BINDING(함수)` | 공용 `Node`의 바인딩을 등록합니다. |
+| `PYVAI_MODEL_NODE_BINDING(모델명, 함수)` | 모델 전용 `Node`의 바인딩을 등록합니다. |
+
+자세한 설명은 [`bind-node.h`](../../../python/bindings/nodes/bind-node.h)의 주석에 있습니다.
+
+### 7.2 이름 공개
+
+공용 `Node`는 [`python/pyvai/nodes.py`](../../../python/pyvai/nodes.py)의 가져오기 목록과 `__all__`에 이름을 추가합니다.
+
+### 7.3 테스트
+
+테스트는 `check_node()`를 호출합니다. `Node`를 만드는 함수, 입력 형상, `torch`로 작성한 기준 구현, 허용 오차를 전달합니다.
+다음은 [`Slice`의 테스트](../../../python/tests/nodes/test_slice.py)에서 발췌한 코드입니다.
+
+```python
+def test_slice_axis0_block():
+    check_node(
+        lambda: nodes.SliceNode(start=1, count=2, axis=0),
+        {"in0": (4, 5)},
+        lambda in0: in0[1:3],
+        tol=EXACT,
+    )
+```
+
+`check_node()`는 출력이 기준 구현과 허용 오차 안에서 같은지, 다시 실행해도 같은지, `NaN`이나 `Inf`가 없는지를 확인합니다.
+허용 오차의 종류와 선택 기준은 [`node_check.py`](../../../python/tests/node_check.py)에 있습니다.
+
+### 7.4 노드 문서
+
+[기여 절차와 자동 검사의 4.4](README.md#44-노드-문서)에 있는 방법으로 문서를 다시 생성하고, 생성된 두 파일을 `Node`와 함께 커밋합니다.

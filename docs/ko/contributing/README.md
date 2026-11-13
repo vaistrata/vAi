@@ -3,7 +3,13 @@
 이 문서는 수정한 코드가 `master`에 들어가기까지의 절차를 설명합니다.
 처음 한 번 준비할 것, 커밋과 PR에서 실행되는 검사, 검사가 실패했을 때 고치는 방법, 브랜치·커밋 메시지·버전 규칙을 순서대로 다룹니다.
 
-코드 자체의 작성 방법은 [커스텀 모델 작성](models.md), [커스텀 노드와 커널 작성](nodes.md), [커스텀 그룹 작성](groups.md)을 참조하면 됩니다.
+코드 자체의 작성 방법은 추가하려는 대상에 따라 다음 문서를 참조하면 됩니다.
+
+| 추가하려는 것 | 문서 |
+|---|---|
+| 모델 | [커스텀 모델 작성](models.md) |
+| `Node`와 커널 | [커스텀 노드와 커널 작성](nodes.md) |
+| 그룹 | [커스텀 그룹 작성](groups.md) |
 
 ## 1. 처음 한 번 준비하기
 
@@ -172,80 +178,11 @@ const float pad = float(M) / float(CEIL_DIV(M, b) * b);   // NOLINT(bugprone-int
 | 검사 | ruff check의 `F`(pyflakes), `E4`·`E7`·`E9`(오류에 가까운 pycodestyle 규칙), `B`(bugbear)를 실행합니다. |
 | 예외 | 결과가 해당 줄에 맞지 않으면 `# noqa: <규칙>`을 붙이고 이유를 적습니다. |
 
-## 6. 노드를 추가할 때 함께 넣는 것
-
-`Node`와 커널의 작성 방법은 [커스텀 노드와 커널 작성](nodes.md)에 있습니다.
-이 절은 `Node`를 추가하는 PR에 함께 들어가야 하는 나머지 파일을 다룹니다.
-
-| 순서 | 파일 | 위치 |
-|---|---|---|
-| 1 | Python 바인딩 | `python/bindings/nodes/<이름>.cpp` 또는 `python/bindings/models/<모델명>/nodes/<이름>.cpp` |
-| 2 | 이름 공개 (공용 `Node`만) | `python/pyvai/nodes.py` |
-| 3 | 테스트 | `python/tests/nodes/test_<이름>.py` 또는 `python/tests/models/<모델명>/test_<이름>.py` |
-| 4 | 노드 문서 | `docs/ko/06-nodes.md`, `docs/en/06-nodes.md` |
-
-바인딩, 등록, 테스트 중 하나라도 없으면 [`test_node_completeness.py`](../../../python/tests/test_node_completeness.py)가 실패합니다.
-
-### 6.1 Python 바인딩
-
-바인딩 파일에는 `Config`의 필드를 나열하고, 마지막 줄에서 등록합니다. 다른 파일의 목록은 고치지 않습니다.
-다음은 [`Slice`의 바인딩](../../../python/bindings/nodes/slice.cpp)에서 발췌한 코드입니다.
-
-```cpp
-static void bindSlice(nb::module_& m)
-{
-    using C = vai::node::Slice::Config;
-    bindNode<vai::node::Slice>(m, "SliceNode", "Take `count` consecutive indices ...",
-                               required("start", &C::start),
-                               field("count", &C::count).check(atLeast(1u), "must be >= 1"),
-                               field("axis", &C::axis),
-                               field("o_dtype", &C::oDtype));
-}
-PYVAI_NODE_BINDING(bindSlice);
-```
-
-| 함수 | 의미 |
-|---|---|
-| `field(이름, &C::멤버)` | 기본값은 `Config{}`의 값입니다. 바인딩에 기본값을 다시 적지 않습니다. dtype 필드는 Python 기본값이 `None`이고, `None`이면 `Config{}`의 값을 그대로 둡니다. |
-| `field(이름, &C::멤버, 값)` | 바인딩이 지정한 값이 기본값입니다. |
-| `required(이름, &C::멤버)` | 기본값이 없습니다. |
-| `.check(조건, 메시지)` | 조건이 거짓이면 `ValueError("<Node>: <이름> <메시지>")`를 발생시킵니다. 잘못된 인자가 엔진의 `VAI_ASSERT`까지 가지 않게 합니다. |
-| `PYVAI_NODE_BINDING(함수)` | 공용 `Node`의 바인딩을 등록합니다. |
-| `PYVAI_MODEL_NODE_BINDING(모델명, 함수)` | 모델 전용 `Node`의 바인딩을 등록합니다. |
-
-자세한 설명은 [`bind-node.h`](../../../python/bindings/nodes/bind-node.h)의 주석에 있습니다.
-
-### 6.2 이름 공개
-
-공용 `Node`는 [`python/pyvai/nodes.py`](../../../python/pyvai/nodes.py)의 가져오기 목록과 `__all__`에 이름을 추가합니다.
-
-### 6.3 테스트
-
-테스트는 `check_node()`를 호출합니다. `Node`를 만드는 함수, 입력 형상, `torch`로 작성한 기준 구현, 허용 오차를 전달합니다.
-다음은 [`Slice`의 테스트](../../../python/tests/nodes/test_slice.py)에서 발췌한 코드입니다.
-
-```python
-def test_slice_axis0_block():
-    check_node(
-        lambda: nodes.SliceNode(start=1, count=2, axis=0),
-        {"in0": (4, 5)},
-        lambda in0: in0[1:3],
-        tol=EXACT,
-    )
-```
-
-`check_node()`는 출력이 기준 구현과 허용 오차 안에서 같은지, 다시 실행해도 같은지, `NaN`이나 `Inf`가 없는지를 확인합니다.
-허용 오차의 종류와 선택 기준은 [`node_check.py`](../../../python/tests/node_check.py)에 있습니다.
-
-### 6.4 노드 문서
-
-[4.4](#44-노드-문서)의 방법으로 문서를 다시 생성하고, 생성된 두 파일을 `Node`와 함께 커밋합니다.
-
-## 7. 브랜치, 커밋 메시지, PR
+## 6. 브랜치, 커밋 메시지, PR
 
 브랜치는 [GitHub Flow](https://docs.github.com/en/get-started/using-github/github-flow), 커밋 메시지는 [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/)를 따릅니다.
 
-### 7.1 브랜치
+### 6.1 브랜치
 
 `master`에서 작업 브랜치를 만들고 PR로 합칩니다. `develop` 브랜치는 두지 않습니다.
 
@@ -256,11 +193,11 @@ def test_slice_axis0_block():
 | `fix/model-loader-crash` | 버그 수정 |
 | `docs/build-guide` | 문서 수정 |
 
-- 이름은 `<종류>/<짧은-설명>` 형식이고, 소문자와 하이픈을 사용합니다. 종류는 [7.2](#72-커밋-메시지)의 표와 같습니다.
+- 이름은 `<종류>/<짧은-설명>` 형식이고, 소문자와 하이픈을 사용합니다. 종류는 [6.2](#62-커밋-메시지)의 표와 같습니다.
 - 작업 하나에 브랜치 하나, PR 하나를 만듭니다.
 - 포크에서 올리는 PR은 브랜치 이름을 검사하지 않습니다. 같은 형식을 권장합니다.
 
-### 7.2 커밋 메시지
+### 6.2 커밋 메시지
 
 제목은 `종류(범위): 설명` 형식입니다.
 
@@ -298,18 +235,18 @@ BREAKING CHANGE: load_model(path) now takes a format argument.
 Change existing calls to load_model(path, format).
 ```
 
-### 7.3 PR 올리고 머지하기
+### 6.3 PR 올리고 머지하기
 
 | 항목 | 규칙 |
 |---|---|
 | 머지 경로 | `master`에는 PR로만 반영합니다. |
-| PR 제목 | [7.2](#72-커밋-메시지)의 커밋 제목 형식으로 적습니다. 머지하면 이 제목이 `master`의 커밋 제목이 됩니다. |
+| PR 제목 | [6.2](#62-커밋-메시지)의 커밋 제목 형식으로 적습니다. 머지하면 이 제목이 `master`의 커밋 제목이 됩니다. |
 | PR 설명 | 바꾼 내용과 확인한 방법을 적습니다. 자신의 변경과 관계없는 이유로 실패한 검사가 있으면 그 사실도 적습니다. 호환되지 않는 변경이면 `BREAKING CHANGE:` 문단을 포함합니다. |
 | 승인 | 관리자 팀의 승인 두 개가 필요합니다. [`CODEOWNERS`](../../../.github/CODEOWNERS)에 적힌 경로를 바꿨다면 해당 코드 소유자의 승인이 포함되어야 합니다. |
 | 머지 방식 | 스쿼시 머지(squash merge)를 사용합니다. PR의 커밋들이 커밋 하나로 합쳐져 `master`에 들어갑니다. |
 | 머지 후 | 머지한 작업 브랜치는 삭제합니다. |
 
-## 8. 버전
+## 7. 버전
 
 태그는 `vMAJOR.MINOR.PATCH` 형식이고, [SemVer](https://semver.org/)를 따릅니다.
 
