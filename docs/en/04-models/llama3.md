@@ -142,7 +142,7 @@ Download `model.safetensors` and `tokenizer.json` directly from the HuggingFace 
 ### Loading weights
 
 The code that maps checkpoints to graph slots is in [`models/production/llama3/meta-weights.h`](../../../models/production/llama3/meta-weights.h).
-Only one line is needed at the call site. The specialization assembles the path (`VAI_DATA_DIR "/ckpts/llama3/meta/" + modelCfg.variant`), so only the size needs to be set. For how the distribution-name tag works, see [`distribution-name-weights.h` in Writing custom models](../contributing/models.md#distribution-name-weightsh).
+Only one line is needed at the call site. The specialization assembles the path (`VAI_DATA_DIR "/ckpts/llama3/meta/" + modelCfg.variant`), so only the size needs to be set. For how the distribution-name tag works, see [`distribution-name-weights.h` in Writing custom models](../contributing/models.md#distribution-weightsh).
 
 ```cpp
 loadWeights<"meta">(net);

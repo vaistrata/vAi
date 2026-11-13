@@ -137,7 +137,7 @@ Download `model.safetensors` and `tokenizer.json` directly from the HuggingFace 
 
 The code that maps checkpoints to graph slots is in [`models/production/gpt2/openai-weights.h`](../../../models/production/gpt2/openai-weights.h).
 Only one line is needed at the call site. The specialization assembles the path (`VAI_DATA_DIR "/ckpts/gpt2/openai/" + modelCfg.variant`),
-so only the size needs to be set. For how the distribution-name tag works, see [`distribution-name-weights.h` in Writing custom models](../contributing/models.md#distribution-name-weightsh).
+so only the size needs to be set. For how the distribution-name tag works, see [`distribution-name-weights.h` in Writing custom models](../contributing/models.md#distribution-weightsh).
 
 ```cpp
 loadWeights<"openai">(net);

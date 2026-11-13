@@ -185,7 +185,7 @@ loadWeights<"ultralytics">(net);
 ```
 
 The path is assembled by the specialization from `model.cfg.tier` (`VAI_DATA_DIR "/yolov8/yolov8" + <tier character>`), so the caller
-only needs to set the `tier`. For how distribution-name tags work, see [`distribution-name-weights.h` in Writing custom models](../contributing/models.md#distribution-name-weightsh). Mapping Ultralytics `model.<n>` index keys to the `backbone`, `neck`, and `head` members is the core of the loader.
+only needs to set the `tier`. For how distribution-name tags work, see [`distribution-name-weights.h` in Writing custom models](../contributing/models.md#distribution-weightsh). Mapping Ultralytics `model.<n>` index keys to the `backbone`, `neck`, and `head` members is the core of the loader.
 Both the `conv` weights and `BN` parameters (`gamma`, `beta`, `running mean`/`var`) are read at the net's `wDefaultDtype`.
 The weight loader computes BN `scale` and `bias` before passing them to `Convolution`.
 
