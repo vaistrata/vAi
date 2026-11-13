@@ -16,12 +16,7 @@ using namespace vai::utils;
 using namespace gemma3_bench;
 namespace gemma3 = model::production::gemma3;
 
-struct SizeOption { const char* name; };
-
-static constexpr SizeOption modelSizes[] = {
-    { "4B" },
-    { "1B" },
-};
+static constexpr const char* modelSizes[] = { "4B", "1B" };
 
 inline std::vector<int> makePrompt(
     const Tokenizer& tokenizer,
@@ -79,12 +74,12 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    const SizeOption* size = nullptr;
+    const char* size = nullptr;
 
-    for (const SizeOption& s : modelSizes)
-        if (args.size == s.name)
+    for (const char* s : modelSizes)
+        if (args.size == s)
         {
-            size = &s;
+            size = s;
             break;
         }
 
@@ -109,7 +104,7 @@ int main(int argc, char** argv)
 
     srand(seed);
 
-    gemma3::ModelConfig modelCfg = gemma3::ModelConfig::get(size->name);
+    gemma3::ModelConfig modelCfg = gemma3::ModelConfig::get(size);
 
     const bool hasVision = modelCfg.vision.has_value();
 
