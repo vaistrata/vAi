@@ -139,6 +139,8 @@ plugins:
             - Writing custom models: en/05-contributing-models.md
             - Built-in nodes: en/06-nodes.md
             - Writing custom nodes and kernels: en/07-contributing-nodes.md
+            - Writing custom groups: en/08-contributing-groups.md
+            - Contribution workflow and automated checks: en/10-contributing.md
 
 # 빌드마다 6장을 헤더 스탬프에서 다시 만든다.
 hooks:

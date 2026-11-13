@@ -15,11 +15,10 @@
 | [Convolution](#convolution) | 2D convolution with device-selected direct, implicit, or Winograd plans | `conv-k1s1-gemm-cm.comp`, `conv-k1s1-gemm.comp`, `conv-k3s2-gemm-cm.comp`, `conv-k3s1-implicit-gemm-cm.comp`, `conv-k3s1-implicit-gemm.comp`, `conv-implicit-gemm.comp`, `conv-implicit-gemm-cm.comp`, `conv-k3s2-gemm.comp`, `cm-transform.comp`, `conv-k3s1-winograd-filter-transform.comp`, `conv-k3s1-winograd-input.comp`, `conv-k3s1-winograd-output.comp`, `bn-reduce.comp`, `conv-k3s1-winograd-gemm.comp`, `conv-k3s1-winograd-gemm-cm.comp` |
 | [CyclicTableReader](#cyclictablereader) | read successive table rows, wrapping at the end | `cyclic-table-reader.comp` |
 | [EleAffine](#eleaffine) | element-wise affine, O = scale * in0 + shift | `ele-affine.comp` |
-| [Flatten](#flatten) | Flatten tensor to 1D | — |
-| [Gate](#gate) | conditional branch (no computation) | — |
+| [Flatten](#flatten) | Flatten tensor to 1D | None |
+| [Gate](#gate) | conditional branch (no computation) | None |
 | [GatedMul](#gatedmul) | element-wise multiply with one operand activated (GLU gating) | `gated-mul.comp` |
-| [GroupNorm](#groupnorm) | group normalization over a CHW feature map | `group-norm.comp` |
-| [Identity](#identity) | Pass-through node (no computation) | — |
+| [Identity](#identity) | Pass-through node (no computation) | None |
 | [IndexCopy](#indexcopy) | write source slices at listed indices, as torch.index_copy | `index-copy.comp` |
 | [LayerNorm](#layernorm) | layer normalization over the feature axis, single kernel | `layer-norm.comp` |
 | [Linear](#linear) | O = I · Wᵀ, split between two output decompositions | `linear-pack-intel.comp`, `linear-slab.comp`, `linear-tile-intel.comp`, `linear-cm.comp`, `linear-tile.comp`, `linear-reduce.comp` |
@@ -27,10 +26,10 @@
 | [NearestUpsample](#nearestupsample) | Replicates CHW pixels by an integer scale factor. | `upsample.comp` |
 | [Permute](#permute) | Permutes the axes of a tensor of any rank. | `permute.comp` |
 | [Pool2d](#pool2d) | 2D pooling with a square kernel (MaxPool2d, AvgPool2d) | `pool2d.comp` |
-| [Reshape](#reshape) | Reshape tensor to specified dimensions | — |
+| [Reshape](#reshape) | Reshape tensor to specified dimensions | None |
 | [RmsNorm](#rmsnorm) | RMS normalization over the feature axis, single kernel | `rms-norm.comp` |
 | [Rope](#rope) | rotary position embedding (half-split rotation) | `rope.comp` |
-| [RowSliceScatter](#rowslicescatter) | write slices into rows, as torch.slice_scatter on dim 0 | — |
+| [RowSliceScatter](#rowslicescatter) | write slices into rows, as torch.slice_scatter on dim 0 | None |
 | [Slice](#slice) | Take a run of consecutive indices along one axis | `slice.comp` |
 | [TimeEmbedding](#timeembedding) | sinusoidal embedding of a timestep the node counts down itself | `time-embedding.comp` |
 | [TokenEmbedding](#tokenembedding) | token embedding, optionally fused with positional embedding | `token-embedding.comp` |
@@ -168,8 +167,8 @@ Source: [`vai/nodes/attention.h`](../../vai/nodes/attention.h)
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `headDim` | `uint32_t` | — |  |
-| `numQHeads` | `uint32_t` | — |  |
+| `headDim` | `uint32_t` | Not specified |  |
+| `numQHeads` | `uint32_t` | Not specified |  |
 | `numKVHeads` | `uint32_t` | `0` | for GQA (Hkv < numQHeads); 0 → Hkv = numQHeads |
 | `kvCacheSize` | `uint32_t` | `0` | tokens the cache holds; 0 = no cache at all |
 | `windowSize` | `uint32_t` | `0` | sliding-window span (0 = attend the whole prefix) |
@@ -264,7 +263,7 @@ Source: [`vai/nodes/batch-norm.h`](../../vai/nodes/batch-norm.h)
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `channels` | `uint32_t` | — |  |
+| `channels` | `uint32_t` | Not specified |  |
 | `eps` | `float` | `1e-5f` |  |
 | `wDtype` | `vai::Dtype` | `vai::Dtype::None` |  |
 | `oDtype` | `vai::Dtype` | `vai::Dtype::None` | None: oDefaultDtype |
@@ -358,12 +357,12 @@ Source: [`vai/nodes/convolution.h`](../../vai/nodes/convolution.h)
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `inChannels` | `uint32_t` | — |  |
-| `outChannels` | `uint32_t` | — |  |
-| `kernelSize` | `uint32_t` | — |  |
-| `stride` | `uint32_t` | — |  |
-| `acceptResidual` | `bool` | `false` | input "residual" |
-| `residualOrder` | `vai::ResidualOrder` | `vai::ResidualOrder::AfterEpilogue` |  |
+| `inChannels` | `uint32_t` | Not specified |  |
+| `outChannels` | `uint32_t` | Not specified |  |
+| `kernelSize` | `uint32_t` | Not specified |  |
+| `stride` | `uint32_t` | Not specified |  |
+| `hasBias` | `bool` | `true` |  |
+| `hasScale` | `bool` | `false` |  |
 | `epilogue` | `vai::Epilogue` | `vai::Epilogue::None` |  |
 | `wDtype` | `vai::Dtype` | `vai::Dtype::None` | conv weight; None: wDefaultDtype |
 | `oDtype` | `vai::Dtype` | `vai::Dtype::None` | None: oDefaultDtype |
@@ -423,7 +422,7 @@ Source: [`vai/nodes/cyclic-table-reader.h`](../../vai/nodes/cyclic-table-reader.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `numRows` | `uint32_t` | — | number of rows in the table |
+| `numRows` | `uint32_t` | Not specified | number of rows in the table |
 | `tableDtype` | `vai::Dtype` | `vai::Dtype::Fp32` | None: wDefaultDtype |
 | `oDtype` | `vai::Dtype` | `vai::Dtype::None` | None: oDefaultDtype |
 
@@ -793,8 +792,8 @@ Source: [`vai/nodes/linear.h`](../../vai/nodes/linear.h)
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `inDim` | `uint32_t` | — |  |
-| `outDim` | `uint32_t` | — |  |
+| `inDim` | `uint32_t` | Not specified |  |
+| `outDim` | `uint32_t` | Not specified |  |
 | `hasBias` | `bool` | `false` |  |
 | `acceptResidual` | `bool` | `false` | input "residual" |
 | `residualOrder` | `vai::ResidualOrder` | `vai::ResidualOrder::AfterEpilogue` |  |
@@ -982,8 +981,8 @@ Source: [`vai/nodes/pool2d.h`](../../vai/nodes/pool2d.h)
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `kernelSize` | `uint32_t` | — |  |
-| `stride` | `uint32_t` | — |  |
+| `kernelSize` | `uint32_t` | Not specified |  |
+| `stride` | `uint32_t` | Not specified |  |
 | `padding` | `uint32_t` | `0` |  |
 | `ceilMode` | `bool` | `false` | a last window that would start in the right padding is dropped |
 | `countIncludePad` | `bool` | `true` | Avg: padding counts in the divisor, as PyTorch's default |
@@ -1100,8 +1099,8 @@ Source: [`vai/nodes/rope.h`](../../vai/nodes/rope.h)
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `cfg` | `RopeConfig` | — | frequencies; describe the whole model |
-| `headDim` | `uint32_t` | — | Dh, must be even |
+| `cfg` | `RopeConfig` | Not specified | frequencies; describe the whole model |
+| `headDim` | `uint32_t` | Not specified | Dh, must be even |
 | `oDtype` | `vai::Dtype` | `vai::Dtype::None` | None: oDefaultDtype |
 
 **Behavior and constraints**
@@ -1145,7 +1144,7 @@ Source: [`vai/nodes/row-slice-scatter.h`](../../vai/nodes/row-slice-scatter.h)
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `sliceSize` | `uint32_t` | — | S: rows in one slice; 0 when in1 is never fed |
+| `sliceSize` | `uint32_t` | Not specified | S: rows in one slice; 0 when in1 is never fed |
 
 **Behavior and constraints**
 
@@ -1178,7 +1177,7 @@ Source: [`vai/nodes/slice.h`](../../vai/nodes/slice.h)
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `axis` | `uint32_t` | `0` | the axis to cut; 0 takes a contiguous block |
-| `start` | `int64_t` | — | first index on the axis; negative counts from the end |
+| `start` | `int64_t` | Not specified | first index on the axis; negative counts from the end |
 | `count` | `uint32_t` | `1` | how many consecutive indices to take |
 | `oDtype` | `vai::Dtype` | `vai::Dtype::None` | None: oDefaultDtype |
 
@@ -1221,10 +1220,10 @@ Source: [`vai/nodes/time-embedding.h`](../../vai/nodes/time-embedding.h)
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `embedDim` | `uint32_t` | — | even; sin in the first half, cos in the second |
-| `minPeriod` | `float` | — | the fastest sinusoid, in units of t |
-| `maxPeriod` | `float` | — | ... and the slowest |
-| `numSteps` | `uint32_t` | — | runs before t is back at 1 |
+| `embedDim` | `uint32_t` | Not specified | even; sin in the first half, cos in the second |
+| `minPeriod` | `float` | Not specified | the fastest sinusoid, in units of t |
+| `maxPeriod` | `float` | Not specified | ... and the slowest |
+| `numSteps` | `uint32_t` | Not specified | runs before t is back at 1 |
 | `oDtype` | `vai::Dtype` | `vai::Dtype::None` | None: oDefaultDtype |
 
 **Behavior and constraints**
@@ -1267,8 +1266,8 @@ Source: [`vai/nodes/token-embedding.h`](../../vai/nodes/token-embedding.h)
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `vocabSize` | `uint32_t` | — |  |
-| `embedDim` | `uint32_t` | — |  |
+| `vocabSize` | `uint32_t` | Not specified |  |
+| `embedDim` | `uint32_t` | Not specified |  |
 | `posTableSize` | `uint32_t` | `0` | learned positional table rows; 0 = token only |
 | `scale` | `float` | `1.0f` | multiplies the looked-up embedding |
 | `wDtype` | `vai::Dtype` | `vai::Dtype::None` |  |
@@ -1367,7 +1366,7 @@ Source: [`vai/nodes/type-cast.h`](../../vai/nodes/type-cast.h)
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `oDtype` | `vai::Dtype` | — | required: the dtype to cast to |
+| `oDtype` | `vai::Dtype` | Not specified | required: the dtype to cast to |
 
 **Behavior and constraints**
 

@@ -2,58 +2,58 @@
 
 vAi is a **Vulkan inference engine built on a graph DSL**. It assembles model graphs using a C++ DSL (a dedicated syntax for connecting operator nodes) and executes them using Vulkan Compute Shaders.
 
-## Features
+## 1. Features
 
-### 1. Portability
+### 1.1 Portability
 
-Run and test on a wide range of GPUs and SoCs with a single codebase. Because vAi uses only the industry-standard Vulkan API, there is no need to rewrite code from scratch for vendor-specific SDKs from NVIDIA, AMD, Intel, Qualcomm, and others. Switching devices, which traditionally required reimplementation, is reduced to a single build with vAi.
+A single codebase can run and be tested directly on multiple GPUs. Because vAi uses only Vulkan, the industry-standard GPU API, there is no need to rewrite code for vendor-specific SDKs from NVIDIA, AMD, Intel, Qualcomm, and others.
 
-### 2. Lightweight
+### 1.2 Lightweight
 
-When deploying LLMs with vAi, the runtime binary is only around 2 MB. Its dependency chain has been carefully optimized from the ground up for edge devices. As a result, selective builds, which include only the logic and operator kernels actually used, are enabled by default with no additional configuration.
+When deploying an LLM with vAi, the runtime binary is just over 2 MB. The dependency chain is designed for on-device environments. Selective builds include only the model code and operator kernels actually used, without additional configuration.
 
-### 3. High Performance
+### 1.3 High performance
 
-The CPU does very little work during each inference. Conventional inference engines typically traverse the computation graph and submit kernel execution commands to the GPU on every inference. vAi instead creates the command sequence once and reuses it repeatedly. In addition, GPU kernels are tuned for each device, so you don't have to sacrifice performance for portability.
+GPU command buffers are reused when conditions such as input shapes and buffer bindings remain the same. This requires very little CPU work during inference. Conventional inference engines typically traverse the computation graph and repeatedly submit kernel execution commands to the GPU on every inference, but vAi creates the command buffer once and reuses it. GPU kernel tuning also selects different kernels for different devices, so portability does not have to come at the cost of performance.
 
-### 4. Flexibility
+### 1.4 Intuitiveness
 
-Vision models and LLMs can be handled together within a single runtime. Typically, vision models are handled by general-purpose inference engines such as ONNX Runtime, ncnn, or ExecuTorch, while models requiring optimization, such as LLMs, use dedicated frameworks such as llama.cpp, vLLM, or TensorRT-LLM. vAi leverages polymorphism to let each operator define its own dynamically updated state, such as the KV cache, and how that state is transitioned. This allows vAi to handle vision models, LLMs, VLMs, and VLAs without adding another runtime layer.
-
-### 5. Intuitiveness
-
-With its graph DSL, the model structure is directly represented in code. vAi uses a dedicated graph syntax and object-oriented design, allowing you to build a model by connecting nodes like LEGO bricks. LLaMA 3 transformer block can be written as follows:
+The graph DSL exposes the model structure directly in code. With vAi's dedicated graph syntax and object-oriented design, a model can be built by connecting `Node` and `NodeGroup` objects like LEGO bricks.
 
 ```cpp
-struct TransformerBlock : public vai::NodeGroup {
+template<TransformerType layout, QkvLayout qkv>
+struct TransformerLayer : public vai::NodeGroup {
     vai::node::Identity input;
-    vai::node::RmsNorm norm1;
-    MultiHeadAttention mhAttn;
-    vai::node::Add add1;
-    vai::node::RmsNorm norm2;
-    GatedFeedForward ffn;
-    vai::node::Add add2;
+    typename BranchNorm<layout>::Type norm1;
+    MultiHeadAttention<qkv> mhAttn;
+    std::optional<vai::node::Slice> lastRow;
+    std::optional<vai::node::Gate> gate;
+    typename BranchNorm<layout>::Type norm2;
+    typename BranchFfn<layout>::Type ffn;
 
-    TransformerBlock(...)
+    TransformerLayer(...)
     {
-        input - norm1 - mhAttn - "in0"/add1 - norm2 - ffn - "in0"/add2;
-        input                  - "in1"/add1               - "in1"/add2;
+        input - norm1 -            mhAttn - lastRow - gate/"then" - norm2 -            ffn;
+        input         - "residual"/mhAttn - lastRow - gate/"then"         - "residual"/ffn;
     }
 };
 ```
 
-The member list is the block's structure, and the connections represent the data flow. The first line in the constructor represents the main path, while the second represents the residual path, making the design visible at a glance. Because the code serves as the model's structural diagram, it is easy to read and modify.
+The member list is the block's structure, and the connections are its data flow. The first line in the constructor draws the main path, and the second draws the residual path, like a design diagram. Because the code is the model's structural diagram, it is easy to read and modify.
 
-### 6. Extensibility
+### 1.5 Extensibility
 
-You can create and add new operators or layers with custom optimizations. vAi lets you inherit from a node class and implement only the kernel you need **without modifying a single line of core code**. You can share newly created kernels with anyone who needs them without waiting for them to be merged into the upstream project. There is no need to maintain a fork or conform to a plugin specification.
+New operators or layers with custom optimizations can be added directly. Inherit from `Node` and write the required kernel **without modifying a single line of core code**. Newly created kernels can be shared with anyone who needs them without waiting for a merge into the upstream project. There is no need to maintain a fork or conform to a plugin specification.
 
-## Project Structure
+## 2. Project structure
 
 ```
 vai/                        Core engine (vAi library)
   engine/
     neural-net.h
+    neural-net.cpp           Graph sorting, buffer preparation, command recording
+    graph-flow.h             Connection DSL and NodeGroup
+    graph-controller.h       Execution paths based on inputs and conditional branches
     tensor.h
     safetensors-parser.h
     weights.h
@@ -61,10 +61,11 @@ vai/                        Core engine (vAi library)
     pipeline-pool.h
     error.h
   nodes/                    Built-in nodes
+  groups/                   Built-in groups
   shaders/                  Built-in kernels (.comp)
   utils/
 
-data/                       Model checkpoints · input data, etc.
+data/                       Model checkpoints, input data, etc.
 
 models/                     Supported models
   <impl>/<model-name>/
@@ -79,29 +80,86 @@ external/eva/               Vulkan wrapper (submodule)
 docs/
 ```
 
-## Common Code Conventions
+Start by running MNIST with the [Quickstart](02-quickstart.md), then read [Node](03-usage/node.md) and [NodeGroup](03-usage/node-group.md). The following [NeuralNet](03-usage/neural-net.md) and [Tensor](03-usage/tensor.md) pages cover graph execution and data representation.
 
-**1. CamelCase**: Types start with an uppercase letter, while functions and variables start with a lowercase letter.
 
-```cpp
-class Linear;        // Type
-void addSlot(...);       // Function
-uint32_t numHeads;       // Variable
-```
-
-**2. Opening Braces**: The following rules apply depending on the construct.
-
-| Construct | Opening Braces |
+| What to change | Documentation and code locations |
 |---|---|
-| `if` · `for` blocks | Allman |
-| Regular functions · member functions | Allman |
-| Lambda functions | Flexible |
-| Struct · class declarations | Flexible |
+| Model composition and connections | [MNIST example](../../examples/mnist/main.cpp), [supported models](../../models/), [Writing custom models](05-contributing-models.md) |
+| Blocks shared by multiple models | [Common groups](../../vai/groups/), [NodeGroup](03-usage/node-group.md), [Writing custom groups](08-contributing-groups.md) |
+| Shape handling and GPU computation for an operation | [Nodes](../../vai/nodes/) and [shaders](../../vai/shaders/), [Writing custom nodes and kernels](07-contributing-nodes.md) |
+| Graph execution and buffer management | [neural-net.cpp](../../vai/engine/neural-net.cpp), [Execution pipeline](03-usage/execution-pipeline.md) |
+
+## 3. Common code conventions
+
+**3.1 CamelCase**: Types start with an uppercase letter, while functions and variables start with a lowercase letter.
 
 ```cpp
-// Allman style
-void foo()
-{
-    ...
-}
+class Linear;            // Type
+void addSlot(...);       // Function
+uint32_t numQHeads;       // Variable
 ```
+
+The rules for each construct are as follows.
+
+| Construct | Rule | Example |
+|---|---|---|
+| Classes, structs, `enum`, type aliases, `concept` | `PascalCase` | `NeuralNet`, `PipeParams` |
+| Functions, member functions | `camelCase` | `loadWeights()`, `setProfileTag()` |
+| Variables, parameters | `camelCase` | `outShape`, `targetDtype` |
+| `public` member variables | `camelCase` | `hasBias`, `iDtype` |
+| `private`, `protected` member variables | `camelCase` followed by `_` | `device_`, `cmdBuffer_` |
+| `enum` values | `PascalCase` | `Fp16`, `Bilinear` |
+| Constants | `camelCase`, without a `k` prefix | `tokensPerSide` |
+| Namespaces | Lowercase | `vai`, `node`, `detail` |
+| Macros | `UPPER_CASE` | `VAI_ASSERT` |
+
+The following names are exceptions.
+
+- Tensor dimensions use the letters from their formulas. (Examples: `N`, `K`, `Co`, `Dh`, `Tmax`.)
+- Configuration functions for model sizes start with `_` because names cannot start with a digit. (Examples: `_124M()`, `_3B_224()`.)
+- The `public` member `config_` of `Node` has a trailing `_` to distinguish it from the constructor parameter `config`.
+
+**3.2 Opening braces**: The following rules apply to each construct.
+
+| Construct | Opening brace |
+|---|---|
+| Regular functions, member functions | Next line (Allman) |
+| `if`, `for`, `while`, `switch` blocks | Next line (Allman) |
+| Struct and class declarations | Next line (Allman) |
+| Lambda functions, `namespace`, `enum` | Same line |
+
+```cpp
+namespace vai::node {
+
+enum class Mode { Fast, Exact };
+
+class Linear : public vai::Node
+{
+public:
+    void prepare()
+    {
+        if (config_.hasBias)
+            addBias();
+        auto scaled = [&](uint32_t x) { return x * factor_; };
+    }
+};
+
+}   // namespace vai::node
+```
+
+**3.3 namespace**: Use vai as the general namespace, and vai::node and vai::group for common nodes and node groups.
+For custom nodes and node groups, use the model name in place of vai.
+
+```cpp
+namespace vai
+namespace vai::node
+namespace vai::group
+
+// For RT-DETRv2
+namespace rtdetrv2
+namespace rtdetrv2::node
+namespace rtdetrv2::group
+```
+
+**3.4 Automated checks**: Rules 3.1 and 3.2 are configured in `.clang-format` and `.clang-tidy` at the repository root and checked automatically on commits and PRs. [Contribution workflow and automated checks](10-contributing.md) covers the remaining formatting rules, such as line length and indentation, and how to pass the checks.

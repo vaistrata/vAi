@@ -34,7 +34,7 @@ model({{"in0", input}}, {{"out0", &output}});
 
 ## Supported models
 
-Size presets and weight loaders are covered in the [model list](docs/en/04-models/README.md#list).
+Size presets and weight loaders are covered in the [model list](docs/en/04-models/README.md#model-list).
 
 | Model | Task | Example |
 |---|---|---|
@@ -74,7 +74,7 @@ cmake --build build --config Release
 
 ## Performance
 
-See the [benchmark documentation](docs/en/04-models/README.md#aggregate-benchmark) for each model's
+See the [benchmark documentation](docs/en/04-models/README.md#combined-benchmarks) for each model's
 measurement environment and results. Comparisons require matching GPUs, precision,
 input sizes and timing boundaries.
 

@@ -1,19 +1,19 @@
 # Profiling
 
-vAi can measure the **GPU execution time** of each node. It records timestamps before and after the node's `run()`, then reads and accumulates those values after the forward ends.
+vAi can measure each node's **GPU execution time**. It records timestamps before and after the node's `run()`, then reads and accumulates them after the forward pass ends.
 
 ## Enabling profiling
 
-Profiling is enabled when at least one tag is assigned to a node. Conversely, when no tags are assigned, profiling has no overhead.
+Profiling is enabled when at least one node has a tag. With no tags, there is no profiling overhead.
 
 ```cpp
 net.layers[i].mhAttn.attn.setProfileTag("Attn");
 ```
 
 
-## Identical tags are combined
+## Nodes with the same tag are combined
 
-The times for nodes with the same tag are summed into a single value.
+Times for nodes with the same tag are summed.
 
 ```cpp
 for (uint32_t i = 0; i < net.modelCfg.numLayers; ++i)
@@ -23,36 +23,36 @@ for (uint32_t i = 0; i < net.modelCfg.numLayers; ++i)
 }
 ```
 
-If there are 12 layers, the times for all 24 nodes are collected on the single `LayerNorm` line.
+With 12 blocks, the times of 24 nodes appear in one `LayerNorm` row.
 
-Tags can be grouped into a hierarchy by including `.` in them.
+A `.` in a tag groups entries into a hierarchy.
 
 ```cpp
 b.mhAttn.projQKV.setProfileTag("Linear.[768x2304]");
 b.mhAttn.projOut.setProfileTag("Linear.[768x768]");
 ```
 
-In this case, the times under `Linear` are divided by shape, and the parent shows the sum of the times for its child entries.
+In this case, times are listed by shape under `Linear`, and the parent shows the sum of its children.
 
-## Multiple forwards accumulate as an average
+## Multiple forward passes are averaged
 
-Measurements accumulate after each forward, and `printProfile()` prints the average of all forwards recorded so far.
+Measurements accumulate after each forward pass, and `printProfile()` prints the average across the recorded forward passes.
 
 ```cpp
-for (int i = 0; i < 5; ++i)   // Warm-up
-    net(inDict);
+for (int i = 0; i < 5; ++i)   // Warmup
+    model(inDict);
 
-net.resetProfileRecords();   // Discard the warm-up records
+model.resetProfileRecords();   // Discard warmup records
 
 for (int i = 0; i < 10; ++i)
     net(inDict);
 
-net.printProfile();          // Average over 10 runs
+model.printProfile();          // Average over 10 passes
 ```
 
-Initial runs can include one-time costs such as shader compilation or buffer preparation, so it is better to measure after a warm-up. `resetProfileRecords()` is used to reset all records accumulated so far before measuring again.
+Initial runs can include one-time costs such as shader compilation or buffer preparation, so measure after a warmup. Use `resetProfileRecords()` to clear all accumulated records and start measuring again.
 
-## Output and record reset
+## Output and resetting records
 
 ```text
 === Per-node GPU profile (avg over 10 iters) ===
@@ -64,36 +64,36 @@ Initial runs can include one-time costs such as shader compilation or buffer pre
   TOTAL (full forward)          : 187.5394 ms
 ```
 
-| Item | Meaning |
-|---|---|
-| `ms` | Average GPU time per forward |
-| `%` | Percentage of `TOTAL` |
-| `TOTAL` | GPU time for the entire forward |
-| `OTHER` | Time in untagged sections |
+| Item    | Meaning |
+| ------- | ---------------------- |
+| `ms`    | Average GPU time per forward pass |
+| `%`     | Percentage of `TOTAL` |
+| `TOTAL` | GPU time for the entire forward pass |
+| `OTHER` | Time spent in untagged sections |
 
-A large `OTHER` means that substantial time is being spent in sections that have not yet been tagged.
+A large `OTHER` value means much of the time is spent in sections that have not been tagged yet.
 
-By default, `printProfile()` resets the accumulated records after printing. To inspect only the intermediate results while retaining the records, use `printProfile(false)`.
+By default, `printProfile()` resets accumulated records after printing. Use `printProfile(false)` to inspect intermediate results while keeping the records.
 
-This default behavior makes it easy to measure two sections with the same tag configuration separately, such as prefill and decode.
+The default behavior makes it easy to measure two phases with the same tags separately, such as prefill and decode.
 
 ```cpp
-net(inDict);
-net.printProfile();          // Print prefill and reset the records
+model(inDict);
+model.printProfile();          // Print prefill results and reset records
 
 for (int i = 0; i < maxNewTokens; ++i)
     net(inDict);
 
-net.printProfile();          // Print only the decode section
+model.printProfile();          // Print only the decode phase
 ```
 
-The records are reset when the first output is printed, so the second output includes only the records newly accumulated during decode.
+Because the first print resets the records, the second print includes only the measurements accumulated during decode.
 
 ## Changing tags
 
-Tags can be changed during measurement. The changed tags take effect when the command buffer is recorded again for the next forward.
+Tags can be changed during measurement. The changes take effect when the command buffer is re-recorded on the next forward pass.
 
-If you want to examine a specific bottleneck in detail after checking the full profile, you can clear the existing tags and apply them again to the desired nodes.
+After inspecting the full profile, clear the existing tags and tag the desired nodes to examine a particular bottleneck in detail.
 
 ```cpp
 net.clearProfileTags();
@@ -108,32 +108,32 @@ Pass an empty string to remove the tag from a specific node.
 net.lmHead.setProfileTag("");
 ```
 
-Existing records are reset when the tag configuration changes. This prevents measurements with different targets from being mixed into one average.
+Changing the tag configuration resets existing records so measurements of different targets are not mixed into one average.
 
-## Reading values
+## Reading a value
 
-The average GPU time of a specific tag can also be read as a number without printing it.
+The average GPU time for a specific tag can also be read as a number without printing.
 
 ```cpp
 double ms = net.getGpuTimeMs("Linear.[768x2304]");
 ```
 
-`getGpuTimeMs()` does not interpret `.` as a hierarchy and **looks up the entire tag as a single name**. Therefore, if a hierarchical tag is used, the exact full tag, such as `"Linear.[768x2304]"`, must be passed instead of `"Linear"`.
+`getGpuTimeMs()` **looks up the full tag as a single name**, without interpreting `.` as a hierarchy. For a hierarchical tag, pass its exact full name, such as `"Linear.[768x2304]"`, rather than `"Linear"`.
 
-If the tag does not exist or no forward has been recorded yet, it returns `0.0`.
+It returns `0.0` if the tag does not exist or no forward pass has been recorded yet.
 
 ## Notes
 
-`printProfile()`, `getGpuTimeMs()`, and `resetProfileRecords()` internally wait for the previous forward to complete in order to read the GPU timestamps. Calling them every time inside a measurement loop can serialize execution, so call them outside the loop whenever possible.
+`printProfile()`, `getGpuTimeMs()`, and `resetProfileRecords()` internally wait for the previous forward pass to finish before reading GPU timestamps. Calling them on every iteration of a measurement loop can serialize execution, so call them outside the loop where possible.
 
-During profiling, timestamp commands are added before and after tagged nodes. Measurement granularity is at the node level, and even if one node dispatches multiple kernels, the entire node is measured as one section.
+Profiling adds timestamp commands before and after each tagged node. Measurements are at node granularity: even if a node dispatches multiple kernels, the entire node is measured as one section.
 
 ## API summary
 
-| API | Role |
-|---|---|
-| `Node::setProfileTag(tag)` | Assigns a tag. An empty string removes it |
-| `NeuralNet::clearProfileTags()` | Removes all tags |
-| `NeuralNet::resetProfileRecords()` | Resets the accumulated records |
-| `NeuralNet::printProfile(withResetRecords)` | Prints the average. By default, resets the records after printing |
-| `NeuralNet::getGpuTimeMs(tag)` | Returns the average GPU time for a specific tag |
+| API                                         | Role |
+| ------------------------------------------- | ----------------------- |
+| `Node::setProfileTag(tag)`                  | Set a tag; an empty string removes it |
+| `NeuralNet::clearProfileTags()`             | Remove all tags |
+| `NeuralNet::resetProfileRecords()`          | Reset accumulated records |
+| `NeuralNet::printProfile(withResetRecords)` | Print averages; reset records after printing by default |
+| `NeuralNet::getGpuTimeMs(tag)`              | Return the average GPU time for a specific tag |

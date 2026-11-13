@@ -1,112 +1,119 @@
 # NodeGroup
 
-A NodeGroup is a subgraph that groups multiple nodes to be used as one. It is used to group repeated structures like Transformer blocks into one unit.
+A `NodeGroup` is a subgraph that wraps multiple nodes so they can be used as one unit. It groups repeated structures, such as transformer blocks.
+
+First, check [`vai/groups`](../../../vai/groups/) for a reusable group.
 
 ```cpp
 struct FeedForward : public vai::NodeGroup {
     vai::node::Linear fc1, fc2;                 // 1
 
-    FeedForward(uint32_t in, uint32_t hidden, uint32_t out, vai::Epilogue act)
-    : fc1({in, hidden, true, vai::Epilogue::GeluTanh})
-    , fc2({hidden, out, true})
+    // ... Config definition
+
+    FeedForward(Config config)
+    : fc1({
+        .inDim = config.inDim,
+        .outDim = config.hiddenDim,
+        .hasBias = config.hasBias,
+        .epilogue = config.activation})
+    , fc2({
+        .inDim = config.hiddenDim,
+        .outDim = config.outDim,
+        .hasBias = config.hasBias,
+        .acceptResidual = config.acceptResidual})
     {
         fc1 - fc2;                            // 2
 
         defineSlot("in0", fc1.slot("in0"));   // 3
+        if (config.acceptResidual)
+            defineSlot("residual", fc2.slot("residual"));
         defineSlot("out0", fc2.slot("out0"));
     }
 };
 ```
 
 1. Declare nodes as members,
-2. Connect the internals in the constructor,
-3. Decide which slots to expose externally.
+2. connect the internal nodes in the constructor, and
+3. choose which slots to expose outside the group.
 
+`NodeGroup::defineSlot` assigns an external name to an internal `Node` slot rather than creating a new slot. A connection to the group's `in0` connects to the `in0` slot of `fc1`.
 
-`NodeGroup::defineSlot` does not create a new slot but assigns an external name to an internal node's slot. If connected to the group's `in0` from outside, it actually connects to the `in0` slot of `fc1`.
+`NodeGroup` has neither `prepare()` nor `run()`. The `Node` instances inside it execute. `NodeGroup` combines multiple `Node` instances into a subgraph so repeated structures can be reused.
 
+## 1. Connections
 
-
-NodeGroup does not have `prepare()` or `run()`. The nodes inside are executed, and the group is just a name for grouping them.
-
-## Connection
-
-Like nodes, you can connect them with `-`. You can also mix groups and nodes.
+Connect groups with `-`, just like `Node`. `NodeGroup` and `Node` can be mixed.
 
 ```cpp
-norm1 - mhAttn - add1;      // Node - Group - Node
-ffn1 - ffn2;                // Group - Group
+norm - ffn - head;          // Node - group - node
+ffn1 - ffn2;                // Group - group
 ```
 
-The rules for specifying slots using `/` are the same. If it is in front of the group, it is the input slot, and if it is behind the group, it is the output slot. The names that can be used are exposed by `defineSlot`. Likewise, as with nodes, if `/` is omitted, it is regarded as `in0` and `out0`.
+The `/` slot selection rules are the same. Before a group, it selects an input slot; after a group, it selects an output slot. Only names exposed with `defineSlot` are available. As with `Node`, omitting `/` selects `in0` and `out0`.
 
-## Nesting
+## 2. Nesting
 
-You can put another group inside a group. Llama 3.2's Transformer block is a good example. `MultiHeadAttention` and `GatedFeedForward` are groups respectively, and `TransformerBlock`, which contains these two, is also a group.
+A `NodeGroup` can contain other `NodeGroup` instances. Llama 3.2's TransformerLayer is a `NodeGroup` with `MultiHeadAttention` and `GatedFeedForward` members. Both members are also `NodeGroup` instances made up of multiple `Node` instances.
 
 ```cpp
-struct TransformerBlock : public vai::NodeGroup {
+template<TransformerType layout, QkvLayout qkv>
+struct TransformerLayer : public vai::NodeGroup {
     vai::node::Identity input;
-    vai::node::RmsNorm norm1;
-    MultiHeadAttention mhAttn;
-    vai::node::Add add1;
-    vai::node::RmsNorm norm2;
-    GatedFeedForward ffn;
-    vai::node::Add add2;
+    typename BranchNorm<layout>::Type norm1;
+    MultiHeadAttention<qkv> mhAttn;
+    std::optional<vai::node::Slice> lastRow;
+    std::optional<vai::node::Gate> gate;
+    typename BranchNorm<layout>::Type norm2;
+    typename BranchFfn<layout>::Type ffn;
 
-    TransformerBlock(...)
+    TransformerLayer(...)
     {
-        input - norm1 - mhAttn - "in0"/add1 - norm2 - ffn - "in0"/add2;
-        input                  - "in1"/add1               - "in1"/add2;
+        input - norm1 -            mhAttn - lastRow - gate/"then" - norm2 -            ffn;
+        input         - "residual"/mhAttn - lastRow - gate/"then"         - "residual"/ffn;
 
         defineSlot("in0", input.slot("in0"));
-        defineSlot("out0", add2.slot("out0"));
+        defineSlot("out0", ffn.slot("out0"));
     }
 };
 ```
 
-The two lines of wiring represent the data flow itself. The second line is a residual connection.
+In Llama 3, `norm1` and `norm2` are `RmsNorm`, and `ffn` is `GatedFeedForward`. The first line is the main path through normalization, Attention, and the FFN; the second line is the residual path.
 
-## Identity
-In the example above, `input` is an `Identity` that does not perform any calculations. When an input splits into multiple paths, it creates a branching point. It is used to send the same input to two different places, like in a residual connection.
+## 3. Identity
 
-## Precautions when using containers
+In the example above, `input` is an `Identity` that performs no computation. It provides a branching point when input splits into multiple paths. It is used when the same input must reach two destinations, as in a residual connection.
 
-Nodes and NodeGroups can be placed in the container. However, elements placed in the container must stay at the place where they were created if they are connected by wiring using `-`, as their slots hold each other's addresses.
+## 4. Precautions when using containers
 
-```cpp
-struct TransformerSequence : public vai::NodeGroup {
-    std::vector<TransformerBlock> blocks;
-
-    TransformerSequence(uint32_t numLayers, ...)
-    {
-        blocks.reserve(numLayers);
-        for (uint32_t i = 0; i < numLayers; ++i)
-        {
-            blocks.emplace_back(...);
-            if (i > 0)
-                blocks[i - 1] - blocks[i];
-        }
-
-        defineSlot("in0", blocks.front().slot("in0"));
-        defineSlot("out0", blocks.back().slot("out0"));
-    }
-};
-```
-
-`std::vector` does not automatically preserve that condition. Whenever elements are added, elements may be recreated and copied inside as needed. If the space is insufficient, they are moved to a larger memory as a whole, and if a value created outside is added, its copy is stored. The wiring remains pointing to the original address regardless of the direction. The compilation passes, but it causes a runtime error when running the graph.
-
-It is the user's responsibility to keep the elements in their original places without moving, and there are two possible ways.
-
-**1. `reserve` + `emplace_back`**: It prevents reallocation by reserving space in advance for the required number of elements and prevents copying by creating the elements directly in the container. The above example uses this method.
-
-**2. `std::unique_ptr`**: It puts the elements in the heap, and the container only holds pointers. Even if the vector moves the pointer, the object it points to does not move.
+Both `Node` and `NodeGroup` can be stored in containers. However, slots connected with `-` hold each other's addresses, so the elements must keep their addresses without being copied or moved.
 
 ```cpp
-std::vector<std::unique_ptr<TransformerBlock>> blocks;
-blocks.push_back(std::make_unique<TransformerBlock>(...));
+layers.reserve(config.numLayers);
+for (uint32_t i = 0; i < config.numLayers; ++i)
+{
+    // ... Per-layer configuration
+    layers.emplace_back(config.layerCfg);
+}
+
+for (size_t i = 1; i < layers.size(); ++i)
+    layers[i - 1] - layers[i];
 ```
 
-vAi allows Method 2 but encourages users to use Method 1.
+When a `std::vector` runs out of capacity, it moves existing elements to new memory. Inserting a temporary node with `push_back(Layer(...))` also causes a copy or move. Slot parent references or connections may still point to the original objects, causing access to the wrong objects during execution. Compilation succeeds, but graph execution fails.
 
-Other STL containers, including `std::deque`, `std::list`, and `std::map`, also require the contained elements to stay at the place where they were created. Which operations move elements varies by container, but that is a standard C++ rule, so we do not cover it here.
+The author must keep elements at stable addresses. There are two approaches.
+
+**1. `reserve` + `emplace_back`**: Reserve enough space to prevent reallocation, then construct elements directly in the container to avoid copies. The example above uses this approach.
+
+**2. `std::unique_ptr`**: Allocate elements on the heap and store only pointers in the container. Moving pointers within the vector does not move the objects they point to.
+
+```cpp
+std::vector<std::unique_ptr<Layer>> layers;
+layers.push_back(std::make_unique<Layer>(layerCfg));
+```
+
+vAi allows the second approach but recommends the first.
+
+Before adding a group, check whether an existing group can be reused.
+
+Elements in other STL containers, such as `std::deque`, `std::list`, and `std::map`, must also remain where they were constructed. Which operations move elements depends on the container; those standard C++ rules are outside the scope of this document.

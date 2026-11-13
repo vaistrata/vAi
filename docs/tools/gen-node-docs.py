@@ -46,6 +46,8 @@ STRINGS = {
         "config_head": "| 필드 | 타입 | 기본값 | 설명 |",
         "narrative": "동작 및 제약",
         "kernels": "커널",
+        "no_kernel": "—",
+        "no_default": "—",
     },
     "en": {
         "title": "Built-in nodes",
@@ -63,6 +65,8 @@ STRINGS = {
         "config_head": "| Field | Type | Default | Description |",
         "narrative": "Behavior and constraints",
         "kernels": "Kernels",
+        "no_kernel": "None",
+        "no_default": "Not specified",
     },
 }
 
@@ -311,7 +315,7 @@ def render(nodes, lang):
     w("|---|---|---|")
     for n in nodes:
         anchor = n["name"].lower()
-        shaders = ", ".join(f"`{s}`" for s in n["shaders"]) or "—"
+        shaders = ", ".join(f"`{s}`" for s in n["shaders"]) or s["no_kernel"]
         w(f"| [{n['name']}](#{anchor}) | {md_escape(n['summary'])} | {shaders} |")
     w("")
     w("---")
@@ -349,7 +353,7 @@ def render(nodes, lang):
             w(s["config_head"])
             w("|---|---|---|---|")
             for o in n["config"]:
-                default = f"`{o['default']}`" if o["default"] else "—"
+                default = f"`{o['default']}`" if o["default"] else s["no_default"]
                 w(
                     f"| `{o['name']}` | `{md_escape(o['type'])}` | {md_escape(default)} | {md_escape(o['note'])} |"
                 )
