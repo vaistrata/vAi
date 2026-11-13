@@ -41,7 +41,6 @@ For new models, see [Writing custom models](../contributing/models.md).
 
 | Model | Model sizes |
 |---|---|
-| [YOLOv8](yolov8.md) | NANO(n), SMALL(s), MEDIUM(m), LARGE(l), XLARGE(x) |
 | [YOLOX](yolox.md) | SMALL(s), MEDIUM(m), LARGE(l), XLARGE(x) |
 
 ### LLM
@@ -52,14 +51,6 @@ For new models, see [Writing custom models](../contributing/models.md).
 | [Llama 3](llama3.md) | 3.2-1B, 3.2-3B |
 
 ## Combined benchmarks
-
-### Vision
-
-vAi measurements at **640x640, FP16**.
-
-| Model | Metric | 890M (Strix Point) | 8060S (Strix Halo) | RTX 5070 Ti | RX 9070 XT |
-|---|---|---:|---:|---:|---:|
-| YOLOv8n | Latency (ms) | 3.238 | 0.759 | 0.616 | 0.657 |
 
 ### LLM
 
@@ -74,4 +65,4 @@ vAi measurements with a **512-token prompt**.
 | Llama 3 3.2-3B | prefill (t/s) | - | 1,726 | - | - | 9,091 | 17,219 | 21,013 |
 |  | decode (t/s) | - | 33.87 | - | - | 87.74 | 128.0 | 194.0 |
 
-Comparisons with other frameworks are in the benchmark summaries for [YOLOv8](yolov8.md#benchmark-summary), [YOLOX](yolox.md#benchmark-summary), [GPT-2](gpt2.md#benchmark-summary), and [Llama 3](llama3.md#benchmark-summary). For measurement environments, conditions, and reproduction instructions, see [`benchmarks/`](../../../benchmarks/).
+Comparisons with other frameworks are in the benchmark summaries for [YOLOX](yolox.md#benchmark-summary), [GPT-2](gpt2.md#benchmark-summary), and [Llama 3](llama3.md#benchmark-summary). For measurement environments, conditions, and reproduction instructions, see [`benchmarks/`](../../../benchmarks/).

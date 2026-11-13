@@ -51,7 +51,6 @@ nav:
       - 프로파일링: ko/03-usage/profiling.md
   - 제공 모델:
       - ko/04-models/README.md
-      - YOLOv8: ko/04-models/yolov8.md
       - YOLOX: ko/04-models/yolox.md
       - GPT-2: ko/04-models/gpt2.md
       - Llama 3: ko/04-models/llama3.md
@@ -133,7 +132,6 @@ plugins:
                 - Profiling: en/03-usage/profiling.md
             - Supported models:
                 - en/04-models/README.md
-                - YOLOv8: en/04-models/yolov8.md
                 - YOLOX: en/04-models/yolox.md
                 - GPT-2: en/04-models/gpt2.md
                 - Llama 3: en/04-models/llama3.md
