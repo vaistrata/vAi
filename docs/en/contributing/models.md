@@ -227,7 +227,7 @@ Name it `demo-<model>`.
 The following is the [GPT-2 build configuration](../../../models/production/gpt2/CMakeLists.txt).
 
 ```cmake
-cmake_minimum_required(VERSION 3.16)
+cmake_minimum_required(VERSION 3.20)
 
 project(demo-gpt2)
 

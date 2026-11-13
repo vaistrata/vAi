@@ -230,7 +230,7 @@ The subject has the form `type(scope): description`.
 | `refactor` | Structural change with the same behavior | `refactor(graph): extract shape helpers` |
 | `docs` | Documentation change | `docs: clarify build requirements` |
 | `test` | Test-only change | `test(loader): cover empty model files` |
-| `build` | Build and dependency change | `build: require CMake 3.16` |
+| `build` | Build and dependency change | `build: require CMake 3.20` |
 | `ci` | CI change | `ci: add compiler checks` |
 | `style` | Formatting change that does not affect behavior | `style: format public headers` |
 | `chore` | Other maintenance | `chore: update the issue templates` |

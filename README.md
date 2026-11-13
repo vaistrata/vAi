@@ -51,7 +51,7 @@ Size presets and weight loaders are covered in the [model list](docs/en/04-model
 
 ## Build
 
-Requires the Vulkan development libraries and `glslc` (Vulkan SDK), CMake 3.16+ and a C++23 compiler (GCC 14+ on Linux), with Make or Ninja. The default build produces the library and each model's demo (`demo-<model>`). On Linux, prefix the configure command with `CC=gcc-14 CXX=g++-14` to select GCC 14.
+Requires the Vulkan development libraries and `glslc` (Vulkan SDK), CMake 3.20+ and a C++23 compiler (GCC 14+ on Linux), with Make or Ninja. The default build produces the library and each model's demo (`demo-<model>`). On Linux, prefix the configure command with `CC=gcc-14 CXX=g++-14` to select GCC 14.
 
 ```bash
 git clone --recursive https://github.com/vaistrata/vAi.git
