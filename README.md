@@ -5,14 +5,16 @@
 The graph below defines an MNIST model. The `ConvSequence` definition and weight loading code are in the [full example](examples/mnist/main.cpp).
 
 ```cpp
-struct Model : public vai::NeuralNet {
+struct Net : public vai::NeuralNet
+{
     ConvSequence convX2;
     vai::node::Flatten flatten;
     vai::node::Linear linear;
 
-    Model(const vai::NeuralNetConfig& cfg)
-    : NeuralNet(cfg), convX2({1, 32, 64}, 3)
-    , linear({.inDim = 7 * 7 * 64, .outDim = 10, .hasBias = true})
+    Net(const vai::NeuralNetConfig& netCfg)
+    : NeuralNet(netCfg)
+    , convX2({ 1, 32, 64 }, 3)
+    , linear({ .inDim = 7 * 7 * 64, .outDim = 10 })
     {
         input("in0") - convX2 - flatten - linear - output("out0");
     }
@@ -21,7 +23,7 @@ struct Model : public vai::NeuralNet {
 
 ```cpp
 vai::Tensor output;
-model({{"in0", input}}, {{"out0", &output}});
+net({ { "in0", input } }, { { "out0", &output } });
 ```
 
 ## Features
@@ -49,7 +51,7 @@ Size presets and weight loaders are covered in the [model list](docs/en/04-model
 
 ## Build
 
-Requires the Vulkan development libraries and `glslc` (Vulkan SDK), CMake 3.16+ and a C++23 compiler (GCC 14+ on Linux), with Make or Ninja. The default build produces only the library. On Linux, prefix the configure command with `CC=gcc-14 CXX=g++-14` to select GCC 14.
+Requires the Vulkan development libraries and `glslc` (Vulkan SDK), CMake 3.16+ and a C++23 compiler (GCC 14+ on Linux), with Make or Ninja. The default build produces the library and each model's demo (`demo-<model>`). On Linux, prefix the configure command with `CC=gcc-14 CXX=g++-14` to select GCC 14.
 
 ```bash
 git clone --recursive https://github.com/vaistrata/vAi.git
@@ -58,7 +60,7 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release
 ```
 
-`VAI_BUILD_EXAMPLES`, `VAI_BUILD_TESTS`, `VAI_BUILD_BENCH` and `VAI_BUILD_PYTHON` all default to `OFF`.
+`VAI_BUILD_MODEL_DEMO` defaults to `ON`. `VAI_BUILD_EXAMPLES`, `VAI_BUILD_BENCH` and `VAI_BUILD_PYTHON` default to `OFF`.
 
 ## Documentation
 
@@ -71,6 +73,8 @@ cmake --build build --config Release
 | [Writing custom models](docs/en/contributing/models.md) | Adding a model |
 | [Built-in nodes](docs/en/06-nodes.md) | Node reference |
 | [Writing custom nodes and kernels](docs/en/contributing/nodes.md) | Adding an operator |
+| [Writing custom groups](docs/en/contributing/groups.md) | Adding a node group |
+| [Contribution workflow and automated checks](docs/en/contributing/README.md) | Setup, checks, branches, commits and versions |
 
 ## Performance
 
