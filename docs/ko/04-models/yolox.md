@@ -10,7 +10,7 @@ YOLOPAFPN 넥, 회귀와 분류를 분리한 anchor-free 검출 헤드로 이루
 [Paper](https://arxiv.org/abs/2107.08430),
 [Official checkpoints](https://github.com/Megvii-BaseDetection/YOLOX/releases/tag/0.1.1rc0)
 
-## Configuration
+## 설정
 
 ```cpp
 namespace yolox = model::experimental::yolox;
@@ -207,7 +207,7 @@ python models/experimental/yolox/megvii-weights-convertor.py small large    # ti
 
 각 `model.pth` 옆에 `model.safetensors`가 생깁니다.
 
-### Load Weight
+### 가중치 로딩
 
 체크포인트를 그래프 슬롯에 매핑하는 코드는
 [`models/experimental/yolox/megvii-weights.h`](../../../models/experimental/yolox/megvii-weights.h)에 있습니다.
