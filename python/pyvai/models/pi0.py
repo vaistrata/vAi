@@ -1,8 +1,8 @@
 """pi0 — high-level wrapper over the C++-bound vision-language-action model
 + tokenizer.
 
-The model is `models/pi0/model.h` (C++); a chunk runs the way the C++ demo
-(`examples/pi0/demo.cpp`) runs it.
+The model is `models/production/pi0/net.h` (C++); a chunk runs the way the C++ demo
+(`models/production/pi0/demo.cpp`) runs it.
 """
 
 from __future__ import annotations
@@ -78,8 +78,8 @@ class Pi0:
         return self.model.image_size
 
     @property
-    def action_horizon(self) -> int:
-        return self.model.action_horizon
+    def action_chunk(self) -> int:
+        return self.model.action_chunk
 
     @property
     def action_dim(self) -> int:
@@ -133,10 +133,10 @@ class Pi0:
 
     def decode(self, seed: int = 0, noise: np.ndarray | None = None) -> np.ndarray:
         """Denoise one action chunk over the last prefill, in denoise_steps
-        Euler steps. `noise` ([action_horizon, action_dim]) overrides the
-        seeded start. Returns a float32 [action_horizon, action_dim] array."""
+        Euler steps. `noise` ([action_chunk, action_dim]) overrides the
+        seeded start. Returns a float32 [action_chunk, action_dim] array."""
         self._require_weights("decode")
-        shape = (self.action_horizon, self.action_dim)
+        shape = (self.action_chunk, self.action_dim)
         if noise is None:
             x = np.asarray(pi0_sample_noise(shape[0] * shape[1], seed), dtype=np.float32).reshape(
                 shape

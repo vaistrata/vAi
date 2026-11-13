@@ -1,6 +1,6 @@
 """Llama 3 — high-level wrapper over the C++-bound model + tokenizer.
 
-The model is `models/llama3/model.h` (C++); generate() / stream() /
+The model is `models/production/llama3/net.h` (C++); generate() / stream() /
 iter_tokens() come from `_CausalLM`, and chat() opens a `ChatSession` on the
 Llama 3 instruct template.
 """

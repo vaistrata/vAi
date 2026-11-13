@@ -8,7 +8,8 @@ static void bindTimeEmbedding(nb::module_& m)
 {
     using C = vai::node::TimeEmbedding::Config;
     bindNode<vai::node::TimeEmbedding>(
-        m, "TimeEmbeddingNode",
+        m,
+        "TimeEmbeddingNode",
         "Sinusoidal embedding of a timestep the node counts down itself: forward "
         "k after reset_time() embeds t = 1 - (k % num_steps) / num_steps. in0 "
         "[..., rows, *] is read for its shape alone (rank >= 2). out0 [..., rows, "
@@ -19,8 +20,9 @@ static void bindTimeEmbedding(nb::module_& m)
         required("min_period", &C::minPeriod).check([](float p) { return p > 0.0f; }, "must be > 0"),
         required("max_period", &C::maxPeriod)
             .check([](float p, const C& c) { return p > c.minPeriod; }, "must be > min_period"),
-        required("num_steps", &C::numSteps).check(atLeast(1u), "must be >= 1"), field("o_dtype", &C::oDtype))
-        .def("reset_time", &vai::node::TimeEmbedding::resetTime,
+        required("num_steps", &C::numSteps).check(atLeast(1u), "must be >= 1"))
+        .def("reset_time",
+             &vai::node::TimeEmbedding::resetTime,
              "Start the count over, so the next forward embeds t = 1. Not "
              "synchronized: call net.sync() first if a forward may still be running.");
 }

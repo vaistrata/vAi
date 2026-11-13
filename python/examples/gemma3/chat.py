@@ -1,5 +1,5 @@
 """Gemma 3 multi-turn chat with pyvai's built-in models, as
-examples/gemma3/chat.cpp. A message to a VLM (4B / 12B) names its images with
+examples/chat-gemma3/main.cpp. A message to a VLM (4B / 12B) names its images with
 <image:file> tags, read from --image_dir.
 
 python python/examples/gemma3/chat.py \\

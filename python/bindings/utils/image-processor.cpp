@@ -12,6 +12,8 @@
 
 namespace pyvai {
 
+using namespace vai::utils;
+
 namespace {
 
 // The C++ class hands its pixels over flat and keeps their layout private, so

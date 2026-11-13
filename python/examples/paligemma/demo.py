@@ -5,7 +5,7 @@ python python/examples/paligemma/demo.py \\
     --tokenizer_path data/paligemma/tokenizer.json \\
     --image_path     data/paligemma/dog.jpg
 
-Mirrors examples/paligemma/demo.cpp: the image is prefilled with the prompt,
+Mirrors models/production/paligemma/demo.cpp: the image is prefilled with the prompt,
 then the answer is decoded one token at a time.
 """
 

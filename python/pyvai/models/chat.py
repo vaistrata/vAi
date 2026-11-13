@@ -2,7 +2,7 @@
 
 A `ChatSession` keeps the conversation in the model's KV cache: each turn
 prefills only the text written since the last one, and the reply is sampled
-on top, as in the C++ chat demos (examples/llama3/chat.cpp). The template is
+on top, as in the C++ chat demos (examples/chat-llama3/main.cpp). The template is
 plain data (`ChatTemplate`) spelled out per model, because vAi does not run
 the Jinja `chat_template` a checkpoint declares.
 """

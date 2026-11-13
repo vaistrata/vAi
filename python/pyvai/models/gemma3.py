@@ -1,10 +1,10 @@
 """Gemma 3 — high-level wrapper over the C++-bound model + tokenizer.
 
-The model is `models/gemma3/model.h` (C++); generate() / stream() /
+The model is `models/production/gemma3/net.h` (C++); generate() / stream() /
 iter_tokens() come from `_CausalLM`, and chat() opens a session on the Gemma
 instruct template. The 4B and 12B checkpoints are VLMs: an image becomes
 `tokens_per_image` soft tokens of the prompt, placed as in
-`examples/gemma3/demo.cpp` (see iter_tokens()) or `chat.cpp` (see chat()).
+`models/production/gemma3/demo.cpp` (see iter_tokens()) or `chat.cpp` (see chat()).
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ import numpy as np
 from .._pyvai import (
     Gemma3Model,
     Gemma3Config,
-    Gemma3VisionTowerConfig,
+    Gemma3VisionEncoderConfig,
     Device,
     Dtype,
     Resize,
@@ -35,7 +35,7 @@ __all__ = [
     "Gemma3",
     "Gemma3Model",
     "Gemma3Config",
-    "Gemma3VisionTowerConfig",
+    "Gemma3VisionEncoderConfig",
     "GEMMA3_CHAT_TEMPLATE",
     "Gemma3ChatSession",
     "gemma3_expand_image_placeholders",
@@ -89,8 +89,8 @@ class Gemma3(_CausalLM):
 
     @property
     def has_vision(self) -> bool:
-        """Whether the checkpoint has a vision tower (config.vision_cfg)."""
-        return self.config.vision_cfg is not None
+        """Whether the checkpoint has a vision encoder (config.vision)."""
+        return self.config.vision is not None
 
     def preprocess(self, images) -> Tensor:
         """One image or a sequence of them (file paths or HWC uint8 RGB
@@ -107,7 +107,7 @@ class Gemma3(_CausalLM):
             images = [images]
         if not images:
             raise ValueError("Gemma3.preprocess: no images")
-        size = self.config.vision_cfg.image_size
+        size = self.config.vision.image_size
         return Tensor.from_numpy(
             np.stack(
                 [
@@ -125,7 +125,7 @@ class Gemma3(_CausalLM):
         # A VLM prompt names an image with <start_of_image>; the model wants
         # the whole placeholder block the processor writes for it.
         if self.has_vision:
-            text = gemma3_expand_image_placeholders(text, self.config.vision_cfg.tokens_per_image)
+            text = gemma3_expand_image_placeholders(text, self.config.vision.tokens_per_image)
         return super()._encode(text, add_bos)
 
     def _prefill(self, ids: list[int], image: Tensor | None) -> Tensor:

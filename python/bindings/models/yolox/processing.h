@@ -1,7 +1,7 @@
 #ifndef PYVAI_MODELS_YOLOX_PROCESSING_H
 #define PYVAI_MODELS_YOLOX_PROCESSING_H
 
-// examples/yolox/processing.h/.cpp merged header-only. Differs from the source
+// models/experimental/yolox/processing.h. Differs from the source
 // in the namespace, in `inline` and in postprocess() taking a pointer (+ count) instead of a std::vector, so
 // a numpy buffer is read in place. Re-copy when the source changes, keeping
 // that signature.
@@ -76,6 +76,8 @@ inline std::vector<Detection> applyNms(std::vector<Detection> detections, float 
     }
     return result;
 }
+
+using vai::utils::ImageGeometry;
 
 inline std::vector<Detection> postprocess(
     const float* rawData, size_t rawCount,   // [N, 5 + numClasses] row-major

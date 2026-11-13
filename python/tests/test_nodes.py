@@ -31,7 +31,7 @@ def test_linear_with_bias():
     class Net(pyvai.NeuralNet):
         def __init__(self):
             super().__init__(w_default_dtype=pyvai.Dtype.F32)
-            self.l = nodes.LinearNode(in_dim=4, out_dim=4, has_bias=True)
+            self.l = nodes.LinearNode(in_dim=4, out_dim=4)
             self.input("in0") - self.l - self.output("out0")
 
     net = Net()

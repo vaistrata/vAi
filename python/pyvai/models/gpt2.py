@@ -1,6 +1,6 @@
 """GPT-2 — high-level wrapper over the C++-bound model + tokenizer.
 
-The model is `models/gpt2/model.h` (C++); generate() / stream() /
+The model is `models/production/gpt2/net.h` (C++); generate() / stream() /
 iter_tokens() come from `_CausalLM`. GPT-2 has no chat template, so there is
 no chat() here.
 """

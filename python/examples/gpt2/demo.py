@@ -14,7 +14,7 @@ import pyvai
 from pyvai.models import GPT2
 
 
-# Same prompt the C++ demo runs (examples/gpt2/demo.cpp).
+# Same prompt the C++ demo runs (models/production/gpt2/demo.cpp).
 PROMPT = (
     "In recent decades, artificial intelligence has progressed from a niche "
     "academic curiosity to a force that quietly reshapes nearly every corner of "

@@ -5,7 +5,7 @@ python python/examples/pi05/demo.py \\
     --tokenizer_path data/paligemma/tokenizer.json \\
     --image_path     data/pi0/cam_high.jpg data/pi0/cam_left_wrist.jpg data/pi0/cam_right_wrist.jpg
 
-Mirrors examples/pi05/demo.cpp: prefill() leaves the cameras and the prompt,
+Mirrors models/production/pi05/demo.cpp: prefill() leaves the cameras and the prompt,
 which carries the binned state, in the KV cache, and decode() denoises the
 chunk from seeded noise.
 """
@@ -91,8 +91,8 @@ def main():
 
     # The first steps of the chunk and its leading action dims, where an
     # embodiment's real degrees of freedom sit.
-    print(f"=== Action chunk ({model.action_horizon} steps x {model.action_dim} dims) ===")
-    for s in range(min(model.action_horizon, 5)):
+    print(f"=== Action chunk ({model.action_chunk} steps x {model.action_dim} dims) ===")
+    for s in range(min(model.action_chunk, 5)):
         print(f"  t{s:<2} " + " ".join(f"{v: .4f}" for v in chunk[s, :8]) + " ...")
     print("  ...")
 

@@ -1,8 +1,8 @@
 """YOLOX — high-level wrapper over the C++-bound model + pre/post-processing.
 
-The model is `models/yolox/` (C++) and the NMS postprocess the demo's
-(`examples/yolox/processing.*`); `detect(image)` is the pipeline the C++ demo
-(`examples/yolox/demo.cpp`) runs in main().
+The model is `models/experimental/yolox/` (C++) and the NMS postprocess the demo's
+(`models/experimental/yolox/processing.h`); `detect(image)` is the pipeline the C++ demo
+(`models/experimental/yolox/demo.cpp`) runs in main().
 """
 
 from __future__ import annotations

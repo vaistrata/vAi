@@ -40,7 +40,7 @@ class MnistNet(pyvai.NeuralNet):
         )
         self.pool1 = nodes.MaxPool2dNode(kernel_size=2, stride=2)
         self.reshape = nodes.ReshapeNode([7 * 7 * 64])
-        self.linear = nodes.LinearNode(in_dim=7 * 7 * 64, out_dim=10, has_bias=True)
+        self.linear = nodes.LinearNode(in_dim=7 * 7 * 64, out_dim=10)
 
         self._build_graph()
 

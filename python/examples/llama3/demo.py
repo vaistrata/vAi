@@ -16,7 +16,7 @@ import pyvai
 from pyvai.models import Llama3
 
 
-# The prompt of the C++ demo (examples/llama3/demo.cpp).
+# The prompt of the C++ demo (models/production/llama3/demo.cpp).
 PROMPT = (
     "In recent decades, artificial intelligence has progressed from a niche "
     "academic curiosity to a force that quietly reshapes nearly every corner of "

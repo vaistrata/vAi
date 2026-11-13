@@ -1,7 +1,7 @@
 """PaliGemma — high-level wrapper over the C++-bound vision-language model
 + tokenizer.
 
-The model is `models/paligemma/model.h` (C++); generate() / stream() /
+The model is `models/production/paligemma/net.h` (C++); generate() / stream() /
 iter_tokens() come from `_CausalLM`, and here each takes the image its prompt
 is about.
 """

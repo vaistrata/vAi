@@ -3,7 +3,6 @@
 #include "vai/nodes/attention.h"
 #include "vai/groups/transformer.h"   // createCausalMask, writeCausalMask
 #include <cstdint>
-#include <optional>
 #include <string>
 #include <tuple>
 #include <vector>
@@ -42,12 +41,13 @@ static void bindAttention(nb::module_& m)
         .def(
             "__init__",
             [](PyAttention* self,
-               uint32_t num_q_heads, uint32_t head_dim,
-               uint32_t kv_cache_size, uint32_t num_kv_heads,
-               uint32_t window_size, bool causal,
-               vai::Dtype kv_cache_dtype,
-               std::optional<vai::Dtype> o_dtype)
-            {
+               uint32_t num_q_heads,
+               uint32_t head_dim,
+               uint32_t kv_cache_size,
+               uint32_t num_kv_heads,
+               bool kv_cache_ring,
+               bool causal,
+               vai::Dtype kv_cache_dtype) {
                 requireCurrentNet("AttentionNode");
                 // The core's own check divides by the head count.
                 if (num_q_heads == 0 || head_dim == 0)
@@ -58,39 +58,38 @@ static void bindAttention(nb::module_& m)
                         "AttentionNode: num_kv_heads must divide num_q_heads");
                 if (kv_cache_dtype == vai::Dtype::None)
                     throw nb::value_error("AttentionNode: kv_cache_dtype is required");
+                if (kv_cache_ring && kv_cache_size == 0)
+                    throw nb::value_error("AttentionNode: kv_cache_ring needs kv_cache_size > 0");
                 new (self) PyAttention(
                     vai::node::Attention::Config{
-                        .headDim      = head_dim,
-                        .numQHeads    = num_q_heads,
-                        .numKVHeads   = num_kv_heads,
-                        .kvCacheSize  = kv_cache_size,
-                        .windowSize   = window_size,
+                        .headDim = head_dim,
+                        .numQHeads = num_q_heads,
+                        .numKVHeads = num_kv_heads,
+                        .kvCacheSize = kv_cache_size,
                         .kvCacheDtype = kv_cache_dtype,
-                        .oDtype       = o_dtype.value_or(vai::Dtype::None),
+                        .kvCacheRing = kv_cache_ring,
                     },
                     causal ? 1u : 0u);
             },
             nb::arg("num_q_heads"),
             nb::arg("head_dim"),
-            nb::arg("kv_cache_size")  = 0u,   // 0 = no cache
-            nb::arg("num_kv_heads")   = 0u,
-            nb::arg("window_size")    = 0u,   // 0 = attend the whole prefix
-            nb::arg("causal")         = true,
+            nb::arg("kv_cache_size") = 0u,   // 0 = no cache
+            nb::arg("num_kv_heads") = 0u,
+            nb::arg("kv_cache_ring") = false,
+            nb::arg("causal") = true,
             nb::arg("kv_cache_dtype") = vai::Dtype::Fp16,
-            nb::arg("o_dtype")        = nb::none(),
             "Attention over Q [..., Hq, Tq, head_dim] and K / V [..., Hkv, Tq, "
             "head_dim], leading axes a batch (of one when kv_cache_size > 0), each at "
             "whatever dtype arrives; out0 "
             "is token-major [..., Tq, Hq, head_dim]. causal=False lets a query see "
-            "the newer tokens of its own forward, and window_size > 0 limits it to "
-            "its last window_size positions. kv_cache_size > 0 keeps that many "
+            "the newer tokens of its own forward. kv_cache_size > 0 keeps that many "
             "tokens at kv_cache_dtype and needs set_kv_cache_counter() before the "
-            "first forward."
-        )
+            "first forward; with kv_cache_ring the cache keeps the last "
+            "kv_cache_size positions (rounded up to a multiple of 256), a sliding "
+            "window.")
         .def(
             "update_causality",
-            [](PyAttention& self, uint32_t bits, const std::vector<uint32_t>& block_end)
-            {
+            [](PyAttention& self, uint32_t bits, const std::vector<uint32_t>& block_end) {
                 // The core asserts the order; the list is a fixed-size array there.
                 constexpr size_t maxEnds = std::tuple_size_v<vai::CausalBlockEnd>;
                 if (block_end.size() > maxEnds)
@@ -108,7 +107,7 @@ static void bindAttention(nb::module_& m)
                 nb::gil_scoped_release rel;   // waits for a forward still reading it
                 self.writeMask(bits, ends);
             },
-            nb::arg("bits")      = 1u,
+            nb::arg("bits") = 1u,
             nb::arg("block_end") = std::vector<uint32_t>{},
             "Split each forward's new tokens into segments and mark which are "
             "causal. block_end lists the increasing token index where each segment "
@@ -116,8 +115,7 @@ static void bindAttention(nb::module_& m)
             "earlier segment, and its own segment up to itself if causal, whole if "
             "not. Segment k of n is bit n-1-k of `bits`: bits=1 with no block_end is "
             "plain causal attention, 0 bidirectional. A change needs no "
-            "re-recording; it waits for a forward still in flight."
-        )
+            "re-recording; it waits for a forward still in flight.")
         .def(
             "set_kv_cache_counter",
             [](PyAttention& self, KVCacheCounter& counter) {
@@ -131,8 +129,7 @@ static void bindAttention(nb::module_& m)
             // The counter's dtor destroys its buffer — pin it to the node.
             nb::keep_alive<1, 2>(),
             "Required before the first forward when kv_cache_size > 0: a missing "
-            "counter crashes the process. Rejected when kv_cache_size is 0."
-        );
+            "counter crashes the process. Rejected when kv_cache_size is 0.");
 }
 PYVAI_NODE_BINDING(bindAttention);
 

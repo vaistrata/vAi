@@ -25,7 +25,8 @@ def test_convolution(ci, co, k, stride, hw, epilogue, has_scale):
     if has_scale:
         params["scale"] = uniform((co,), 0.5, 1.5)
 
-    # Same padding over [C, H, W]: out0 = epilogue(scale * conv + bias).
+    # Same padding over [C, H, W]: out0 = epilogue(scale * conv + bias). `scale`
+    # applies when the test sets it.
     def ref(in0, weight, bias, scale=None):
         out = F.conv2d(in0[None], weight, stride=stride, padding=k // 2)[0]
         if scale is not None:
@@ -38,7 +39,6 @@ def test_convolution(ci, co, k, stride, hw, epilogue, has_scale):
             out_channels=co,
             kernel_size=k,
             stride=stride,
-            has_scale=has_scale,
             epilogue=getattr(pyvai.Epilogue, epilogue),
         ),
         {"in0": (ci, hw, hw)},

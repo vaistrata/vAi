@@ -36,7 +36,7 @@ from .._pyvai import (
 )
 from .gpt2 import GPT2Config
 from .llama3 import Llama3Config, LLAMA3_CHAT_TEMPLATE
-from .gemma3 import Gemma3Config, Gemma3VisionTowerConfig, GEMMA3_CHAT_TEMPLATE, Gemma3ChatSession
+from .gemma3 import Gemma3Config, Gemma3VisionEncoderConfig, GEMMA3_CHAT_TEMPLATE, Gemma3ChatSession
 from .paligemma import PaliGemmaConfig
 from .pi0 import Pi0Config, pi0_sample_noise
 from .pi05 import Pi05Config, pi05_make_prompt
@@ -45,7 +45,7 @@ from .yolox import YOLOXTier, YOLOXDetection
 # YOLO postprocessing, for driving YOLOXModel directly.
 from .._pyvai import yolox_postprocess
 
-# Gemma 3's prompt and image helpers (models/gemma3/processing.h), for Gemma3Model.
+# Gemma 3's prompt and image helpers (models/production/gemma3/processing.h), for Gemma3Model.
 from .._pyvai import gemma3_expand_image_placeholders, gemma3_take_image_tags, gemma3_load_images
 
 # Chat: the session and its template data.
@@ -79,7 +79,7 @@ __all__ = [
     "Llama3Config",
     "LLAMA3_CHAT_TEMPLATE",
     "Gemma3Config",
-    "Gemma3VisionTowerConfig",
+    "Gemma3VisionEncoderConfig",
     "GEMMA3_CHAT_TEMPLATE",
     "Gemma3ChatSession",
     "PaliGemmaConfig",

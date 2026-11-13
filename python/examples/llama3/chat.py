@@ -1,5 +1,5 @@
 """Llama 3.2 1B multi-turn chat with pyvai's built-in models, as
-examples/llama3/chat.cpp.
+examples/chat-llama3/main.cpp.
 
 python python/examples/llama3/chat.py \\
     --weights_dir    data/llama3/ckpts/3.2-1B \\

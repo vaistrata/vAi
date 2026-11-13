@@ -21,7 +21,7 @@ from pyvai.models import Gemma3, Gemma3Config
 
 
 # A text to continue, or the C++ demo's request about its images
-# (examples/gemma3/demo.cpp).
+# (models/production/gemma3/demo.cpp).
 PROMPT = (
     "In recent decades, artificial intelligence has progressed from a niche "
     "academic curiosity to a force that quietly reshapes nearly every corner of "
@@ -76,7 +76,7 @@ def parse_args():
 def main():
     args = parse_args()
     if args.image_path is None:
-        has_vision = Gemma3Config.preset(args.preset).vision_cfg is not None
+        has_vision = Gemma3Config.preset(args.preset).vision is not None
         args.image_path = IMAGE_PATHS if has_vision else []
     for path in (args.weights_dir, args.tokenizer_path, *args.image_path):
         if not os.path.exists(path):
