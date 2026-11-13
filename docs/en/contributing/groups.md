@@ -38,7 +38,6 @@ struct Config {
     uint32_t hiddenDim;
     uint32_t outDim;
     vai::Epilogue activation = vai::Epilogue::None;
-    bool hasBias = false;
     bool acceptResidual = false;
 };
 ```
@@ -97,7 +96,7 @@ struct MultiHeadAttention<QkvLayout::Separate> : public vai::NodeGroup
 {
     using Config = MultiHeadAttentionConfig;
 
-    vai::node::Linear toQ, toK, toV;
+    vai::node::Linear projQ, projK, projV;
     // ... Remaining members, constructor, and connections
 };
 
@@ -106,7 +105,7 @@ struct MultiHeadAttention<QkvLayout::Fused> : public vai::NodeGroup
 {
     using Config = MultiHeadAttentionConfig;
 
-    vai::node::Linear toQKV;
+    vai::node::Linear projQKV;
     // ... Remaining members, constructor, and connections
 };
 ```
@@ -130,16 +129,8 @@ struct FeedForward : public vai::NodeGroup
     // ... Config from section 2
 
     FeedForward(Config config)
-    : fc1({
-        .inDim = config.inDim,
-        .outDim = config.hiddenDim,
-        .hasBias = config.hasBias,
-        .epilogue = config.activation})
-    , fc2({
-        .inDim = config.hiddenDim,
-        .outDim = config.outDim,
-        .hasBias = config.hasBias,
-        .acceptResidual = config.acceptResidual})
+    : fc1({ .inDim = config.inDim, .outDim = config.hiddenDim, .epilogue = config.activation })
+    , fc2({ .inDim = config.hiddenDim, .outDim = config.outDim, .acceptResidual = config.acceptResidual })
     {
         // ... Connections from section 4 and slot exposure from section 5
     }
@@ -252,12 +243,12 @@ Use slot names actually provided by the `Node` or group.
 To use one output value in multiple computations, connect the same output slot to each input slot. The following excerpt from [`MultiHeadAttention`](../../../vai/groups/multi-head-attention.h) keeps only the connections that start three paths. Subsequent computations on each path are omitted.
 
 ```cpp
-input - toQ;
-input - toK;
-input - toV;
+input - projQ;
+input - projK;
+input - projV;
 ```
 
-`input` is the member name of an `Identity` `Node`, which passes its input value through unchanged. All three lines use `out0` of the same `input` member. Connecting this output to `in0` of `toQ`, `toK`, and `toV` splits it into three paths. The `optional` members from section 3 can appear in the same connection expressions. The following excerpt from the same implementation shows the connections around `normQ`.
+`input` is the member name of an `Identity` `Node`, which passes its input value through unchanged. All three lines use `out0` of the same `input` member. Connecting this output to `in0` of `projQ`, `projK`, and `projV` splits it into three paths. The `optional` members from section 3 can appear in the same connection expressions. The following excerpt from the same implementation shows the connections around `normQ`.
 
 ```cpp
 splitQ - normQ - perQ;

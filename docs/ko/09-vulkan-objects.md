@@ -245,7 +245,7 @@ Push Constant는 명령 기록 시 작은 값을 Shader에 전달하고, Special
 ```cpp
 pipe = pipelinePool().request("activation", {
     eva::constant_id<0>(config_.inPlace ? 1u : 0u),
-    eva::constant_id<SPEC_ID_TYPE_O>(config_.oDtype),
+    eva::constant_id<SPEC_ID_TYPE_O>(oDtype),
     eva::constant_id<SPEC_ID_TYPE_I>(iDtype),
     eva::constant_id<SPEC_ID_EPILOGUE>((uint32_t) config_.epilogue)
 });

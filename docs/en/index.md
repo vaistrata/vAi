@@ -107,7 +107,7 @@ The rules for each construct are as follows.
 | Classes, structs, `enum`, type aliases, `concept` | `PascalCase` | `NeuralNet`, `PipeParams` |
 | Functions, member functions | `camelCase` | `loadWeights()`, `setProfileTag()` |
 | Variables, parameters | `camelCase` | `outShape`, `targetDtype` |
-| `public` member variables | `camelCase` | `hasBias`, `iDtype` |
+| `public` member variables | `camelCase` | `acceptResidual`, `iDtype` |
 | `private`, `protected` member variables | `camelCase` followed by `_` | `device_`, `cmdBuffer_` |
 | `enum` values | `PascalCase` | `Fp16`, `Bilinear` |
 | Constants | `camelCase`, without a `k` prefix | `tokensPerSide` |
@@ -139,8 +139,8 @@ class Linear : public vai::Node
 public:
     void prepare()
     {
-        if (config_.hasBias)
-            addBias();
+        if (config_.acceptResidual)
+            addResidual();
         auto scaled = [&](uint32_t x) { return x * factor_; };
     }
 };

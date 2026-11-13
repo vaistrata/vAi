@@ -38,7 +38,6 @@ struct Config {
     uint32_t hiddenDim;
     uint32_t outDim;
     vai::Epilogue activation = vai::Epilogue::None;
-    bool hasBias = false;
     bool acceptResidual = false;
 };
 ```
@@ -97,7 +96,7 @@ struct MultiHeadAttention<QkvLayout::Separate> : public vai::NodeGroup
 {
     using Config = MultiHeadAttentionConfig;
 
-    vai::node::Linear toQ, toK, toV;
+    vai::node::Linear projQ, projK, projV;
     // ... 나머지 멤버와 생성자, 연결
 };
 
@@ -106,7 +105,7 @@ struct MultiHeadAttention<QkvLayout::Fused> : public vai::NodeGroup
 {
     using Config = MultiHeadAttentionConfig;
 
-    vai::node::Linear toQKV;
+    vai::node::Linear projQKV;
     // ... 나머지 멤버와 생성자, 연결
 };
 ```
@@ -130,16 +129,8 @@ struct FeedForward : public vai::NodeGroup
     // ... 2절의 Config
 
     FeedForward(Config config)
-    : fc1({
-        .inDim = config.inDim,
-        .outDim = config.hiddenDim,
-        .hasBias = config.hasBias,
-        .epilogue = config.activation})
-    , fc2({
-        .inDim = config.hiddenDim,
-        .outDim = config.outDim,
-        .hasBias = config.hasBias,
-        .acceptResidual = config.acceptResidual})
+    : fc1({ .inDim = config.inDim, .outDim = config.hiddenDim, .epilogue = config.activation })
+    , fc2({ .inDim = config.hiddenDim, .outDim = config.outDim, .acceptResidual = config.acceptResidual })
     {
         // ... 4절의 연결과 5절의 슬롯 공개
     }
@@ -252,12 +243,12 @@ for (size_t i = 1; i < layers.size(); ++i)
 하나의 출력값을 여러 계산에 사용하려면 같은 출력 슬롯을 각 입력 슬롯에 연결합니다. 다음은 [`MultiHeadAttention`](../../../vai/groups/multi-head-attention.h)에서 세 경로가 시작되는 연결만 남긴 코드입니다. 각 경로에서 이어지는 계산은 생략했습니다.
 
 ```cpp
-input - toQ;
-input - toK;
-input - toV;
+input - projQ;
+input - projK;
+input - projV;
 ```
 
-`input`은 입력값을 그대로 출력하는 `Identity` `Node`의 멤버 이름입니다. 세 줄 모두 같은 `input`의 `out0`을 사용합니다. 이 출력을 `toQ`, `toK`, `toV`의 `in0`에 각각 연결해 세 경로로 나눕니다. 3절의 `optional` 멤버도 같은 연결식에 넣을 수 있습니다. 다음은 같은 구현에서 `normQ` 앞뒤의 연결만 발췌한 코드입니다.
+`input`은 입력값을 그대로 출력하는 `Identity` `Node`의 멤버 이름입니다. 세 줄 모두 같은 `input`의 `out0`을 사용합니다. 이 출력을 `projQ`, `projK`, `projV`의 `in0`에 각각 연결해 세 경로로 나눕니다. 3절의 `optional` 멤버도 같은 연결식에 넣을 수 있습니다. 다음은 같은 구현에서 `normQ` 앞뒤의 연결만 발췌한 코드입니다.
 
 ```cpp
 splitQ - normQ - perQ;

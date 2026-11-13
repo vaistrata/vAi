@@ -107,7 +107,7 @@ uint32_t numQHeads;       // 변수
 | 클래스 · 구조체 · `enum` · 타입 별칭 · `concept` | `PascalCase` | `NeuralNet`, `PipeParams` |
 | 함수 · 멤버 함수 | `camelCase` | `loadWeights()`, `setProfileTag()` |
 | 변수 · 매개변수 | `camelCase` | `outShape`, `targetDtype` |
-| `public` 멤버 변수 | `camelCase` | `hasBias`, `iDtype` |
+| `public` 멤버 변수 | `camelCase` | `acceptResidual`, `iDtype` |
 | `private` · `protected` 멤버 변수 | `camelCase` 뒤에 `_` | `device_`, `cmdBuffer_` |
 | `enum`의 값 | `PascalCase` | `Fp16`, `Bilinear` |
 | 상수 | `camelCase`. 앞에 `k`를 붙이지 않습니다. | `tokensPerSide` |
@@ -139,8 +139,8 @@ class Linear : public vai::Node
 public:
     void prepare()
     {
-        if (config_.hasBias)
-            addBias();
+        if (config_.acceptResidual)
+            addResidual();
         auto scaled = [&](uint32_t x) { return x * factor_; };
     }
 };
