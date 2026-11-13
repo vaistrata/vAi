@@ -93,7 +93,7 @@ Tensor y({H, W}, Dtype::Fp16);
 가중치를 올릴 때 쓰이는 방법입니다. 이때 `dtype`에 신경을 써야 합니다.
 
 ```cpp
-SafetensorsParser parser(VAI_DATA_DIR "/mnist/model.safetensors");
+SafetensorsParser parser(VAI_DATA_DIR "/ckpts/mnist/jroot/model.safetensors");
 Tensor w(parser["fc.weight"]);                  // 파일의 dtype 그대로
 Tensor w(parser["fc.weight"], Dtype::Fp16);     // fp16으로 변환해 로드
 ```
@@ -108,13 +108,12 @@ vAi에서는 슬롯마다 텐서의 `dtype`을 명시적으로 지정해야 합�
 몫입니다. 다른 타입이 들어오면 실행할 때 런타임 오류가 나거나 동작이 미정의
 상태가 될 수 있습니다.
 
-하지만 크게 걱정할 것은 없습니다. 가중치가 필요한 노드에는 `config_.wDtype`
-멤버가 있고 그 값은 노드 생성자에서 이미 정해지므로 텐서를 만들 때 이 값으로
-`dtype`을 맞추기만 하면 됩니다.
+가중치의 `dtype`은 텐서가 정합니다. 노드는 자기가 가진 가중치 텐서의 `dtype`을
+읽습니다. 가중치는 넷의 `wDefaultDtype`으로, norm 계수는 fp32로 올리면 됩니다.
 
 ```cpp
-linear["weight"] = Tensor(parser["fc.weight"], linear.config_.wDtype);  // 항상 맞는다
-linear["weight"] = Tensor(parser["fc.weight"]);   // 파일 dtype이 wDtype과 다르면 위험하다
+linear["weight"] = Tensor(parser["fc.weight"], net.config().wDefaultDtype);  // 넷의 가중치 dtype
+linear["weight"] = Tensor(parser["fc.weight"]);   // 파일의 dtype 그대로
 ```
 
 형상은 `dtype`처럼 지정하는 것이 아니라 파일에 기록된 형상이 그대로 텐서의
@@ -182,7 +181,7 @@ tokens.setData(tokenIds.data());          // sizeof(int) == fp32 원소 크기
 
 ```cpp
 // HF GPT-2의 c_attn: [in, out]으로 저장돼 있어 전치가 필요하다
-toQKV["weight"] = Tensor(parser["attn.c_attn.weight"], dt).permute(1, 0);
+projQKV["weight"] = Tensor(parser["attn.c_attn.weight"], dt).permute(1, 0);
 
 // 융합된 QKV를 셋으로 가른다
 auto [q, k, v] = Tensor(parser["attn.c_attn.weight"], dt).split(D, 2 * D);
@@ -207,7 +206,7 @@ forward는 비동기입니다. `model(...)`에 출력으로 전달한 텐서에 
 
 ```cpp
 Tensor out;
-model(inDict, {{"nextTokenId", &out}});
+net(inDict, {{"nextTokenId", &out}});
 uint32_t next = out.getData<uint32_t>()[0];   // 내부에서 downloadToHost()
 ```
 

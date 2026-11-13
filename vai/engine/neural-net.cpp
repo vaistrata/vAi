@@ -366,11 +366,11 @@ void NeuralNet::uploadModelParams()
             if (!(slot.type() == NodeSlot::persistent))
                 continue;
 
+            // A slot the weight loader left empty (e.g. Linear's "bias") stays off.
             Tensor& tensor = slot.getValueRef();
-            if (tensor.gpuBufferBound())
+            if (tensor.gpuBufferBound() || !tensor.validShape())
                 continue;
 
-            VAI_ASSERT(tensor.validShape());
             VAI_ASSERT(slot.connections_.size() == 0);
 
             const size_t byteSize = tensor.numBytes();
@@ -443,8 +443,7 @@ void NeuralNet::recordCommands(const TensorRefDict& outputs)
 
             if (slot.type() == NodeSlot::persistent)
             {
-                // Persistent tensors must already reside on the device.
-                VAI_ASSERT(tensor.gpuBufferBound());
+                // Uploaded by uploadModelParams(), or left empty by the weight loader.
             }
             else if (slot.type() == NodeSlot::input)
             {

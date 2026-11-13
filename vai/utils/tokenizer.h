@@ -29,13 +29,15 @@
     auto text = tok.decode(ids);
 =============================================================================*/
 
-#ifndef TOKENIZER_H
-#define TOKENIZER_H
+#ifndef VAI_UTILS_TOKENIZER_H
+#define VAI_UTILS_TOKENIZER_H
 
 #include <memory>
 #include <string>
 #include <vector>
 
+
+namespace vai::utils {
 
 class Tokenizer
 {
@@ -74,4 +76,7 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
-#endif // TOKENIZER_H
+
+}   // namespace vai::utils
+
+#endif   // VAI_UTILS_TOKENIZER_H

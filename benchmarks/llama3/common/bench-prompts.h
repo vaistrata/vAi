@@ -2,7 +2,7 @@
 // enough that every supported length can be taken as its first N tokens. The
 // benches tokenize the whole text and keep the first N, so the requested
 // length is the exact token count measured. The opening paragraph is the
-// 146-token prompt of examples/llama3/demo.cpp.
+// 146-token prompt of models/production/llama3/demo.cpp.
 
 #ifndef BENCH_PROMPTS_H
 #define BENCH_PROMPTS_H

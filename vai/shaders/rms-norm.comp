@@ -1,6 +1,6 @@
 /*=============================================================================
  rms-norm.comp: RMS normalization over the feature axis
-     O[i, j] = I[i, j] * rsqrt(mean(I[i, :]^2) + eps) (* scale[j]) (+ shift[j])
+     O[i, j] = I[i, j] * rsqrt(mean(I[i, :]^2) + eps) (* scale[j]) (+ shift[j]) (+ R[i, j])
 
  A workgroup normalizes one row: its wgSize threads accumulate strided
  partials of Σx², reduce them, then normalize + scale in parallel. RMS needs
@@ -30,6 +30,7 @@ layout(constant_id = 0) const uint wgSize   = 256;             // threads per wo
 layout(constant_id = 1) const uint sgReduce = 0;               // 1: subgroupAdd reduction, 0: shared tree
 layout(constant_id = 2) const uint hasScale = 1;               // 0: no scale (scale 1)
 layout(constant_id = 3) const uint hasShift  = 0;               // 0: no shift (shift 0)
+layout(constant_id = 4) const uint hasResidual = 0;            // 1: residual R of in0's shape and dtype
 layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0;     // O (output) dtype
 layout(constant_id = SPEC_ID_TYPE_I) const uint typeI = 0;     // I (input) dtype
 layout(constant_id = SPEC_ID_TYPE_W) const uint typeW = 0;     // scale (and shift) dtype
@@ -50,6 +51,9 @@ layout(set = 0, binding = 2) restrict readonly buffer SCALE_BUF_F16 { float16_t 
 //////////////////////////////////////////////////////////////////////////////
 layout(set = 0, binding = 3) restrict readonly buffer SHIFT_BUF_F32  { float bufferShift_f32[]; };
 layout(set = 0, binding = 3) restrict readonly buffer SHIFT_BUF_F16  { float16_t bufferShift_f16[]; };
+layout(set = 0, binding = 4) restrict readonly buffer RES_BUF_F32 { float bufferRes_f32[]; };
+layout(set = 0, binding = 4) restrict readonly buffer RES_BUF_F16 { float16_t bufferRes_f16[]; };
+layout(set = 0, binding = 4) restrict readonly buffer RES_BUF_4F32 { vec4 bufferRes_4f32[]; };
 
 layout(push_constant) uniform PushConstants {
     uint batchSize;
@@ -69,6 +73,8 @@ float readShift(uint j)
     if (hasShift == 0u) return 0.0;
     return (typeW == DTYPE_F32) ? bufferShift_f32[j] : float(bufferShift_f16[j]);
 }
+float readResidual(uint i) { return (hasResidual == 0u) ? 0.0 : ((typeI == DTYPE_F32) ? bufferRes_f32[i] : float(bufferRes_f16[i])); }
+vec4 readResidual4(uint i4) { return (hasResidual == 0u) ? vec4(0.0) : bufferRes_4f32[i4]; }   // aligned: fp32
 void writeO(uint i, float v) { if (typeO == DTYPE_F32) bufferO_f32[i] = v; else bufferO_f16[i] = float16_t(v); }
 
 // Per-thread partial sums (spec-constant-sized) — with sgReduce == 1 only
@@ -116,14 +122,14 @@ void normalizeAligned(uint base, uint F, float invRms)
         vec4 x4 = bufferI_4f32[base4 + j];
         vec4 scale4 = vec4(readScale(c), readScale(c + 1u), readScale(c + 2u), readScale(c + 3u));
         vec4 shift4 = vec4(readShift(c), readShift(c + 1u), readShift(c + 2u), readShift(c + 3u));
-        bufferO_4f32[base4 + j] = x4 * invRms * scale4 + shift4;
+        bufferO_4f32[base4 + j] = x4 * invRms * scale4 + shift4 + readResidual4(base4 + j);
     }
 }
 
 void normalizeScalar(uint base, uint F, float invRms)
 {
     for (uint j = gl_LocalInvocationID.x; j < F; j += wgSize)
-        writeO(base + j, readI(base + j) * invRms * readScale(j) + readShift(j));
+        writeO(base + j, readI(base + j) * invRms * readScale(j) + readShift(j) + readResidual(base + j));
 }
 
 void main()

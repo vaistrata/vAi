@@ -3,7 +3,7 @@
  Tuning fields: op=conv-k3s1; algorithm=winograd-gemm; path=generic; dtype=specialized; wave=specialized
  Winograd-domain GEMM with FP32/FP16 storage and float arithmetic.
  Bindings: O=0, I=1, W=2.
- Dispatch: x=pc.n tiles, y=Co tiles, z=36 transforms.
+ Dispatch: x=pc.n tiles, y=Co tiles, z=pc.batch images x 36 transforms.
  Push constants: PushConstants.
 =============================================================================*/
 #version 450
@@ -47,7 +47,10 @@ layout(push_constant) uniform PushConstants {
     uint splitCount;
     uint kernel;
     uint stride;
+    uint batch;             // images, stacked on the dispatch z axis
 } pc;
+
+#include "common/conv_batch.h"
 
 const uint A_STRIDE = wgM + 4u;
 const uint B_STRIDE = wgN + pad;
@@ -200,13 +203,14 @@ void main()
 {
     uint tileCol = gl_WorkGroupID.x;
     uint tileRow = gl_WorkGroupID.y;
-    uint batch = gl_WorkGroupID.z;
+    uint transform = convImageZ(pc.batch);
+    uint image = convImage(pc.batch);
     uint t = gl_LocalInvocationID.x;
     uint T = gl_WorkGroupSize.x;
 
-    uint batchOffsetW = batch * pc.co * pc.ci;
-    uint batchOffsetI = batch * pc.ci * pc.n;
-    uint batchOffsetM = batch * pc.co * pc.n;
+    uint batchOffsetW = transform * pc.co * pc.ci;
+    uint batchOffsetI = (image * 36u + transform) * pc.ci * pc.n;
+    uint batchOffsetM = (image * 36u + transform) * pc.co * pc.n;
 
     uint innerRowA = t / wgK;
     uint innerColA = t % wgK;

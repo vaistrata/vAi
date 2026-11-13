@@ -1,5 +1,5 @@
-#ifndef VAI_NODE_PROFILER_H
-#define VAI_NODE_PROFILER_H
+#ifndef VAI_ENGINE_NODE_PROFILER_H
+#define VAI_ENGINE_NODE_PROFILER_H
 
 #include "tensor.h"
 #include <map>
@@ -300,4 +300,4 @@ inline void NodeProfiler::print(bool doReset)
 
 } // namespace vai
 
-#endif // VAI_NODE_PROFILER_H
+#endif   // VAI_ENGINE_NODE_PROFILER_H

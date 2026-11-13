@@ -1,0 +1,47 @@
+/*=============================================================================
+ linear-pack-intel.comp: rewrites a Linear weight W [N, K] into the layout
+     linear-tile-intel.comp reads (Linear::packWeightIntel, once per weight)
+
+     W'[n / 32, k / 2, n % 16, (k % 2) * 2 + (n % 32) / 16] = W[n, k]
+
+ N padded up to 32 and K up to 2 with zeros. One invocation per element of
+ W', fp32 or fp16 (copied as it is).
+
+ Dispatch (host): ceil(elements of W' / 256) workgroups, folded into
+ (x, y) past the x limit: index = (y * numX + x) * 256 + local.
+=============================================================================*/
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#include "common/spec_constants.h"
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(constant_id = SPEC_ID_TYPE_W) const uint typeW = 1;  // W (weight) dtype
+
+layout(set = 0, binding = 0) writeonly buffer D_BUF_F32 { float bufferD_f32[]; };
+layout(set = 0, binding = 0) writeonly buffer D_BUF_F16 { float16_t bufferD_f16[]; };
+layout(set = 0, binding = 1) readonly buffer W_BUF_F32 { float bufferW_f32[]; };
+layout(set = 0, binding = 1) readonly buffer W_BUF_F16 { float16_t bufferW_f16[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint N;
+    uint K;
+    uint total;   // elements of W'
+};
+
+void main()
+{
+    const uint e = (gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x) * 256u + gl_LocalInvocationID.x;
+    if (e >= total) return;
+
+    const uint kPairs = (K + 1u) / 2u;
+    const uint j = e % 4u, lane = (e / 4u) % 16u, run = e / 64u;
+    const uint n = (run / kPairs) * 32u + (j % 2u) * 16u + lane;
+    const uint k = (run % kPairs) * 2u + j / 2u;
+    const bool inside = n < N && k < K;
+
+    if (typeW == DTYPE_F32) bufferD_f32[e] = inside ? bufferW_f32[n * K + k] : 0.0;
+    else                    bufferD_f16[e] = inside ? bufferW_f16[n * K + k] : float16_t(0.0);
+}

@@ -1,12 +1,12 @@
 /*=============================================================================
  ele-affine.comp:
-     O[e] = S[(e / scaleInner) % scaleCount] * I[e] + B[(e / shiftInner) % shiftCount]
+     O[e] = scale[(e / scaleInner) % scaleCount] * I[e] + shift[(e / shiftInner) % shiftCount]
 
  - A count of 0 skips the modulo. inner / count are spec constants, so the
    divisions are by constants.
- - hasScale / hasShift == 0: that term drops out (S = 1, B = 0) and its binding
+ - hasScale / hasShift == 0: that term drops out (scale = 1, shift = 0) and its binding
    is never read, so an add or a multiply costs what a plain one does.
- - O (typeO), I (typeI), S (typeS) and B (typeB) are fp32 or fp16 each,
+ - O (typeO), I (typeI), scale (typeScale) and shift (typeShift) are fp32 or fp16 each,
    accessed through same-binding buffer aliases.
  - aligned == 1: one thread per vec4. An operand with inner % 4 == 0 holds one
    value across the vec4 and is read once; one with inner == 1 runs along it
@@ -22,16 +22,16 @@
 layout(local_size_x = 256) in;
 
 layout(constant_id = 0) const uint scaleInner = 1;
-layout(constant_id = 1) const uint scaleCount = 0;           // 0: no modulo
+layout(constant_id = 1) const uint scaleCount = 0;            // 0: no modulo
 layout(constant_id = 2) const uint shiftInner = 1;
-layout(constant_id = 3) const uint shiftCount = 0;           // 0: no modulo
-layout(constant_id = 4) const uint hasScale = 1;             // 0: no S
-layout(constant_id = 5) const uint hasShift = 1;             // 0: no B
-layout(constant_id = 6) const uint typeS = 0;                // S dtype
-layout(constant_id = 7) const uint typeB = 0;                // B dtype
-layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0;   // O (output) dtype
-layout(constant_id = SPEC_ID_TYPE_I) const uint typeI = 0;   // I (input) dtype
-layout(constant_id = SPEC_ID_ALIGNED) const uint aligned = 0;   // 1: vec4 threads
+layout(constant_id = 3) const uint shiftCount = 0;            // 0: no modulo
+layout(constant_id = 4) const uint hasScale = 1;              // 0: no scale
+layout(constant_id = 5) const uint hasShift = 1;              // 0: no shift
+layout(constant_id = 6) const uint typeScale = 0;             // scale dtype
+layout(constant_id = 7) const uint typeShift = 0;             // shift dtype
+layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0;    // O (output) dtype
+layout(constant_id = SPEC_ID_TYPE_I) const uint typeI = 0;    // I (input) dtype
+layout(constant_id = SPEC_ID_ALIGNED) const uint aligned = 0; // 1: vec4 threads
 
 layout(set = 0, binding = 0) writeonly buffer O_BUF_F32  { float bufferO_f32[]; };
 layout(set = 0, binding = 0) writeonly buffer O_BUF_F16  { float16_t bufferO_f16[]; };
@@ -43,15 +43,15 @@ layout(set = 0, binding = 1) readonly buffer I_BUF_F16  { float16_t bufferI_f16[
 layout(set = 0, binding = 1) readonly buffer I_BUF_4F32 { vec4 bufferI_4f32[]; };
 layout(set = 0, binding = 1) readonly buffer I_BUF_4F16 { f16vec4 bufferI_4f16[]; };
 //////////////////////////////////////////////////////////////////////////////
-layout(set = 0, binding = 2) readonly buffer S_BUF_F32  { float bufferS_f32[]; };
-layout(set = 0, binding = 2) readonly buffer S_BUF_F16  { float16_t bufferS_f16[]; };
-layout(set = 0, binding = 2) readonly buffer S_BUF_4F32 { vec4 bufferS_4f32[]; };
-layout(set = 0, binding = 2) readonly buffer S_BUF_4F16 { f16vec4 bufferS_4f16[]; };
+layout(set = 0, binding = 2) readonly buffer SCALE_BUF_F32  { float bufferScale_f32[]; };
+layout(set = 0, binding = 2) readonly buffer SCALE_BUF_F16  { float16_t bufferScale_f16[]; };
+layout(set = 0, binding = 2) readonly buffer SCALE_BUF_4F32 { vec4 bufferScale_4f32[]; };
+layout(set = 0, binding = 2) readonly buffer SCALE_BUF_4F16 { f16vec4 bufferScale_4f16[]; };
 //////////////////////////////////////////////////////////////////////////////
-layout(set = 0, binding = 3) readonly buffer B_BUF_F32  { float bufferB_f32[]; };
-layout(set = 0, binding = 3) readonly buffer B_BUF_F16  { float16_t bufferB_f16[]; };
-layout(set = 0, binding = 3) readonly buffer B_BUF_4F32 { vec4 bufferB_4f32[]; };
-layout(set = 0, binding = 3) readonly buffer B_BUF_4F16 { f16vec4 bufferB_4f16[]; };
+layout(set = 0, binding = 3) readonly buffer SHIFT_BUF_F32  { float bufferShift_f32[]; };
+layout(set = 0, binding = 3) readonly buffer SHIFT_BUF_F16  { float16_t bufferShift_f16[]; };
+layout(set = 0, binding = 3) readonly buffer SHIFT_BUF_4F32 { vec4 bufferShift_4f32[]; };
+layout(set = 0, binding = 3) readonly buffer SHIFT_BUF_4F16 { f16vec4 bufferShift_4f16[]; };
 
 layout(push_constant) uniform PushConstants {
     uint items;   // threads with work: N, or N / 4 when aligned
@@ -64,26 +64,26 @@ uint bcast(uint e, uint inner, uint count)
     return (count == 0u) ? i : i % count;
 }
 
-float readI(uint i) { return (typeI == DTYPE_F32) ? bufferI_f32[i] : float(bufferI_f16[i]); }
-float readS(uint i) { return (typeS == DTYPE_F32) ? bufferS_f32[i] : float(bufferS_f16[i]); }
-float readB(uint i) { return (typeB == DTYPE_F32) ? bufferB_f32[i] : float(bufferB_f16[i]); }
+float readI(uint i)     { return (typeI == DTYPE_F32) ? bufferI_f32[i] : float(bufferI_f16[i]); }
+float readScale(uint i) { return (typeScale == DTYPE_F32) ? bufferScale_f32[i] : float(bufferScale_f16[i]); }
+float readShift(uint i) { return (typeShift == DTYPE_F32) ? bufferShift_f32[i] : float(bufferShift_f16[i]); }
 void writeO(uint i, float v) { if (typeO == DTYPE_F32) bufferO_f32[i] = v; else bufferO_f16[i] = float16_t(v); }
 
 vec4 readI4(uint i) { return (typeI == DTYPE_F32) ? bufferI_4f32[i] : vec4(bufferI_4f16[i]); }
 void writeO4(uint i, vec4 v) { if (typeO == DTYPE_F32) bufferO_4f32[i] = v; else bufferO_4f16[i] = f16vec4(v); }
 
 // The vec4 e4 covers elements 4 * e4 .. 4 * e4 + 3.
-vec4 readS4(uint e4)
+vec4 readScale4(uint e4)
 {
-    if (scaleInner % 4u == 0u) return vec4(readS(bcast(4u * e4, scaleInner, scaleCount)));
+    if (scaleInner % 4u == 0u) return vec4(readScale(bcast(4u * e4, scaleInner, scaleCount)));
     uint i = bcast(e4, 1u, scaleCount / 4u);
-    return (typeS == DTYPE_F32) ? bufferS_4f32[i] : vec4(bufferS_4f16[i]);
+    return (typeScale == DTYPE_F32) ? bufferScale_4f32[i] : vec4(bufferScale_4f16[i]);
 }
-vec4 readB4(uint e4)
+vec4 readShift4(uint e4)
 {
-    if (shiftInner % 4u == 0u) return vec4(readB(bcast(4u * e4, shiftInner, shiftCount)));
+    if (shiftInner % 4u == 0u) return vec4(readShift(bcast(4u * e4, shiftInner, shiftCount)));
     uint i = bcast(e4, 1u, shiftCount / 4u);
-    return (typeB == DTYPE_F32) ? bufferB_4f32[i] : vec4(bufferB_4f16[i]);
+    return (typeShift == DTYPE_F32) ? bufferShift_4f32[i] : vec4(bufferShift_4f16[i]);
 }
 
 void main()
@@ -94,17 +94,17 @@ void main()
     if (aligned != 0u)
     {
         vec4 v = readI4(e);
-        if (hasScale != 0u && hasShift != 0u) v = fma(readS4(e), v, readB4(e));
-        else if (hasScale != 0u)              v *= readS4(e);
-        else                                  v += readB4(e);
+        if (hasScale != 0u && hasShift != 0u) v = fma(readScale4(e), v, readShift4(e));
+        else if (hasScale != 0u)             v *= readScale4(e);
+        else                                 v += readShift4(e);
         writeO4(e, v);
     }
     else
     {
         float v = readI(e);
-        if (hasScale != 0u && hasShift != 0u) v = fma(readS(bcast(e, scaleInner, scaleCount)), v, readB(bcast(e, shiftInner, shiftCount)));
-        else if (hasScale != 0u)              v *= readS(bcast(e, scaleInner, scaleCount));
-        else                                  v += readB(bcast(e, shiftInner, shiftCount));
+        if (hasScale != 0u && hasShift != 0u) v = fma(readScale(bcast(e, scaleInner, scaleCount)), v, readShift(bcast(e, shiftInner, shiftCount)));
+        else if (hasScale != 0u)             v *= readScale(bcast(e, scaleInner, scaleCount));
+        else                                 v += readShift(bcast(e, shiftInner, shiftCount));
         writeO(e, v);
     }
 }

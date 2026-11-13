@@ -39,13 +39,14 @@ cmake --build build
 
 | 옵션 | 기본 | 내용 |
 |---|---|---|
-| `VAI_BUILD_EXAMPLES` | `ON` | 모델별 데모 (`demo-mnist`, `demo-gpt2` 등) |
+| `VAI_BUILD_MODEL_DEMO` | `ON` | 모델별 데모 (`demo-gpt2`, `demo-yolox` 등) |
+| `VAI_BUILD_EXAMPLES` | `OFF` | 모델 밖의 예제 (`demo-mnist`, `chat-llama3`, `chat-gemma3`) |
 | `VAI_BUILD_TESTS` | `OFF` | 커널 단위 테스트, A/B |
 | `VAI_BUILD_BENCH` | `OFF` | llama.cpp, ncnn 등 비교 프레임워크 벤치 |
 
 ## 간단 예제
 
-MNIST 분류기는 모델 정의부터 가중치 로딩, 실행까지 [`examples/mnist/main.cpp`](../../examples/mnist/main.cpp) 한 파일에 들어 있습니다. 아래에서는 이 파일을 위에서부터 순서대로 읽습니다. 체크포인트와 입력 이미지는 [`data/mnist/`](../../data/mnist/)에 함께 있습니다.
+MNIST 분류기는 모델 정의부터 가중치 로딩, 실행까지 [`examples/mnist/main.cpp`](../../examples/mnist/main.cpp) 한 파일에 들어 있습니다. 아래에서는 이 파일을 위에서부터 순서대로 읽습니다. 체크포인트는 [`data/ckpts/mnist/jroot/`](../../data/ckpts/mnist/jroot/)에, 입력 이미지는 [`data/images/`](../../data/images/)에 있습니다.
 
 ### 노드 잇기
 
@@ -62,7 +63,6 @@ struct ConvBlock : public vai::NodeGroup {
         .outChannels = outChannels,
         .kernelSize = kernelSize,
         .stride = 1,
-        .hasBias = true,
         .epilogue = vai::Epilogue::Relu
     })
     , maxpool({
@@ -119,12 +119,12 @@ struct ConvSequence : public vai::NodeGroup {
 `vai::NeuralNet`을 상속하고, `input()`과 `output()`으로 그래프의 입구와 출구를 만듭니다.
 
 ```cpp
-struct Model : public vai::NeuralNet {
+struct Net : public vai::NeuralNet {
     ConvSequence convX2;
     vai::node::Flatten flatten;
     vai::node::Linear linear;
 
-    Model(const vai::NeuralNetConfig& netCfg)
+    Net(const vai::NeuralNetConfig& netCfg)
     : NeuralNet(netCfg)
     , convX2({1, 32, 64}, 3)
     , flatten()
@@ -143,26 +143,26 @@ struct Model : public vai::NeuralNet {
 
 ```cpp
 template<>
-void loadWeights<"jroooot", mnist::Model>(mnist::Model& model)
+void loadWeights<"jroooot", mnist::Net>(mnist::Net& net)
 {
-    std::string path = VAI_DATA_DIR "/mnist/model.safetensors";
+    std::string path = VAI_DATA_DIR "/ckpts/mnist/jroot/model.safetensors";
     auto parser = vai::SafetensorsParser(path.c_str());
 
-    // 각 텐서는 그것을 소유한 노드가 선언한 dtype으로 읽는다.
+    // 가중치는 넷의 wDefaultDtype으로 읽는다.
+    const vai::Dtype wDt = net.config().wDefaultDtype;
     auto load = [&](auto& node, const std::string& wKey, const std::string& bKey)
     {
-        vai::Dtype dt = node.config_.wDtype;
-        node["weight"] = vai::Tensor(parser[wKey], dt);
-        node["bias"]   = vai::Tensor(parser[bKey], dt);
+        node["weight"] = vai::Tensor(parser[wKey], wDt);
+        node["bias"]   = vai::Tensor(parser[bKey], wDt);
     };
 
-    load(model.convX2.blocks[0].conv, "conv1.weight", "conv1.bias");
-    load(model.convX2.blocks[1].conv, "conv2.weight", "conv2.bias");
-    load(model.linear, "fc.weight", "fc.bias");
+    load(net.convX2.blocks[0].conv, "conv1.weight", "conv1.bias");
+    load(net.convX2.blocks[1].conv, "conv2.weight", "conv2.bias");
+    load(net.linear, "fc.weight", "fc.bias");
 }
 ```
 
-`VAI_DATA_DIR`은 빌드 시스템이 박아주는 저장소의 `data/` 경로입니다. 체크포인트 키 이름과 디스크 경로를 아는 것은 이 함수뿐이고 모델 정의는 둘 다 모릅니다. 제공 모델들은 이 특수화를 `models/<모델>/<배포명>-weights.h`라는 별도 파일로 두는데, 그 구조는 [제공 모델의 가중치 로딩](04-models/README.md#가중치-로딩)을 참조하세요.
+`VAI_DATA_DIR`은 빌드 시스템이 박아주는 저장소의 `data/` 경로입니다. 체크포인트 키 이름과 디스크 경로를 아는 것은 이 함수뿐이고 모델 정의는 둘 다 모릅니다. 제공 모델들은 이 특수화를 `models/<impl>/<모델>/<배포명>-weights.h`라는 별도 파일로 두는데, 그 구조는 [제공 모델의 가중치 로딩](04-models/README.md#가중치-로딩)을 참조하세요.
 
 ### 실행
 
@@ -170,23 +170,23 @@ void loadWeights<"jroooot", mnist::Model>(mnist::Model& model)
 int main()
 {
     // 28x28 흑백 이미지를 읽어 [0, 1]로 정규화
-    std::vector<float> inputData = ImageProcessor(VAI_DATA_DIR "/mnist/0.png", 1)
+    std::vector<float> inputData = vai::utils::ImageProcessor(VAI_DATA_DIR "/images/0.png", 1)
         .normalize(0.0f, 1.0f)
         .chw();
 
     // 모델 생성. defaultDtype이 파라미터의 기본 정밀도다.
-    mnist::Model model({
+    mnist::Net net({
         .defaultDtype = Dtype::Fp32,
     });
 
     // 체크포인트에서 가중치 로드 ("jroooot"는 학습시킨 기여자)
-    loadWeights<"jroooot">(model);
+    loadWeights<"jroooot">(net);
 
     Tensor input = Tensor({1, 28, 28}, Dtype::Fp32).setFloats(inputData);
     Tensor output;
 
     // 모델을 돌려 로짓을 받는다
-    model({{"in0", input}}, {{"out0", &output}});
+    net({{"in0", input}}, {{"out0", &output}});
 
     // 네트워크 출력은 fp32다.
     const float* data = output.getData();

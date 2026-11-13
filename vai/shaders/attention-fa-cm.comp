@@ -32,12 +32,21 @@
  demotion); shared memory per ggmlFACmShmemSupport; effective rows > 1;
  packed mode needs gqaRatio <= wgRows; wgSize == 4 * sgSize (forced).
 
- Split-K spans are derived here from kvCacheCount (see the scalar kernel):
- the host cannot supply them, as the cache grows under one recording.
+ Split-K spans cut the keys the tile reaches and are derived here from
+ kvCacheCount (see the scalar kernel): the host cannot supply them, as the
+ cache grows under one recording. appendBeforeSweep keeps the new token on
+ the LAST split, which appends it and reads it back: there the spans cut the
+ cache and the last one runs on through the new keys.
 
- Sliding window (spec windowSize > 0): a query at position p attends
- [p - windowSize + 1, p]; the lower bound joins the exclusion compare and lifts
- the sweep's start (see the scalar kernel).
+ The mask's span bounds a query from below (keyStart, a sliding window); the
+ bound joins the exclusion compare and lifts the sweep's start, and a ring
+ cache (spec kvCacheRing) keeps the last Tmax positions at row p % Tmax (see
+ the scalar kernel).
+
+ The K / V inputs carry Tkv rows (0 = the cache alone), aligned with the Tq
+ queries at their ends; Tkv > Tq rows append a grid of tiles apart (see the
+ scalar kernel). A tile all of a subgroup's rows see whole skips the per-row
+ exclusion; only the tiles that cut a row's range compare per element.
 
  Dispatch (host): (ceil(Tq / wgRows) * kCount, Hq, B);
                   GQA-packed: (Tq * kCount, Hkv, B)
@@ -69,7 +78,7 @@ layout(constant_id = 10) const uint accF16      = 0;    // tile-to-tile O accumu
 // split appends first, memoryBarrierBuffer for visibility) — tile classes
 // collapse to full-vs-tail, folding the boundary/full-input code out.
 layout(constant_id = 11) const uint appendBeforeSweep  = 0;
-layout(constant_id = 12) const uint windowSize = 0;    // sliding-window span (0 = unbounded)
+layout(constant_id = 12) const uint kvCacheRing = 0;   // 1: the cache keeps the last Tmax positions, p at row p % Tmax
 layout(constant_id = 13) const uint typeI      = 0;    // Q / K / V input dtype
 layout(constant_id = 14) const uint typeCache  = 0;    // K / V cache dtype
 layout(constant_id = 15) const uint kvCaching  = 1;    // 0: skip the append; the cache bindings are null
@@ -83,9 +92,9 @@ layout(set = 0, binding = 0) writeonly buffer O_BUF_F16 { f16vec4 bufferO_f16[];
 //////////////////////////////////////////////////////////////////////////////
 layout(set = 0, binding = 1) readonly buffer Q_BUF_F32 { vec4 bufferQ_f32[]; };   // query Q [B, Hq, Tq, Dh]
 layout(set = 0, binding = 1) readonly buffer Q_BUF_F16 { f16vec4 bufferQ_f16[]; };
-layout(set = 0, binding = 2) readonly buffer K_BUF_F32 { vec4 bufferK_f32[]; };   // key   K [B, Hkv, Tq, Dh] (new tokens)
+layout(set = 0, binding = 2) readonly buffer K_BUF_F32 { vec4 bufferK_f32[]; };   // key   K [B, Hkv, Tkv, Dh] (new tokens)
 layout(set = 0, binding = 2) readonly buffer K_BUF_F16 { f16vec4 bufferK_f16[]; };
-layout(set = 0, binding = 3) readonly buffer V_BUF_F32 { vec4 bufferV_f32[]; };   // value V [B, Hkv, Tq, Dh] (new tokens)
+layout(set = 0, binding = 3) readonly buffer V_BUF_F32 { vec4 bufferV_f32[]; };   // value V [B, Hkv, Tkv, Dh] (new tokens)
 layout(set = 0, binding = 3) readonly buffer V_BUF_F16 { f16vec4 bufferV_f16[]; };
 //////////////////////////////////////////////////////////////////////////////
 layout(set = 0, binding = 4) readonly buffer KCACHE_BUF_F32 { vec4 bufferKCache_f32[]; };   // K cache [B, Hkv, Tmax, Dh]
@@ -107,6 +116,7 @@ layout(push_constant) uniform PushConstants {
     uint Hq;
     uint groupSize; // Hq / Hkv: query heads sharing one KV head
     uint Tq;
+    uint Tkv;      // K / V input rows
     uint Tmax;
     uint gqaRatio; // > 1: GQA-packed decode (tile rows = the groupSize heads of one KV group)
     uint kCount;   // KV splits (1 = no split; > 1 = two-pass with the reduce kernel)
@@ -115,6 +125,25 @@ layout(push_constant) uniform PushConstants {
 
 #define CAUSAL_MASK_BINDING 9
 #include "common/causal_mask.h"
+
+// newTokenEnd among the Tkv new keys, queries and keys aligned at their ends:
+// query t sits at key t + Tkv - Tq.
+uint keyEnd(uint t)
+{
+    return uint(max(int(newTokenEnd(t) + Tkv) - int(Tq), 0));
+}
+
+// Query t's own key position, in the same alignment keyEnd uses.
+uint keyPos(uint t)
+{
+    return kvCacheCount + uint(max(int(t + Tkv) - int(Tq), 0));
+}
+
+// The cache row that holds position p.
+uint cacheRow(uint p)
+{
+    return (kvCacheRing != 0u) ? p % Tmax : p;
+}
 
 // O and the split-K partials are both indexed by this row, so the reduce pass
 // writes straight through. With one sequence b is 0 and it is the plain
@@ -400,7 +429,7 @@ void main()
     const uint Hkv         = Hq / groupSize;   // KV heads one sequence's block holds
     const uint kvHead      = b * Hkv + (packed ? wgY : wgY / groupSize);
     const uint kvCacheBase = kvHead * Tmax  * DH4;   // vec4 units
-    const uint kvInputBase = kvHead * Tq * DH4;
+    const uint kvInputBase = kvHead * Tkv * DH4;
     const uint rowBase     = sg * ROWS_PER_SG;   // my subgroup's softmax rows (tile-local)
 
     // Copy loops below use the `idx = idx0 + tid` compile-time-trip idiom so
@@ -422,12 +451,13 @@ void main()
     // Fused append (split 0; appendBeforeSweep: the LAST split — it is the
     // one that reads the token back). Non-packed: the KV-head-leader workgroup.
     // kvCaching == 0 skips it: the cache descriptors are null.
-    if (kvCaching != 0u && packed && split == (appendBeforeSweep != 0u ? kCount - 1u : 0u))
+    if (kvCaching != 0u && packed && split == (appendBeforeSweep != 0u ? kCount - 1u : 0u)
+        && qTile < Tkv)
     {
         [[unroll]] for (uint d = tid; d < DH4; d += wgSize)
         {
             uint src = kvInputBase + qTile * DH4 + d;
-            uint dst = kvCacheBase + (kvCacheCount + qTile) * DH4 + d;
+            uint dst = kvCacheBase + cacheRow(kvCacheCount + qTile) * DH4 + d;
             writeKCache4(dst, readK4(src));
             writeVCache4(dst, readV4(src));
         }
@@ -441,10 +471,31 @@ void main()
             {
                 uint row = idx / DH4, d = idx % DH4;
                 uint tok = qTile * wgRows + row;
-                if (tok < Tq)
+                if (tok < Tkv)
                 {
                     uint src = kvInputBase + tok * DH4 + d;
-                    uint dst = kvCacheBase + (kvCacheCount + tok) * DH4 + d;
+                    uint dst = kvCacheBase + cacheRow(kvCacheCount + tok) * DH4 + d;
+                    writeKCache4(dst, readK4(src));
+                    writeVCache4(dst, readV4(src));
+                }
+            }
+        }
+    }
+    // Tkv > Tq (no appendBeforeSweep, which appends one token): the rows past
+    // the grid's own, a whole grid of tiles apart.
+    if (Tkv > Tq && kvCaching != 0u && split == 0u && (packed || wgY % groupSize == 0u))
+    {
+        const uint tileRows = packed ? 1u : wgRows;
+        const uint gridRows = packed ? Tq : (Tq + wgRows - 1u) / wgRows * wgRows;
+        for (uint first = qTile * tileRows + gridRows; first < Tkv; first += gridRows)
+        {
+            for (uint idx = tid; idx < tileRows * DH4; idx += wgSize)
+            {
+                uint tok = first + idx / DH4, d = idx % DH4;
+                if (tok < Tkv)
+                {
+                    uint src = kvInputBase + tok * DH4 + d;
+                    uint dst = kvCacheBase + cacheRow(kvCacheCount + tok) * DH4 + d;
                     writeKCache4(dst, readK4(src));
                     writeVCache4(dst, readV4(src));
                 }
@@ -473,41 +524,48 @@ void main()
     // when j < cached, else input[j - cached]; only the boundary tile mixes
     // sources, and the last split absorbs the new tokens into it.
     {
-        const uint inputEnd = kvCacheCount + Tq;   // token count after append
+        const uint inputEnd = kvCacheCount + Tkv;   // token count after append
 
-        // Split-K: my cache subrange; the last split extends through the new
-        // tokens to this workgroup's causal end. The span comes from the live
-        // cache, not the host: the command buffer outlives the cache length it
-        // was recorded at.
-        const uint splitSpan = (((kvCacheCount + kCount - 1u) / kCount) + wgKv - 1u) & ~(wgKv - 1u);
-        const uint spanStart = min(split * splitSpan, kvCacheCount);
-        // newTokenEnd rises with the row, so the tile's last row bounds the tile.
+        // Split-K: my span of the keys the tile reaches, which the tile's last
+        // row bounds (keyEnd rises with the row); appendBeforeSweep spans the
+        // cache alone (see the header). The span comes from the live cache, not
+        // the host: the command buffer outlives the cache length it was
+        // recorded at.
         const uint lastRowTok = packed ? qTile : min(Tq, qTile * wgRows + wgRows) - 1u;
-        const uint sweepEnd = (split == kCount - 1u)
-            ? kvCacheCount + newTokenEnd(lastRowTok)
-            : min(kvCacheCount, spanStart + splitSpan);
+        const uint tileEnd   = kvCacheCount + keyEnd(lastRowTok);
+        const uint splitKeys = (appendBeforeSweep != 0u) ? kvCacheCount : tileEnd;
+        const uint splitSpan = (((splitKeys + kCount - 1u) / kCount) + wgKv - 1u) & ~(wgKv - 1u);
+        const uint spanStart = min(split * splitSpan, splitKeys);
+        const uint sweepEnd  = (split == kCount - 1u) ? tileEnd : min(splitKeys, spanStart + splitSpan);
 
-        // Windowed sweeps start at the bound of the tile's OLDEST row, so the
-        // start stays workgroup-uniform and no split's end moves — the spans
-        // must stay contiguous and disjoint (see the scalar kernel).
-        const uint qPosFirst = kvCacheCount + ROW_TOK(0u);
-        const uint winStart  = (windowSize == 0u || qPosFirst < windowSize) ? 0u : qPosFirst + 1u - windowSize;
-        const uint jStart    = max(spanStart, winStart);
+        // Spanned sweeps start at the bound of the tile's OLDEST row, so the
+        // start stays workgroup-uniform and no split's end moves; the spans
+        // must stay contiguous and disjoint. The start rounds down to a whole
+        // tile, so no tile wraps a ring cache (see the scalar kernel).
+        const uint winStart  = keyStart(keyPos(ROW_TOK(0u)));
+        const uint jStart    = max(spanStart, winStart & ~(wgKv - 1u));
+
+        // My 4 rows' ranges rise with the row: the first row ends them soonest,
+        // the last starts them latest. A tile inside both bounds is whole to all
+        // four and skips the exclusion compares.
+        const uint rowsLo   = keyStart(keyPos(ROW_TOK(rowBase + 3u)));
+        const uint rowsHi   = min(kvCacheCount + keyEnd(ROW_TOK(rowBase)) - 1u, sweepEnd - 1u);
 
 #if HOIST
         uint loRow[4], hiRow[4];
         [[unroll]] for (uint k = 0u; k < 4u; ++k)
         {
             uint rowTok = ROW_TOK(rowBase + k);
-            uint qPos = kvCacheCount + rowTok;
-            loRow[k] = (windowSize == 0u || qPos < windowSize) ? 0u : qPos + 1u - windowSize;
-            hiRow[k] = min(kvCacheCount + newTokenEnd(rowTok) - 1u, sweepEnd - 1u);
+            loRow[k] = keyStart(keyPos(rowTok));
+            hiRow[k] = min(kvCacheCount + keyEnd(rowTok) - 1u, sweepEnd - 1u);
         }
 #endif
 
         [[dont_unroll]]
         for (uint jBase = jStart; jBase < sweepEnd; jBase += wgKv)
         {
+            // This tile's cache rows: one shift from its positions (ring), or none.
+            const uint cacheBase = kvCacheBase - ((kvCacheRing != 0u) ? jBase - jBase % Tmax : 0u) * DH4;
             // Tile classes (workgroup-uniform): staged = vendor policy, any
             // padded-Dh shape, an f32 source, or the boundary/tail tile;
             // unstaged full tiles skip s_kv entirely. appendBeforeSweep folds
@@ -525,7 +583,7 @@ void main()
             if (stagedTile && !SMALL_KV)
             {
                 barrier();   // previous tile's V reads done with s_kv
-                stageKPart(jBase, 0u, fullCache, fullInput, inputEnd, kvCacheBase, kvInputBase, tid);
+                stageKPart(jBase, 0u, fullCache, fullInput, inputEnd, cacheBase, kvInputBase, tid);
                 barrier();
             }
 
@@ -547,7 +605,7 @@ void main()
                             // small buffer (prior s_kv readers are past the
                             // last workgroup barrier).
                             barrier();
-                            stageKChunkSmall(jBase, dc, inputEnd, kvCacheBase, kvInputBase, tid);
+                            stageKChunkSmall(jBase, dc, inputEnd, cacheBase, kvInputBase, tid);
                             barrier();
                             coopMatLoad(A, s_kv, (sg * MAT) * KB_STRIDE, KB_STRIDE,
                                         gl_CooperativeMatrixLayoutRowMajor);
@@ -557,7 +615,7 @@ void main()
                             if (dc > 0u && dc % CHUNKS_PART == 0u)   // next head-dim part
                             {
                                 barrier();   // this part's reads done
-                                stageKPart(jBase, dc / CHUNKS_PART, fullCache, fullInput, inputEnd, kvCacheBase, kvInputBase, tid);
+                                stageKPart(jBase, dc / CHUNKS_PART, fullCache, fullInput, inputEnd, cacheBase, kvInputBase, tid);
                                 barrier();
                             }
                             coopMatLoad(A, s_kv, (sg * MAT) * KV_STRIDE + dc * (MAT / 4u) - (dc / CHUNKS_PART) * DH4_PART,
@@ -566,7 +624,7 @@ void main()
                     }
                     else if (appendBeforeSweep != 0u || fullCache)   // appendBeforeSweep: input branch statically dead
                         A = loadKDirect(true,
-                                        kvCacheBase + (jBase + sg * MAT) * DH4 + dc * (MAT / 4u));
+                                        cacheBase + (jBase + sg * MAT) * DH4 + dc * (MAT / 4u));
                     else
                         A = loadKDirect(false,
                                         kvInputBase + (jBase - kvCacheCount + sg * MAT) * DH4
@@ -586,6 +644,7 @@ void main()
                 // My 4 rows are exactly one vec4 group: each column costs one
                 // vec4 read/write; S values stay in registers between passes.
                 const uint rowVec = rowBase / 4u;
+                const bool wholeTile = jBase >= rowsLo && jBase + wgKv - 1u <= rowsHi;
 
                 vec4 sv[COLS_PER_LANE];
                 vec4 rowMax = vec4(-1e30);
@@ -595,22 +654,24 @@ void main()
                     uint j = jBase + c;
                     // scale lands here, on the f32 S values.
                     vec4 v = s_s[c * S_STRIDE + rowVec] * scale;
-                    // Causality, window and range exclusion in one compare pair
-                    // per row: the sweepEnd term binds only when the cache ends
-                    // mid-tile — the new tokens in that tile are the LAST split's.
-#if HOIST
-                    [[unroll]] for (uint k = 0u; k < 4u; ++k)
-                        v[k] = (j <= hiRow[k] && j >= loRow[k]) ? v[k] : NEG_INF;
-#else
-                    [[unroll]] for (uint k = 0u; k < 4u; ++k)
+                    // Causality, span and range exclusion in one compare pair
+                    // per row, on the tiles that cut a row's range: the sweepEnd
+                    // term binds where the tile runs past my split's span.
+                    if (!wholeTile)
                     {
-                        uint rowTok = ROW_TOK(rowBase + k);
-                        uint qPos = kvCacheCount + rowTok;
-                        uint lo   = (windowSize == 0u || qPos < windowSize) ? 0u : qPos + 1u - windowSize;
-                        uint hi   = min(kvCacheCount + newTokenEnd(rowTok) - 1u, sweepEnd - 1u);
-                        v[k] = (j <= hi && j >= lo) ? v[k] : NEG_INF;
-                    }
+#if HOIST
+                        [[unroll]] for (uint k = 0u; k < 4u; ++k)
+                            v[k] = (j <= hiRow[k] && j >= loRow[k]) ? v[k] : NEG_INF;
+#else
+                        [[unroll]] for (uint k = 0u; k < 4u; ++k)
+                        {
+                            uint rowTok = ROW_TOK(rowBase + k);
+                            uint lo   = keyStart(keyPos(rowTok));
+                            uint hi   = min(kvCacheCount + keyEnd(rowTok) - 1u, sweepEnd - 1u);
+                            v[k] = (j <= hi && j >= lo) ? v[k] : NEG_INF;
+                        }
 #endif
+                    }
                     sv[cl] = v;
                     rowMax = max(rowMax, v);
                 }
@@ -639,7 +700,7 @@ void main()
             // V tile, part 0: as (a); unstaged full tiles skip it, SMALL_KV
             // boundary tiles stage per GEMM2 pass inside (d).
             if (stagedTile && !SMALL_KV)
-                stageVPart(jBase, 0u, fullCache, fullInput, inputEnd, kvCacheBase, kvInputBase, tid);
+                stageVPart(jBase, 0u, fullCache, fullInput, inputEnd, cacheBase, kvInputBase, tid);
             barrier();   // s_p and V staging ready
 
             // (d) GEMM2: my subgroup's head-dim chunks of PV = P * V; unstaged
@@ -653,7 +714,7 @@ void main()
                 for (uint pass = 0u; pass < VP; ++pass)
                 {
                     barrier();   // prior pass's V reads (pass 0: GEMM1's K chunk reads) done
-                    stageVPassSmall(jBase, pass, inputEnd, kvCacheBase, kvInputBase, tid);
+                    stageVPassSmall(jBase, pass, inputEnd, cacheBase, kvInputBase, tid);
                     barrier();
                     uint dc = pass * NUM_SG + sg;
                     if (dc < DH_CHUNKS)
@@ -681,7 +742,7 @@ void main()
                 if (!SMALL_KV && stagedTile && dc >= CHUNKS_PART && (dc - sg) % CHUNKS_PART == 0u)
                 {
                     barrier();   // this part's reads done
-                    stageVPart(jBase, dc / CHUNKS_PART, fullCache, fullInput, inputEnd, kvCacheBase, kvInputBase, tid);
+                    stageVPart(jBase, dc / CHUNKS_PART, fullCache, fullInput, inputEnd, cacheBase, kvInputBase, tid);
                     barrier();
                 }
                 coopmat<float16_t, gl_ScopeSubgroup, MAT, MAT, gl_MatrixUseAccumulator> PV =
@@ -697,7 +758,7 @@ void main()
                                     KV_STRIDE, gl_CooperativeMatrixLayoutRowMajor);
                     else if (appendBeforeSweep != 0u || fullCache)   // appendBeforeSweep: input branch statically dead
                         B = loadVDirect(true,
-                                        kvCacheBase + (jBase + kc * MAT) * DH4 + dc * (MAT / 4u));
+                                        cacheBase + (jBase + kc * MAT) * DH4 + dc * (MAT / 4u));
                     else
                         B = loadVDirect(false,
                                         kvInputBase + (jBase - kvCacheCount + kc * MAT) * DH4

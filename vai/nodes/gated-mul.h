@@ -1,7 +1,7 @@
 #ifndef VAI_NODES_GATED_MUL_H
 #define VAI_NODES_GATED_MUL_H
 
-#include "vai/nodes/node-common.h"
+#include "node-common.h"
 
 namespace vai::node {
 
@@ -32,7 +32,6 @@ public:
 
     struct Config {
         vai::Epilogue activation = vai::Epilogue::Silu;
-        vai::Dtype oDtype = vai::Dtype::None;   // None: oDefaultDtype
     } config_;
 
     GatedMul();
@@ -52,12 +51,11 @@ inline GatedMul::GatedMul(Config config)
 {
     addSlot("out0", NodeSlot::output);
     addSlot("in0", NodeSlot::input);
-
-    config_.oDtype = (config_.oDtype == Dtype::None) ? oDefaultDtype() : config_.oDtype;
 }
 
 inline void GatedMul::prepare()
 {
+    const Dtype oDtype = (oDtype_ == Dtype::None) ? oDefaultDtype() : oDtype_;
     const Tensor& inTen = (*this)["in0"];
 
     const Dtype iDtype = inTen.dtype();
@@ -66,11 +64,13 @@ inline void GatedMul::prepare()
     if (!pipe || p != pipeParams)
     {
         pipeParams = p;
+        // clang-format off
         pipe = pipelinePool().request("gated-mul", {
-            eva::constant_id<SPEC_ID_TYPE_O>(config_.oDtype),                  // typeO
+            eva::constant_id<SPEC_ID_TYPE_O>(oDtype),                  // typeO
             eva::constant_id<SPEC_ID_TYPE_I>(iDtype),                          // typeI
             eva::constant_id<SPEC_ID_EPILOGUE>((uint32_t) config_.activation)  // epilogue
         });
+        // clang-format on
         if (!descSet)
             descSet = gVaiDestSetPool(pipe.descSetLayout(0));
     }
@@ -80,7 +80,7 @@ inline void GatedMul::prepare()
 
     std::vector<uint32_t> outShape = inTen.shape();
     outShape.back() /= 2;
-    (*this)["out0"] = Tensor(outShape, config_.oDtype);
+    (*this)["out0"] = Tensor(outShape, oDtype);
 }
 
 inline void GatedMul::run(eva::CommandBuffer cmdBuff)

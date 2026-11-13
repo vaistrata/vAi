@@ -7,9 +7,11 @@ GPT-2 (Radford et al., 2019) is a decoder-only Transformer-based language model 
 ## Configuration
 
 ```cpp
+namespace gpt2 = model::production::gpt2;
+
 auto modelCfg = gpt2::ModelConfig::_124M();
 
-gpt2::Model model({
+gpt2::Net net({
     .device       = device,
     .defaultDtype = Dtype::Fp16,
     .ioDtypeHint  = Dtype::Fp32,
@@ -18,7 +20,7 @@ gpt2::Model model({
 
 ### NeuralNetConfig
 
-GPT-2 uses the defaults as they are, but forces `wDtype = fp32` for every `LayerNorm`.
+GPT-2 uses the defaults as they are; the loader reads every `LayerNorm`'s coefficients at fp32.
 See [NeuralNet](../03-usage/neural-net.md) for details.
 
 ### ModelConfig
@@ -74,12 +76,12 @@ Instead of using a separate `Add`, the final projection of each sublayer accepts
 Q, K, and V are computed with a single `{D, 3D}` projection and then split into three pieces along the head axis.
 
 ```cpp
-toQKV - splitHeads - perQKV - sliceQ - "Q"/attn - mergeOut - toOut;
+projQKV - splitHeads - perQKV - sliceQ - "Q"/attn - mergeOut - projOut;
                      perQKV - sliceK - "K"/attn;
                      perQKV - sliceV - "V"/attn;
 ```
 
-Because `toOut` has `acceptResidual = true`, it accepts the block residual as `residual` and adds it to the projection result.
+Because `projOut` has `acceptResidual = true`, it accepts the block residual as `residual` and adds it to the projection result.
 
 #### FeedForward
 
@@ -105,25 +107,27 @@ fc1 - fc2;   // 768 -> 3072 -> 768
 
 ## Checkpoint
 
-Checkpoints are placed in a folder for each size (`ModelConfig::variant`), with the tokenizer one level above them.
+Checkpoints are placed in a folder for each size (`ModelConfig::variant`) under `data/ckpts/gpt2/openai/`, and the tokenizer in `data/tokenizers/gpt2/`.
 All four sizes share `tokenizer.json`.
 
 ```
-data/gpt2/
-├── tokenizer.json
-├── 124M/
-│   └── model.safetensors
-├── 355M/
-│   └── model.safetensors
-└── ...
+data/
+├── ckpts/gpt2/openai/
+│   ├── 124M/
+│   │   └── model.safetensors
+│   ├── 355M/
+│   │   └── model.safetensors
+│   └── ...
+└── tokenizers/gpt2/
+    └── tokenizer.json
 ```
 
 Download them from the corresponding HuggingFace repository and use them as is without a separate conversion. The weights are licensed under the MIT License.
 
 ```bash
-mkdir -p data/gpt2/124M && cd data/gpt2
-curl -LO https://huggingface.co/openai-community/gpt2/resolve/main/tokenizer.json
-curl -L -o 124M/model.safetensors \
+mkdir -p data/ckpts/gpt2/openai/124M data/tokenizers/gpt2
+curl -L -o data/tokenizers/gpt2/tokenizer.json https://huggingface.co/openai-community/gpt2/resolve/main/tokenizer.json
+curl -L -o data/ckpts/gpt2/openai/124M/model.safetensors \
   https://huggingface.co/openai-community/gpt2/resolve/main/model.safetensors
 ```
 
@@ -131,12 +135,12 @@ Download `model.safetensors` and `tokenizer.json` directly from the **Files and 
 
 ### Weight loading
 
-The code that maps checkpoints to graph slots is in [`models/gpt2/openai-weights.h`](../../../models/gpt2/openai-weights.h).
-Only one line is needed at the call site. The specialization assembles the path (`VAI_DATA_DIR "/gpt2/" + modelCfg.variant`),
+The code that maps checkpoints to graph slots is in [`models/production/gpt2/openai-weights.h`](../../../models/production/gpt2/openai-weights.h).
+Only one line is needed at the call site. The specialization assembles the path (`VAI_DATA_DIR "/ckpts/gpt2/openai/" + modelCfg.variant`),
 so only the size needs to be set. For how the distribution-name tag works, see [`distribution-name-weights.h` in Writing custom models](../05-contributing-models.md#distribution-name-weightsh).
 
 ```cpp
-loadWeights<"openai">(model);
+loadWeights<"openai">(net);
 ```
 
 ## Execution
@@ -144,24 +148,24 @@ loadWeights<"openai">(model);
 ### Folder structure
 
 ```
-models/gpt2/
-├── model.h                       Model definition and NodeGroup definitions
-└── openai-weights.h              Mapping for OpenAI (HuggingFace `openai-community/*`) checkpoints
-
-examples/gpt2/
+models/production/gpt2/
+├── net.h                         Model definition and NodeGroup definitions
+├── openai-weights.h              Mapping for OpenAI (HuggingFace `openai-community/*`) checkpoints
 ├── demo.cpp                      demo-gpt2: complete one prompt + timing
 └── CMakeLists.txt
 
-data/gpt2/
-├── tokenizer.json
-└── <variant>/                    ModelConfig::variant: 124M, 355M, 774M, 1.5B
-    └── model.safetensors
+data/
+├── ckpts/gpt2/openai/
+│   └── <variant>/                    ModelConfig::variant: 124M, 355M, 774M, 1.5B
+│       └── model.safetensors
+└── tokenizers/gpt2/
+    └── tokenizer.json
 ```
 
 ### Build and run
 
 ```bash
-cmake -B build -DVAI_BUILD_EXAMPLES=ON
+cmake -B build
 cmake --build build --config RelWithDebInfo
 
 # Run

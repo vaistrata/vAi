@@ -1,5 +1,5 @@
-#ifndef VAI_NODES_COMMON_H
-#define VAI_NODES_COMMON_H
+#ifndef VAI_NODES_NODE_COMMON_H
+#define VAI_NODES_NODE_COMMON_H
 
 // Shared base for every builtin-node header: the Node/Tensor engine API, the
 // std headers the node implementations use, the Epilogue enum, and the build
@@ -17,6 +17,7 @@
 #include "vai/shaders/common/spec_constants.h"
 
 #define CEIL_DIV(M, N) (((M) + (N)-1) / (N))
+#define ROUNDUP(M, N) (CEIL_DIV(M, N) * (N))
 #define ROUNDUP_POW2(M, N) (((M) + (N)-1) & ~((N)-1))   // N must be a power of 2
 #define SHADER_SPV(name) SHADER_OUTPUT_DIR "/" name ".comp.spv"
 #define SPV_BLOB(name) eva::SpvBlob::readFrom(SHADER_SPV(name))
@@ -35,6 +36,12 @@ enum class Epilogue : uint32_t {
     Silu,
     Sigmoid,
     Max
+};
+
+// Where Linear and Convolution fold their "residual" in, relative to the epilogue.
+enum class ResidualOrder : uint32_t {
+    AfterEpilogue = 0,    // a following Add (e.g. YOLO's bottleneck)
+    BeforeEpilogue = 1,   // an Add ahead of the activation (e.g. ResNet's block, pi0's time MLP)
 };
 
 enum class RopeType {
@@ -67,4 +74,4 @@ inline uint32_t outerSize(const std::vector<uint32_t>& shape, size_t innerAxes =
 
 } // namespace vai
 
-#endif // VAI_NODES_COMMON_H
+#endif   // VAI_NODES_NODE_COMMON_H

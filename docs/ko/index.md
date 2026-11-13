@@ -67,11 +67,12 @@ vai/                        엔진 본체 (라이브러리 vAi)
 data/                       모델별 체크포인트·입력 데이터 등
 
 models/                     제공 모델들
-  <모델명>/
-    model.h                   모델 정의
+  <impl>/<모델명>/
+    net.h                     모델 정의
     <배포명>-weights.h         체크포인트 로더
+    demo.cpp                  demo-<모델명>
 
-examples/                   모델을 돌리는 데모들 (예: <모델명>/demo.cpp)
+examples/                   모델 데모 밖의 프로그램들 (예: mnist/, chat-llama3/)
 benchmarks/
 tests/
 external/eva/               Vulkan 래퍼 (서브모듈)

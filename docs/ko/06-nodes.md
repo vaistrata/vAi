@@ -1,6 +1,6 @@
 # 제공 노드들
 
-빌트인 노드 27종. 개념은 [노드(Node)](03-usage/node.md)를, 새 노드를 만드는 법은 [커스텀 노드와 커널](07-contributing-nodes.md)을 참조하세요.
+빌트인 노드 29종. 개념은 [노드(Node)](03-usage/node.md)를, 새 노드를 만드는 법은 [커스텀 노드와 커널](07-contributing-nodes.md)을 참조하세요.
 
 ## 목록
 
@@ -9,17 +9,19 @@
 | [Activation](#activation) | Applies an element-wise activation. | `activation.comp` |
 | [Add](#add) | element-wise addition for residual connections | `add.comp` |
 | [Argmax](#argmax) | Row-wise argmax / greedy sampling | `argmax.comp` |
-| [Attention](#attention) | fused KV cache append + causal attention (GQA), split between three kernels | `attention-fa-cm.comp`, `attention-fa.comp`, `attention-fa-reduce.comp`, `attention.comp` |
-| [AttentionFused](#attentionfused) | fused-QKV KV cache update + causal scaled-dot-product attention | `attention-fused.comp` |
-| [BatchNorm](#batchnorm) | batch normalization (inference mode) | `batchnorm.comp` |
+| [Attention](#attention) | fused KV cache append + causal attention (GQA), split between three kernels | `attention-fa-intel.comp`, `attention-fa-cm.comp`, `attention-fa.comp`, `attention-fa-reduce.comp`, `attention.comp` |
 | [Concat](#concat) | join inputs along one axis | `concat.comp` |
 | [Convolution](#convolution) | 2D convolution with device-selected direct, implicit, or Winograd plans | `conv-k1s1-gemm-cm.comp`, `conv-k1s1-gemm.comp`, `conv-k3s2-gemm-cm.comp`, `conv-k3s1-implicit-gemm-cm.comp`, `conv-k3s1-implicit-gemm.comp`, `conv-implicit-gemm.comp`, `conv-implicit-gemm-cm.comp`, `conv-k3s2-gemm.comp`, `cm-transform.comp`, `conv-k3s1-winograd-filter-transform.comp`, `conv-k3s1-winograd-input.comp`, `conv-k3s1-winograd-output.comp`, `bn-reduce.comp`, `conv-k3s1-winograd-gemm.comp`, `conv-k3s1-winograd-gemm-cm.comp` |
+| [CyclicTableReader](#cyclictablereader) | read successive table rows, wrapping at the end | `cyclic-table-reader.comp` |
+| [EleAffine](#eleaffine) | element-wise affine, O = scale * in0 + shift | `ele-affine.comp` |
 | [Flatten](#flatten) | Flatten tensor to 1D | — |
 | [Gate](#gate) | conditional branch (no computation) | — |
 | [GatedMul](#gatedmul) | element-wise multiply with one operand activated (GLU gating) | `gated-mul.comp` |
+| [GroupNorm](#groupnorm) | group normalization over a CHW feature map | `group-norm.comp` |
 | [Identity](#identity) | Pass-through node (no computation) | — |
+| [IndexCopy](#indexcopy) | write source slices at listed indices, as torch.index_copy | `index-copy.comp` |
 | [LayerNorm](#layernorm) | layer normalization over the feature axis, single kernel | `layer-norm.comp` |
-| [Linear](#linear) | O = I · Wᵀ, split between two output decompositions | `linear-slab.comp`, `linear-cm.comp`, `linear-tile.comp`, `linear-reduce.comp` |
+| [Linear](#linear) | O = I · Wᵀ, split between two output decompositions | `linear-pack-intel.comp`, `linear-slab.comp`, `linear-tile-intel.comp`, `linear-cm.comp`, `linear-tile.comp`, `linear-reduce.comp` |
 | [Mul](#mul) | Element-wise multiplication | `mul.comp` |
 | [NearestUpsample](#nearestupsample) | Replicates CHW pixels by an integer scale factor. | `upsample.comp` |
 | [Permute](#permute) | Permutes the axes of a tensor of any rank. | `permute.comp` |
@@ -27,6 +29,7 @@
 | [Reshape](#reshape) | Reshape tensor to specified dimensions | — |
 | [RmsNorm](#rmsnorm) | RMS normalization over the feature axis, single kernel | `rms-norm.comp` |
 | [Rope](#rope) | rotary position embedding (half-split rotation) | `rope.comp` |
+| [RowSliceScatter](#rowslicescatter) | write slices into rows, as torch.slice_scatter on dim 0 | — |
 | [Slice](#slice) | Take a run of consecutive indices along one axis | `slice.comp` |
 | [TimeEmbedding](#timeembedding) | sinusoidal embedding of a timestep the node counts down itself | `time-embedding.comp` |
 | [TokenEmbedding](#tokenembedding) | token embedding, optionally fused with positional embedding | `token-embedding.comp` |
@@ -59,8 +62,6 @@ Applies an element-wise activation.
 |---|---|---|---|
 | `epilogue` | `vai::Epilogue` | `vai::Epilogue::None` |  |
 | `inPlace` | `bool` | `false` |  |
-| `iDtype` | `vai::Dtype` | `vai::Dtype::None` |  |
-| `oDtype` | `vai::Dtype` | `vai::Dtype::None` |  |
 
 **동작 및 제약**
 
@@ -92,13 +93,6 @@ element-wise addition for residual connections
 | `in1` | input |  |
 | `out0` | output |  |
 
-**Config**
-
-| 필드 | 타입 | 기본값 | 설명 |
-|---|---|---|---|
-| `iDtype` | `vai::Dtype` | `vai::Dtype::None` | in0 and in1 (shared) |
-| `oDtype` | `vai::Dtype` | `vai::Dtype::None` |  |
-
 **동작 및 제약**
 
 Inputs must have identical shapes and dtypes.
@@ -127,12 +121,6 @@ Row-wise argmax / greedy sampling
 | `in0` | input |  |
 | `out0` | output |  |
 
-**Config**
-
-| 필드 | 타입 | 기본값 | 설명 |
-|---|---|---|---|
-| `iDtype` | `vai::Dtype` | `vai::Dtype::None` | logits dtype (output is raw uint32 indices) |
-
 **동작 및 제약**
 
 Each row is reduced independently. out0[m] is the index of the largest value in
@@ -152,7 +140,7 @@ fused KV cache append + causal attention (GQA), split between three kernels
 
 **시그니처**
 
-- 입력: Q [..., Hq, Tq, headDim], K / V [..., Hkv, Tq, headDim]
+- 입력: Q [..., Hq, Tq, headDim], K / V [..., Hkv, Tkv, headDim]
 - 출력: out0 attention [..., Tq, Hq, headDim]
 
 **슬롯**
@@ -176,10 +164,8 @@ fused KV cache append + causal attention (GQA), split between three kernels
 | `numQHeads` | `uint32_t` | — |  |
 | `numKVHeads` | `uint32_t` | `0` | for GQA (Hkv < numQHeads); 0 → Hkv = numQHeads |
 | `kvCacheSize` | `uint32_t` | `0` | tokens the cache holds; 0 = no cache at all |
-| `windowSize` | `uint32_t` | `0` | sliding-window span (0 = attend the whole prefix) |
-| `qDtype` | `vai::Dtype` | `vai::Dtype::None` | Q |
-| `kvDtype` | `vai::Dtype` | `vai::Dtype::None` | K / V, input and cache alike |
-| `oDtype` | `vai::Dtype` | `vai::Dtype::None` |  |
+| `kvCacheDtype` | `vai::Dtype` | `vai::Dtype::None` | K / V cache; required when kvCacheSize > 0 |
+| `kvCacheRing` | `bool` | `false` | the cache keeps the last kvCacheSize positions, rounded up to kvRingAlign |
 
 **동작 및 제약**
 
@@ -193,6 +179,8 @@ not V in between — e.g. RoPE). Supports GQA (numKVHeads < numQHeads).
 fixed 16x64 tile; prefill and GQA-packed decode on cm-capable devices.
 - scalar FA (attention-fa): flash attention with per-(shape,
 vendor) tuned tiles; everything the cm gates reject.
+- Intel FA (attention-fa-intel): Intel parts without a coopmat path;
+a 16-row tile packs one KV group's heads, subgroup-broadcast products.
 - naive (attention): the unconditional fallback — unfamiliar
 devices degrade instead of crashing. See ggmlFATuningParams().
 
@@ -201,14 +189,27 @@ change re-requests the pipeline from the pool. Every path leaves the KV
 cache in the identical state (fused append), so the graph meaning does not
 depend on which one runs.
 
-Sliding window (windowSize > 0): a query at position p attends
-[p - windowSize + 1, p] (e.g. Gemma3's local layers). The cache still holds every
-token — the window narrows the sweep, not the storage.
+The mask's span bounds a query to its last span keys, a sliding window
+(e.g. Gemma3's local layers). A ring cache (kvCacheRing) then keeps only the
+last kvCacheSize positions, position p at row p % kvCacheSize; the counter
+keeps counting positions. A dispatch overwrites the rows of its Tkv oldest
+positions, so kvCacheSize >= span + Tkv - 1 keeps every query's span whole.
+The node rounds a ring up to kvRingAlign, so no key tile wraps it.
 
 kvCacheSize = 0 is orthogonal to both: it drops the cache itself, so a
 dispatch attends its own tokens and nothing else (an encoder, e.g. SigLIP).
 Nothing is allocated and no counter is wired — the cache and counter
 descriptors go null, and the 0 a null counter reads back is the whole trick.
+
+Tkv may differ from Tq: queries and keys align at their ends, so query t
+reaches the keys up to its own mask end shifted by Tkv - Tq (e.g. a decoder
+over its encoder's output, Tq queries on Tkv keys).
+With a cache, K / V may stay unwired (Tkv = 0): the dispatch attends the
+cache alone and appends nothing, and the model keeps the counter at the
+rows held.
+
+No mask (setCausalMask never called) binds the mask null: every query
+attends every key it reaches.
 
 Split-K (decode): when the grid would underfill the GPU, the cache sweep is
 split into kCount segments accumulating partials (partialO/partialML) that
@@ -220,96 +221,11 @@ from kvCacheCount per forward.
 
 **커널**
 
+- `vai/shaders/attention-fa-intel.comp`
 - `vai/shaders/attention-fa-cm.comp`
 - `vai/shaders/attention-fa.comp`
 - `vai/shaders/attention-fa-reduce.comp`
 - `vai/shaders/attention.comp`
-
----
-
-## AttentionFused
-
-fused-QKV KV cache update + causal scaled-dot-product attention
-
-소스: [`vai/nodes/attention-fused.h`](../../vai/nodes/attention-fused.h)
-
-**시그니처**
-
-- 입력: in0 QKV [Hq + 2*Hkv, Tq, headDim] (Q=[0,Hq) K=[Hq,Hq+Hkv) V=[Hq+Hkv,Hq+2*Hkv))
-- 출력: out0 attention [Hq, Tq, headDim]
-
-**슬롯**
-
-| 슬롯 | 종류 | 비고 |
-|---|---|---|
-| `in0` | input |  |
-| `out0` | output |  |
-| `K_cache` | persistent |  |
-| `V_cache` | persistent |  |
-
-**Config**
-
-| 필드 | 타입 | 기본값 | 설명 |
-|---|---|---|---|
-| `headDim` | `uint32_t` | — |  |
-| `numQHeads` | `uint32_t` | — |  |
-| `numKVHeads` | `uint32_t` | `0` | for GQA (Hkv < numQHeads); 0 → Hkv = numQHeads |
-| `kvCacheSize` | `uint32_t` | — |  |
-| `cacheDtype` | `vai::Dtype` | `vai::Dtype::None` |  |
-| `iDtype` | `vai::Dtype` | `vai::Dtype::None` | fused QKV |
-| `oDtype` | `vai::Dtype` | `vai::Dtype::None` |  |
-
-**동작 및 제약**
-
-Reads Q / K / V directly from the one fused buffer via per-block offsets — no
-pre-split copy. Supports GQA (numKVHeads < numQHeads).
-
-**커널**
-
-- `vai/shaders/attention-fused.comp`
-
----
-
-## BatchNorm
-
-batch normalization (inference mode)
-
-소스: [`vai/nodes/batch-norm.h`](../../vai/nodes/batch-norm.h)
-
-**시그니처**
-
-- 입력: in0 [C, H, W]
-- 출력: γ[c] * (in0 - μ[c]) * rsqrt(σ²[c] + eps) + β[c]
-
-**슬롯**
-
-| 슬롯 | 종류 | 비고 |
-|---|---|---|
-| `in0` | input |  |
-| `out0` | output |  |
-| `beta` | persistent |  |
-| `gamma` | persistent |  |
-| `mean` | persistent |  |
-| `variance` | persistent |  |
-
-**Config**
-
-| 필드 | 타입 | 기본값 | 설명 |
-|---|---|---|---|
-| `channels` | `uint32_t` | — |  |
-| `eps` | `float` | `1e-5f` |  |
-| `wDtype` | `vai::Dtype` | `vai::Dtype::None` |  |
-| `iDtype` | `vai::Dtype` | `vai::Dtype::None` |  |
-| `oDtype` | `vai::Dtype` | `vai::Dtype::None` |  |
-
-**동작 및 제약**
-
-gamma, beta, mean, and variance are one-dimensional tensors of length C. This is
-inference-only normalization; stored statistics are not updated.
-
-**커널**
-
-- `vai/shaders/batchnorm.comp`
 
 ---
 
@@ -338,8 +254,6 @@ join inputs along one axis
 | `axis` | `int` | `0` | negative counts from the end |
 | `inputCount` | `uint32_t` | `2` |  |
 | `allowPartialInputs` | `bool` | `false` |  |
-| `iDtype` | `vai::Dtype` | `vai::Dtype::None` | in0..inN (shared) |
-| `oDtype` | `vai::Dtype` | `vai::Dtype::None` |  |
 
 **동작 및 제약**
 
@@ -370,9 +284,9 @@ Off, every input is required, so a recording that cannot supply one drops this n
 
 **시그니처**
 
-- 입력: in0 [Ci, Hi, Wi], optional residual [Co, Ho, Wo]
-- 파라미터: weight [Co, Ci, K, K] and bias [Co], or BatchNorm affine inputs [Co]
-- 출력: out0 [Co, ceil(Hi / stride), ceil(Wi / stride)]
+- 입력: in0 [..., Ci, Hi, Wi], optional residual [..., Co, Ho, Wo]
+- 파라미터: weight [Co, Ci, K, K], optional scale [Co] and bias [Co]
+- 출력: out0 [..., Co, ceil(Hi / stride), ceil(Wi / stride)]
 
 **슬롯**
 
@@ -396,18 +310,20 @@ Off, every input is required, so a recording that cannot supply one drops this n
 | `outChannels` | `uint32_t` | — |  |
 | `kernelSize` | `uint32_t` | — |  |
 | `stride` | `uint32_t` | — |  |
-| `hasBias` | `bool` | `true` |  |
-| `hasScale` | `bool` | `false` |  |
+| `acceptResidual` | `bool` | `false` | input "residual" |
+| `residualOrder` | `vai::ResidualOrder` | `vai::ResidualOrder::AfterEpilogue` |  |
 | `epilogue` | `vai::Epilogue` | `vai::Epilogue::None` |  |
-| `wDtype` | `vai::Dtype` | `vai::Dtype::None` | conv weight |
-| `iDtype` | `vai::Dtype` | `vai::Dtype::None` |  |
-| `oDtype` | `vai::Dtype` | `vai::Dtype::None` |  |
 
 **동작 및 제약**
 
-Exactly one of bias or BatchNorm fusion must be enabled. Odd kernels use symmetric
-same-padding, so each spatial output size is ceil(inputSize / stride). Residual
-fusion is available only for BatchNorm K=3, stride=1, and equal input/output channels.
+The "scale" and "bias" slots always exist; each applies only when the weight
+loader filled it. Odd kernels use symmetric same-padding, so each spatial
+output size is ceil(inputSize / stride).
+acceptResidual opens the "residual" input (input dtype), added after the epilogue
+or, with ResidualOrder::BeforeEpilogue, before it.
+The axes ahead of Ci are a batch of images. The plan is one image's; every
+dispatch stacks the images on its z axis, and each kernel offsets its buffers
+to its image.
 
 **커널**
 
@@ -426,6 +342,85 @@ fusion is available only for BatchNorm K=3, stride=1, and equal input/output cha
 - `vai/shaders/bn-reduce.comp`
 - `vai/shaders/conv-k3s1-winograd-gemm.comp`
 - `vai/shaders/conv-k3s1-winograd-gemm-cm.comp`
+
+---
+
+## CyclicTableReader
+
+read successive table rows, wrapping at the end
+
+소스: [`vai/nodes/cyclic-table-reader.h`](../../vai/nodes/cyclic-table-reader.h)
+
+**시그니처**
+
+- 입력: in0 [*] only scheduling: the node runs when it is fed
+- 파라미터: table [numRows, ...] rows read in cyclic order, at the loader's dtype
+- 출력: out0 table's shape without the leading axis, at oDtype
+
+**슬롯**
+
+| 슬롯 | 종류 | 비고 |
+|---|---|---|
+| `in0` | input |  |
+| `out0` | output |  |
+| `table` | persistent |  |
+
+**Config**
+
+| 필드 | 타입 | 기본값 | 설명 |
+|---|---|---|---|
+| `numRows` | `uint32_t` | — | number of rows in the table |
+
+**동작 및 제약**
+
+Run k after rewind() copies row k % numRows, so a loop whose per-step
+values depend on the step alone (e.g. pi0.5's adaRMS modulation) reads them
+with no host write, the way TimeEmbedding walks t. rewind() starts over.
+
+**커널**
+
+- `vai/shaders/cyclic-table-reader.comp`
+
+---
+
+## EleAffine
+
+element-wise affine, O = scale * in0 + shift
+
+소스: [`vai/nodes/ele-affine.h`](../../vai/nodes/ele-affine.h)
+
+**시그니처**
+
+- 입력: in0 [..., D] scale broadcast to in0's shape (right-aligned, size-1 axes broadcast); scale 1 when absent shift likewise; shift 0 when absent
+- 출력: out0 in0's shape
+
+**슬롯**
+
+| 슬롯 | 종류 | 비고 |
+|---|---|---|
+| `in0` | input |  |
+| `out0` | output |  |
+
+**Config**
+
+| 필드 | 타입 | 기본값 | 설명 |
+|---|---|---|---|
+| `scaleAsInput` | `bool` | `false` | input instead of persistent |
+| `shiftAsInput` | `bool` | `false` |  |
+
+**동작 및 제약**
+
+scale / shift are inputs under scaleAsInput / shiftAsInput, otherwise
+parameters at the loader's dtype. Each applies when present: filled by the
+loader, or wired; at least one has to be. Each may broadcast over any axes as long as the axes it keeps
+are adjacent, e.g. [1, D] over [T, D], or [C, 1, 1] over [C, H, W].
+
+An add is shift alone, a multiply scale alone, and a gated residual x + g * y
+both, EleAffine(in0 = y, scale = g, shift = x) (e.g. pi0.5's adaRMS layers).
+
+**커널**
+
+- `vai/shaders/ele-affine.comp`
 
 ---
 
@@ -513,8 +508,6 @@ element-wise multiply with one operand activated (GLU gating)
 | 필드 | 타입 | 기본값 | 설명 |
 |---|---|---|---|
 | `activation` | `vai::Epilogue` | `vai::Epilogue::Silu` |  |
-| `iDtype` | `vai::Dtype` | `vai::Dtype::None` |  |
-| `oDtype` | `vai::Dtype` | `vai::Dtype::None` |  |
 
 **동작 및 제약**
 
@@ -528,6 +521,67 @@ none: bilinear.
 **커널**
 
 - `vai/shaders/gated-mul.comp`
+
+---
+
+## GroupNorm
+
+group normalization over a CHW feature map
+
+소스: [`vai/nodes/group-norm.h`](../../vai/nodes/group-norm.h)
+
+**시그니처**
+
+- 입력: in0 [..., C, H, W], optional residual [..., C, H, W]
+- 출력: epilogue(scale[c] * (in0 - μ[g(c)]) * rsqrt(σ²[g(c)] + eps) + shift[c]) + residual
+
+**슬롯**
+
+| 슬롯 | 종류 | 비고 |
+|---|---|---|
+| `in0` | input |  |
+| `residual` | input |  |
+| `out0` | output |  |
+
+**Config**
+
+| 필드 | 타입 | 기본값 | 설명 |
+|---|---|---|---|
+| `groups` | `uint32_t` | — |  |
+| `eps` | `float` | `1e-5f` |  |
+| `coeffsAsInputs` | `bool` | `false` | scale / shift are inputs, not parameters |
+| `acceptResidual` | `bool` | `false` | input "residual" |
+| `residualOrder` | `vai::ResidualOrder` | `vai::ResidualOrder::AfterEpilogue` |  |
+| `epilogue` | `vai::Epilogue` | `vai::Epilogue::None` |  |
+
+**동작 및 제약**
+
+The channel axis is third from the end; the axes before it are independent
+samples. scale / shift [C] are parameters, or inputs under coeffsAsInputs
+(e.g. AdaGN's timestep modulation); shift applies when present, filled by
+the loader or wired. acceptResidual opens the "residual" input (input
+dtype), added after the epilogue or, with ResidualOrder::BeforeEpilogue,
+before it. The channels split into `groups` consecutive groups; each group's statistics
+are computed at run time over its C/groups channels and all of their spatial
+positions (unlike BatchNorm, which reads μ/σ² trained offline). One
+workgroup per group (group-norm), statistics from a shifted 1-pass
+reduction accumulated in fp32 regardless of I/O dtypes — the reduction is
+subgroupAdd two-level when the device has subgroup arithmetic, a
+shared-memory tree otherwise.
+
+Both the workgroup size and the shape itself are baked into the pipeline, so
+it is requested in prepare() once the shape is known and re-requested when
+any of that changes (a no-op while it stays put) — same arrangement as
+LayerNorm. The shape is in there because the kernel's per-element
+channel index is j / HW: a push-constant HW costs an integer division per
+element, a specialization-constant one is a shift or a multiply-high. That
+makes the pipeline key per (dtype, group geometry), which is a handful of
+entries for a model — a ResNet-18 stage or a UNet1D level each contribute
+one, and every block inside it reuses that.
+
+**커널**
+
+- `vai/shaders/group-norm.comp`
 
 ---
 
@@ -555,6 +609,48 @@ The output aliases the input buffer; no computation or copy occurs.
 
 ---
 
+## IndexCopy
+
+write source slices at listed indices, as torch.index_copy
+
+소스: [`vai/nodes/index-copy.h`](../../vai/nodes/index-copy.h)
+
+**시그니처**
+
+- 입력: in0 [d0, .., d(r-1)] in1 in0's shape with d(axis) replaced by N
+- 출력: out0 in0 with out0[.., index[n], ..] = in1[.., n, ..] along axis
+
+**슬롯**
+
+| 슬롯 | 종류 | 비고 |
+|---|---|---|
+| `in0` | input |  |
+| `in1` | input |  |
+| `out0` | output |  |
+
+**Config**
+
+| 필드 | 타입 | 기본값 | 설명 |
+|---|---|---|---|
+| `axis` | `uint32_t` | `0` |  |
+
+**동작 및 제약**
+
+The index is N uint32 in a host-visible buffer the model owns and hands over
+with setIndex. It is read at dispatch time, so rewriting it after sync() needs
+no re-recording. An index past d(axis) leaves its slice unwritten.
+
+out0 aliases in0 and only the N slices are written (= index_copy_), so no
+other node may read in0 after this one. in1 may be left out of a recording,
+and out0 then aliases in0 with nothing recorded. Bytes move as they are, so
+in0 and in1 share a dtype.
+
+**커널**
+
+- `vai/shaders/index-copy.comp`
+
+---
+
 ## LayerNorm
 
 layer normalization over the feature axis, single kernel
@@ -571,23 +667,24 @@ layer normalization over the feature axis, single kernel
 | 슬롯 | 종류 | 비고 |
 |---|---|---|
 | `in0` | input |  |
+| `residual` | input |  |
 | `out0` | output |  |
-| `beta` | persistent | 옵션에 따라 존재 |
-| `gamma` | persistent |  |
 
 **Config**
 
 | 필드 | 타입 | 기본값 | 설명 |
 |---|---|---|---|
 | `eps` | `float` | `1e-5f` |  |
-| `hasBeta` | `bool` | `true` |  |
-| `wDtype` | `vai::Dtype` | `vai::Dtype::Fp32` | gamma / beta; the statistic is fp32 regardless |
-| `iDtype` | `vai::Dtype` | `vai::Dtype::None` |  |
-| `oDtype` | `vai::Dtype` | `vai::Dtype::None` |  |
+| `coeffsAsInputs` | `bool` | `false` | scale / shift are inputs, not parameters |
+| `acceptResidual` | `bool` | `false` | input "residual", added to the output |
 
 **동작 및 제약**
 
-O[i, j] = (I[i, j] - mean(I[i, :])) * rsqrt(var(I[i, :]) + eps) * γ[j] + β[j]
+scale / shift   [D] (or [1, D] as an input); parameters, or inputs computed
+upstream under Config::coeffsAsInputs (e.g. DiT's adaLN).
+shift applies when present: filled by the loader, or wired.
+
+O[i, j] = (I[i, j] - mean(I[i, :])) * rsqrt(var(I[i, :]) + eps) * scale[j] + shift[j]
 
 One workgroup per row (layer-norm); the row statistics come from a
 shifted 1-pass reduction (Chan–Golub–LeVeque) accumulated in fp32
@@ -627,8 +724,7 @@ O = I · Wᵀ, split between two output decompositions
 | `in0` | input |  |
 | `residual` | input | 옵션에 따라 존재 |
 | `out0` | output |  |
-| `bias` | persistent | 옵션에 따라 존재 |
-| `bias2d` | persistent | 옵션에 따라 존재 |
+| `bias` | persistent |  |
 | `weight` | persistent |  |
 | `partial` | temporary |  |
 
@@ -638,15 +734,11 @@ O = I · Wᵀ, split between two output decompositions
 |---|---|---|---|
 | `inDim` | `uint32_t` | — |  |
 | `outDim` | `uint32_t` | — |  |
-| `hasBias` | `bool` | `false` |  |
-| `hasBias2D` | `bool` | `false` | parameter "bias2d" [M, N], one bias per position |
-| `acceptResidual` | `bool` | `false` | input "residual" [M, N], a following Add folded in |
+| `acceptResidual` | `bool` | `false` | input "residual" |
+| `residualOrder` | `vai::ResidualOrder` | `vai::ResidualOrder::AfterEpilogue` |  |
 | `epilogue` | `vai::Epilogue` | `vai::Epilogue::None` |  |
-| `wDtype` | `vai::Dtype` | `vai::Dtype::None` |  |
-| `iDtype` | `vai::Dtype` | `vai::Dtype::None` |  |
-| `oDtype` | `vai::Dtype` | `vai::Dtype::None` |  |
+| `scalarScale` | `float` | `1.0f` | s, right after the epilogue |
 | `splitSize` | `uint32_t` | `0` | split-K: K length per split (0: ggml auto heuristic) |
-| `accDtype` | `vai::Dtype` | `vai::Dtype::None` |  |
 
 **동작 및 제약**
 
@@ -659,8 +751,12 @@ in-kernel. See useSlabPath().
 - tile (M > 8): a workgroup owns a wgM x wgN tile. Two kernels share the
 frame, chosen per device in ggmlMulmmTileParams(): scalar
 (linear-tile, each thread accumulates its own outputs) and
-cooperative-matrix (linear-cm, subgroup MMA tiles). Everything
-below applies to both:
+cooperative-matrix (linear-cm, subgroup MMA tiles).
+- Intel (useIntelTile; every M, slab included): linear-tile-intel, a port of
+OpenVINO's fully_connected_gpu_bf_tiled, reading W packed once on the GPU
+(packWeightIntel); its tile choice is intelTileParams(), its split
+intelTileSplitCount().
+Everything below applies to every tile kernel:
 
 The tile params are selected per output shape in prepare(); when a shape
 change selects a different tile, the pipeline is re-requested from the pool.
@@ -668,19 +764,24 @@ change selects a different tile, the pipeline is re-requested from the pool.
 Split-K (splitSize option; 0 selects the ggml heuristic per shape)
 accumulates partials P[splitCount, M, N] (oDtype) in a temporary buffer
 and folds them in a second pass (linear-reduce); bias / epilogue / the
-addend live in that reduce pass, so requesting them without splitting still
+residual live in that reduce pass, so requesting them without splitting still
 runs the reduce as a plain epilogue pass (splitCount = 1).
 
-One addend may be folded into the result, after the epilogue so a fused
-activation stays inside the projection. Its source is exclusive: acceptResidual
-opens the "residual" input and folds a following Add in, hasBias2D opens the
-"bias2d" parameter for a bias that varies per row as well as per column. The
-source also picks its dtype, iDtype for the activation and wDtype for the
-parameter, which the kernels take as hasAddend 1 and 2.
+O = s · epilogue(I · Wᵀ + bias) + R      residualOrder AfterEpilogue
+O = s · epilogue(I · Wᵀ + bias + R)      residualOrder BeforeEpilogue
+
+s is Config::scalarScale (e.g. dt of an Euler step x + dt · v), 1 by default.
+
+"bias" (its own dtype) is a parameter and "residual" R (oDtype) an input. Each is
+[M, N] or rows that repeat over M: [N], or one image's position table under
+a batch. The "bias" slot always exists; the bias applies only when the
+weight loader filled it.
 
 **커널**
 
+- `vai/shaders/linear-pack-intel.comp`
 - `vai/shaders/linear-slab.comp`
+- `vai/shaders/linear-tile-intel.comp`
 - `vai/shaders/linear-cm.comp`
 - `vai/shaders/linear-tile.comp`
 - `vai/shaders/linear-reduce.comp`
@@ -705,13 +806,6 @@ Element-wise multiplication
 | `in0` | input |  |
 | `in1` | input |  |
 | `out0` | output |  |
-
-**Config**
-
-| 필드 | 타입 | 기본값 | 설명 |
-|---|---|---|---|
-| `iDtype` | `vai::Dtype` | `vai::Dtype::None` | in0 and in1 (shared) |
-| `oDtype` | `vai::Dtype` | `vai::Dtype::None` |  |
 
 **동작 및 제약**
 
@@ -741,13 +835,6 @@ Replicates CHW pixels by an integer scale factor.
 | `in0` | input |  |
 | `out0` | output |  |
 
-**Config**
-
-| 필드 | 타입 | 기본값 | 설명 |
-|---|---|---|---|
-| `iDtype` | `vai::Dtype` | `vai::Dtype::None` |  |
-| `oDtype` | `vai::Dtype` | `vai::Dtype::None` |  |
-
 **동작 및 제약**
 
 scaleFactor must be greater than one. Each input pixel is replicated without
@@ -776,13 +863,6 @@ Permutes the axes of a tensor of any rank.
 |---|---|---|
 | `in0` | input |  |
 | `out0` | output |  |
-
-**Config**
-
-| 필드 | 타입 | 기본값 | 설명 |
-|---|---|---|---|
-| `iDtype` | `vai::Dtype` | `vai::Dtype::None` |  |
-| `oDtype` | `vai::Dtype` | `vai::Dtype::None` |  |
 
 **동작 및 제약**
 
@@ -827,8 +907,6 @@ The rank is a specialization constant, so the pool holds one pipeline per rank.
 | `ceilMode` | `bool` | `false` | a last window that would start in the right padding is dropped |
 | `countIncludePad` | `bool` | `true` | Avg: padding counts in the divisor, as PyTorch's default |
 | `channelsLast` | `bool` | `false` |  |
-| `iDtype` | `vai::Dtype` | `vai::Dtype::None` |  |
-| `oDtype` | `vai::Dtype` | `vai::Dtype::None` |  |
 
 **동작 및 제약**
 
@@ -877,7 +955,6 @@ RMS normalization over the feature axis, single kernel
 **시그니처**
 
 - 입력: in0 activations [..., D]
-- 파라미터: scale [D]
 - 출력: out0 normalized [..., D]
 
 **슬롯**
@@ -885,21 +962,25 @@ RMS normalization over the feature axis, single kernel
 | 슬롯 | 종류 | 비고 |
 |---|---|---|
 | `in0` | input |  |
+| `residual` | input |  |
 | `out0` | output |  |
-| `scale` | persistent |  |
 
 **Config**
 
 | 필드 | 타입 | 기본값 | 설명 |
 |---|---|---|---|
 | `eps` | `float` | `1e-5f` |  |
-| `wDtype` | `vai::Dtype` | `vai::Dtype::Fp32` | scale; the statistic is fp32 regardless |
-| `iDtype` | `vai::Dtype` | `vai::Dtype::None` |  |
-| `oDtype` | `vai::Dtype` | `vai::Dtype::None` |  |
+| `coeffsAsInputs` | `bool` | `false` | scale / shift are inputs, not parameters |
+| `acceptResidual` | `bool` | `false` | input "residual", added to the output |
 
 **동작 및 제약**
 
-O[i, j] = I[i, j] * rsqrt(mean(I[i, :]^2) + eps) * scale[j]
+scale / shift   [D] (or [1, D] as an input), each applied when present: a
+parameter the loader filled, or an input wired upstream under
+Config::coeffsAsInputs (e.g. pi0.5's adaRMS)
+residual       [..., D] as in0, an input under Config::acceptResidual
+
+O[i, j] = I[i, j] * rsqrt(mean(I[i, :]^2) + eps) (* scale[j]) (+ shift[j]) (+ residual[i, j])
 
 The row statistic is a 1-pass sum of squares accumulated in fp32 regardless
 of I/O dtypes. The workgroup size depends on D, so the pipeline is requested in
@@ -937,8 +1018,6 @@ rotary position embedding (half-split rotation)
 |---|---|---|---|
 | `cfg` | `RopeConfig` | — | frequencies; describe the whole model |
 | `headDim` | `uint32_t` | — | Dh, must be even |
-| `iDtype` | `vai::Dtype` | `vai::Dtype::None` |  |
-| `oDtype` | `vai::Dtype` | `vai::Dtype::None` |  |
 
 **동작 및 제약**
 
@@ -955,6 +1034,39 @@ wavelengths, interpolating the band between the two frequency bounds.
 **커널**
 
 - `vai/shaders/rope.comp`
+
+---
+
+## RowSliceScatter
+
+write slices into rows, as torch.slice_scatter on dim 0
+
+소스: [`vai/nodes/row-slice-scatter.h`](../../vai/nodes/row-slice-scatter.h)
+
+**시그니처**
+
+- 입력: in0 [T, D] in1 [B, S, D] or [S, D] (S == sliceSize; B slices, one when rank 2)
+- 출력: out0 [T, D], in0 with rows [rowStarts[b], rowStarts[b] + S) taken from slice b
+
+**슬롯**
+
+| 슬롯 | 종류 | 비고 |
+|---|---|---|
+| `in0` | input |  |
+| `in1` | input |  |
+| `out0` | output |  |
+
+**Config**
+
+| 필드 | 타입 | 기본값 | 설명 |
+|---|---|---|---|
+| `sliceSize` | `uint32_t` | — | S: rows in one slice; 0 when in1 is never fed |
+
+**동작 및 제약**
+
+in1 may be left out of a recording, and out0 then aliases in0 with nothing recorded.
+Rows move as bytes, so in0 and in1 share a dtype. The row starts are host state
+that the recorded copies bake in: setRowStarts re-records only when they change.
 
 ---
 
@@ -983,8 +1095,6 @@ Take a run of consecutive indices along one axis
 | `axis` | `uint32_t` | `0` | the axis to cut; 0 takes a contiguous block |
 | `start` | `int64_t` | — | first index on the axis; negative counts from the end |
 | `count` | `uint32_t` | `1` | how many consecutive indices to take |
-| `iDtype` | `vai::Dtype` | `vai::Dtype::None` |  |
-| `oDtype` | `vai::Dtype` | `vai::Dtype::None` |  |
 
 **동작 및 제약**
 
@@ -1029,7 +1139,6 @@ sinusoidal embedding of a timestep the node counts down itself
 | `minPeriod` | `float` | — | the fastest sinusoid, in units of t |
 | `maxPeriod` | `float` | — | ... and the slowest |
 | `numSteps` | `uint32_t` | — | runs before t is back at 1 |
-| `oDtype` | `vai::Dtype` | `vai::Dtype::None` |  |
 
 **동작 및 제약**
 
@@ -1064,7 +1173,7 @@ token embedding, optionally fused with positional embedding
 |---|---|---|
 | `in0` | input |  |
 | `out0` | output |  |
-| `posWeight` | persistent | 옵션에 따라 존재 |
+| `posWeight` | persistent |  |
 | `weight` | persistent |  |
 
 **Config**
@@ -1075,8 +1184,6 @@ token embedding, optionally fused with positional embedding
 | `embedDim` | `uint32_t` | — |  |
 | `posTableSize` | `uint32_t` | `0` | learned positional table rows; 0 = token only |
 | `scale` | `float` | `1.0f` | multiplies the looked-up embedding |
-| `wDtype` | `vai::Dtype` | `vai::Dtype::None` |  |
-| `oDtype` | `vai::Dtype` | `vai::Dtype::None` |  |
 
 **동작 및 제약**
 
@@ -1122,7 +1229,6 @@ row-wise top-k sampling, one kernel run as two passes
 |---|---|---|---|
 | `k` | `uint32_t` | `40` |  |
 | `temperature` | `float` | `1.0f` |  |
-| `iDtype` | `vai::Dtype` | `vai::Dtype::None` | logits dtype (output is raw uint32 indices) |
 
 **동작 및 제약**
 
@@ -1158,7 +1264,7 @@ Casts each tensor element to another dtype.
 
 **시그니처**
 
-- 입력: in0 [any shape] (iDtype)
+- 입력: in0 [any shape], any dtype
 - 출력: out0 [same shape] (oDtype)
 
 **슬롯**
@@ -1172,14 +1278,12 @@ Casts each tensor element to another dtype.
 
 | 필드 | 타입 | 기본값 | 설명 |
 |---|---|---|---|
-| `iDtype` | `vai::Dtype` | `vai::Dtype::None` |  |
-| `oDtype` | `vai::Dtype` | `vai::Dtype::None` |  |
+| `oDtype` | `vai::Dtype` | — | required: the dtype to cast to |
 
 **동작 및 제약**
 
-Both dtypes default to the net's hint, so naming only oDtype casts whatever
-the producer left. Matching dtypes make out0 the input tensor itself: no
-pipeline, no dispatch.
+in0 already at oDtype makes out0 the input tensor itself: no pipeline, no
+dispatch.
 
 **커널**
 

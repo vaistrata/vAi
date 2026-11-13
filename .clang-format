@@ -20,6 +20,7 @@ ColumnLimit: 120                # 0 joins hand-wrapped statements into long line
 AccessModifierOffset: -4        # public: in the class column
 MaxEmptyLinesToKeep: 2          # two blank lines separate sections in 138 of 208 files
 SpacesBeforeTrailingComments: 3 # 589 of the trailing comments use three spaces
+IndentPPDirectives: BeforeHash  # directives inside #if indent one level, include guards stay
 
 # Allman everywhere except namespaces (154 of 154 open on the same line), enums
 # (12 of 17 multi-line enums; short ones stay on one line) and lambda bodies
@@ -52,6 +53,18 @@ AllowShortLambdasOnASingleLine: All
 AllowShortEnumsOnASingleLine: true
 AllowShortIfStatementsOnASingleLine: Never
 AllowShortLoopsOnASingleLine: false
+
+# Constructor initializers one per line, led by : and , in the constructor's
+# column, so an #ifdef branch holds whole initializers.
+BreakConstructorInitializers: BeforeComma
+PackConstructorInitializers: Never
+ConstructorInitializerIndentWidth: 0
+
+# Arguments that do not fit go one per line. Braced initializers indent like
+# blocks, so .member = { nests one level in; a call's braced argument does so
+# when it ends in a comma, f({ ..., }).
+BinPackArguments: false
+Cpp11BracedListStyle: false
 
 # Keep template <...> on its own line: gen-node-docs.py finds templated node
 # classes such as Pool2d by the class line.

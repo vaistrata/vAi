@@ -8,13 +8,14 @@ A model has three basic files, with two more when dedicated operations are neede
 
 | File                                                |          | Description                                            |
 | --------------------------------------------------- | -------- | ------------------------------------------------------ |
-| `models/<model-name>/model.h`                       | Required | Model definition                                       |
-| `models/<model-name>/nodes/*.h`                     | Optional | Nodes not provided by default                          |
-| `models/<model-name>/shaders/*.comp`                | Optional | Kernels used by the nodes above                        |
-| `models/<model-name>/<distribution-name>-weights.h` | Required | Loader for reading a specific distributor's checkpoint |
-| `examples/<model-name>/demo.cpp`                    | Required | Demo that runs the model in practice                   |
+| `models/<impl>/<model-name>/net.h`                       | Required | Model definition                                       |
+| `models/<impl>/<model-name>/nodes/*.h`                     | Optional | Nodes not provided by default                          |
+| `models/<impl>/<model-name>/shaders/*.comp`                | Optional | Kernels used by the nodes above                        |
+| `models/<impl>/<model-name>/<distribution-name>-weights.h` | Required | Loader for reading a specific distributor's checkpoint |
+| `models/<impl>/<model-name>/demo.cpp`                    | Required | Demo that runs the model in practice                   |
 
-Checkpoints and input data are placed in `data/<model-name>/`.
+`<impl>` is `production` for a maintained implementation and `experimental` for one still in progress.
+Checkpoints go in `data/ckpts/<model-name>/<distribution-name>/`, tokenizers in `data/tokenizers/<model-name>/`, and input images in `data/images/`.
 
 The process of creating a model is covered in [Using vAi](03-usage/README.md). See
 [NodeGroup](03-usage/node-group.md) for how to group repeated blocks and
@@ -25,7 +26,7 @@ rules for adding a model to the repository.
 
 Follow the [common code conventions in the Overview](index.md#common-code-conventions).
 
-## model.h
+## net.h
 
 #### 1. File header stamp
 
@@ -47,7 +48,7 @@ Place all models and node groups defined in this file in a dedicated
 namespace.
 
 ```cpp
-namespace <model-name> {
+namespace <net-name> {
 
 ...
 
@@ -61,14 +62,15 @@ Inherit from `vai::NodeGroup` and `vai::NeuralNet` using `struct`, not
 
 ```cpp
 struct FeedForward : public vai::NodeGroup { ... };
-struct Model : public vai::NeuralNet { ... };
+struct Net : public vai::NeuralNet { ... };
 ```
 
-#### 4. The model struct must be named `Model`
+#### 4. The model struct must be named `Net`
 
-Outside the file, models are distinguished by namespace, as in `gpt2::Model` and
-`llama3::Model`. If one file must contain multiple models,
-separate them with nested namespaces.
+Outside the file, models are distinguished by namespace, as in `model::production::gpt2::Net` and
+`model::production::llama3::Net`. If one file must contain multiple models,
+separate them with nested namespaces. Code that uses a model shortens the name with an alias such as
+`namespace gpt2 = model::production::gpt2;`.
 
 #### 5. Own nodes by value
 
@@ -77,7 +79,7 @@ value. Do not own them through raw pointers or references. This restriction does
 ordinary members that are not nodes.
 
 ```cpp
-struct Model : public vai::NeuralNet {
+struct Net : public vai::NeuralNet {
     vai::node::TokenEmbedding embedding;          // OK
     MultiHeadAttention mhAttn;             // OK. Node groups are values too
     std::vector<TransformerBlock> blocks;  // OK. A container holding values
@@ -100,7 +102,7 @@ However, even among `.safetensors` checkpoints, key names, tensor shapes, layer 
 and other details vary. A loading helper is therefore needed to map and
 convert the checkpoint weights to the vAi model structure. Each model contributor must write and
 provide this helper. This allows various checkpoints to be
-loaded with a single `model.h` implementation.
+loaded with a single `net.h` implementation.
 
 Name the file after the organization that trained or distributed the checkpoint. For example,
 use `openai-weights.h` for a checkpoint distributed by OpenAI. If multiple organizations distribute
@@ -117,7 +119,7 @@ by looking only at the stamp in the file header.
 ```cpp
 /*=============================================================================
   Written by   oneway@vaistrata.com
-  Checkpoint   Each size reads data/gpt2/<ModelConfig::variant>/model.safetensors,
+  Checkpoint   Each size reads data/ckpts/gpt2/openai/<ModelConfig::variant>/model.safetensors,
                taken from the matching HuggingFace repo:
                  124M   openai-community/gpt2
                  355M   openai-community/gpt2-medium
@@ -136,22 +138,22 @@ The entry point is the function template declared in [`vai/engine/weights.h`](..
 and the implementation for each distributor is specialized by passing the distribution name as a string NTTP.
 
 ```cpp
-namespace gpt2::openai {
+namespace model::production::gpt2::openai {
 
-inline void loadWeights(Model& model, const vai::SafetensorsParser& parser)
+inline void loadWeights(Model& net, const vai::SafetensorsParser& parser)
 {
     // Map checkpoint keys to model node slots
 }
 
-} // namespace gpt2::openai
+} // namespace model::production::gpt2::openai
 
 
 template<>
-inline void loadWeights<"openai", gpt2::Model>(gpt2::Model& model)
+inline void loadWeights<"openai", model::production::gpt2::Net>(model::production::gpt2::Net& net)
 {
-    std::string path = std::string(VAI_DATA_DIR "/gpt2/")
-                     + model.modelCfg.variant + "/model.safetensors";
-    gpt2::openai::loadWeights(model, vai::SafetensorsParser(path.c_str()));
+    std::string path = std::string(VAI_DATA_DIR "/ckpts/gpt2/openai/")
+                     + net.modelCfg.variant + "/model.safetensors";
+    model::production::gpt2::openai::loadWeights(net, vai::SafetensorsParser(path.c_str()));
 }
 ```
 
@@ -168,18 +170,18 @@ include the source and the paths before and after conversion in the `Checkpoint`
 
 For example, yolov8 cannot read the `.pt` checkpoint distributed by Ultralytics
 as is, so it also provides
-[`ultralytics-weights-convertor.py`](../../models/yolov8/ultralytics-weights-convertor.py).
+[`ultralytics-weights-convertor.py`](../../models/internal/yolov8/ultralytics-weights-convertor.py).
 This script converts it to `.safetensors`, which vAi can read.
 
 ```cpp
 /*=============================================================================
   Written by   oneway@vaistrata.com
-  Checkpoint   Each tier reads data/yolov8/yolov8<n|s|m|l|x>.safetensors.
+  Checkpoint   Each tier reads data/ckpts/yolov8/ultralytics/<tierName>/model.safetensors.
                Ultralytics ships .pt, so the file takes one conversion:
                  download   huggingface.co/Ultralytics/YOLOv8
-                              -> data/yolov8/yolov8<n|s|m|l|x>.pt
+                              -> data/ckpts/yolov8/ultralytics/<tierName>/model.pt
                  convert    ultralytics-weights-convertor.py
-                              -> data/yolov8/yolov8<n|s|m|l|x>.safetensors
+                              -> data/ckpts/yolov8/ultralytics/<tierName>/model.safetensors
 =============================================================================*/
 ```
 
@@ -196,15 +198,15 @@ the external files required to run it. List each file's storage path first, then
 /*=============================================================================
   Written by   oneway@vaistrata.com
   Task         GPT-2 — completes one prompt, profiles prefill and decode.
-  Assets       data/gpt2/tokenizer.json
+  Assets       data/tokenizers/gpt2/tokenizer.json
                  from  huggingface.co/openai-community/gpt2
 =============================================================================*/
 ```
 
 #### 2. Project registration
 
-Register it in `examples/<model-name>/CMakeLists.txt`, using
-`project(demo-<model-name>)` as the project name. Executable programs that demonstrate other tasks may be added freely with names suited to their purpose.
+Register it in `models/<impl>/<model-name>/CMakeLists.txt`, using
+`project(demo-<model-name>)` as the project name. Programs for other tasks go in `examples/<task>-<model-name>/`, as `examples/chat-llama3/` does.
 
 ```cmake
 cmake_minimum_required(VERSION 3.16)
@@ -212,13 +214,8 @@ cmake_minimum_required(VERSION 3.16)
 project(demo-llama3)
 
 # demo-llama3 — one-prompt completion with timings
-add_executable(demo-llama3
+add_executable(${PROJECT_NAME}
     demo.cpp
-)
-
-# chat-llama3 — multi-turn interactive chat on the KV cache
-add_executable(chat-llama3
-    chat.cpp
 )
 ```
 
@@ -230,37 +227,27 @@ Model-specific nodes and kernels may be added when an operation cannot be expres
 Use the `<model-name>-<node-name>` format for filenames and keep the node and kernel names identical when possible.
 
 ```
-models/<model-name>/
+models/<impl>/<model-name>/
   nodes/<model-name>-<node-name>.h        node
   shaders/<model-name>-<node-name>.comp   kernel
 ```
 
-When adding a kernel, also register it in the build for the executable target that uses it. Add the `.comp` file to the source list for `add_executable()` and use `eva_auto_compile_shaders()` to specify the directory where the compiled SPIR-V (`.spv`) will be stored.
+Kernels in `shaders/` are compiled by `models/CMakeLists.txt` into the `<impl>-<model-name>-shaders` target, and the output directory reaches the code as `<IMPL>_<MODEL-NAME>_SHADER_OUTPUT_DIR`. A program that runs them only adds the dependency.
 
-The node loads the compiled SPIR-V from this directory. Define the same path in a macro with `add_definitions()` so that the node can use it.
-
-The following is an example from `examples/yolov8/CMakeLists.txt`.
+The following is an example from `models/internal/yolov8/CMakeLists.txt`.
 
 ```cmake
 add_executable(${PROJECT_NAME}
     demo.cpp
-    processing.cpp
-    ${CMAKE_SOURCE_DIR}/models/yolov8/shaders/decode.comp
-    ${CMAKE_SOURCE_DIR}/models/yolov8/shaders/sppf.comp
 )
 
-eva_auto_compile_shaders(${PROJECT_NAME} ${CMAKE_CURRENT_BINARY_DIR}/shaders/yolov8)
-
-add_definitions(
-    -DYOLOV8_SHADER_OUTPUT_DIR="${CMAKE_CURRENT_BINARY_DIR}/shaders/yolov8"
-)
+add_dependencies(${PROJECT_NAME} internal-yolov8-shaders)
 ```
 
-The path defined this way is used by the node to load the compiled `.spv` file. The following is an example from `sppf.h`.
+The node loads the compiled `.spv` file from that path. The following is an example from `decode.h`.
 
 ```cpp
-inline eva::SpvBlob sppfSpv = eva::SpvBlob::readFrom(
-    YOLOV8_SHADER_OUTPUT_DIR "/sppf.comp.spv");
+pipe = pipelinePool().request(INTERNAL_YOLOV8_SHADER_OUTPUT_DIR, "decode", { ... });
 ```
 
 For details on writing nodes and kernels, see
@@ -276,9 +263,9 @@ Even a node placed in a model folder is promoted to an official node, together w
 
 ## Checkpoint
 
-Place checkpoints under `data/<model-name>/` and state the path in the loader's `Checkpoint` stamp.
+Place checkpoints under `data/ckpts/<model-name>/<distribution-name>/` and state the path in the loader's `Checkpoint` stamp.
 
 Do not commit large checkpoints or checkpoints with license restrictions.
 The [`.gitignore`](../../.gitignore) blocks `*.safetensors`, `*.json`, and `*.pt` under
 `data/`. Only small, self-trained checkpoints may be committed by adding an exception to `.gitignore`.
-`data/mnist/model.safetensors` is a representative example.
+`data/ckpts/mnist/jroot/model.safetensors` is a representative example.

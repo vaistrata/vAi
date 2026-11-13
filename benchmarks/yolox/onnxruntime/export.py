@@ -18,16 +18,14 @@ if str(PYTORCH_BENCH_DIR) not in sys.path:
 
 from bench import MegviiYOLOXBenchmarkModel
 
-DEFAULT_WEIGHTS_DIR = (REPO_ROOT / "data/yolox").resolve()
+DEFAULT_WEIGHTS_DIR = (REPO_ROOT / "data/benchmarks/yolox").resolve()
 DEFAULT_SIZES = ("s", "m", "l", "x")
 DEFAULT_OPSET = 17
 FP16_NO_BLOCKED_OPS = ["__vai_no_blocked_operators__"]
 
 
 def validate_model_precision(model: onnx.ModelProto, precision: str) -> None:
-    expected_type = (
-        onnx.TensorProto.FLOAT16 if precision == "fp16" else onnx.TensorProto.FLOAT
-    )
+    expected_type = onnx.TensorProto.FLOAT16 if precision == "fp16" else onnx.TensorProto.FLOAT
     for label, values in (("input", model.graph.input), ("output", model.graph.output)):
         if len(values) != 1:
             raise RuntimeError(f"expected exactly one ONNX graph {label}, found {len(values)}")
@@ -54,9 +52,7 @@ def convert_fp32_model_to_fp16(model: onnx.ModelProto) -> onnx.ModelProto:
         from onnxruntime.transformers.float16 import convert_float_to_float16
         from onnxruntime.transformers.onnx_model import OnnxModel
     except ImportError as error:
-        raise RuntimeError(
-            "FP16 ONNX export requires the Python onnxruntime package."
-        ) from error
+        raise RuntimeError("FP16 ONNX export requires the Python onnxruntime package.") from error
 
     converted_model = convert_float_to_float16(
         model,
@@ -99,10 +95,14 @@ def export_one(
         raise FileNotFoundError(f"weights not found: {weights_path}")
 
     output_path = output_dir / f"yolox_{size}.{precision}.onnx"
-    model = MegviiYOLOXBenchmarkModel(
-        weights_path,
-        image_size=image_size,
-    ).eval().cpu()
+    model = (
+        MegviiYOLOXBenchmarkModel(
+            weights_path,
+            image_size=image_size,
+        )
+        .eval()
+        .cpu()
+    )
     example = torch.ones(
         (1, 3, image_size, image_size),
         dtype=torch.float32,

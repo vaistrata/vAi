@@ -28,8 +28,8 @@ If there are 12 layers, the times for all 24 nodes are collected on the single `
 Tags can be grouped into a hierarchy by including `.` in them.
 
 ```cpp
-b.mhAttn.toQKV.setProfileTag("Linear.[768x2304]");
-b.mhAttn.toOut.setProfileTag("Linear.[768x768]");
+b.mhAttn.projQKV.setProfileTag("Linear.[768x2304]");
+b.mhAttn.projOut.setProfileTag("Linear.[768x768]");
 ```
 
 In this case, the times under `Linear` are divided by shape, and the parent shows the sum of the times for its child entries.
@@ -40,14 +40,14 @@ Measurements accumulate after each forward, and `printProfile()` prints the aver
 
 ```cpp
 for (int i = 0; i < 5; ++i)   // Warm-up
-    model(inDict);
+    net(inDict);
 
-model.resetProfileRecords();   // Discard the warm-up records
+net.resetProfileRecords();   // Discard the warm-up records
 
 for (int i = 0; i < 10; ++i)
-    model(inDict);
+    net(inDict);
 
-model.printProfile();          // Average over 10 runs
+net.printProfile();          // Average over 10 runs
 ```
 
 Initial runs can include one-time costs such as shader compilation or buffer preparation, so it is better to measure after a warm-up. `resetProfileRecords()` is used to reset all records accumulated so far before measuring again.
@@ -78,13 +78,13 @@ By default, `printProfile()` resets the accumulated records after printing. To i
 This default behavior makes it easy to measure two sections with the same tag configuration separately, such as prefill and decode.
 
 ```cpp
-model(inDict);
-model.printProfile();          // Print prefill and reset the records
+net(inDict);
+net.printProfile();          // Print prefill and reset the records
 
 for (int i = 0; i < maxNewTokens; ++i)
-    model(inDict);
+    net(inDict);
 
-model.printProfile();          // Print only the decode section
+net.printProfile();          // Print only the decode section
 ```
 
 The records are reset when the first output is printed, so the second output includes only the records newly accumulated during decode.
@@ -96,16 +96,16 @@ Tags can be changed during measurement. The changed tags take effect when the co
 If you want to examine a specific bottleneck in detail after checking the full profile, you can clear the existing tags and apply them again to the desired nodes.
 
 ```cpp
-model.clearProfileTags();
+net.clearProfileTags();
 
-model.layers[0].ffn.fc1.setProfileTag("fc1");
-model.layers[0].ffn.fc2.setProfileTag("fc2");
+net.layers[0].ffn.fc1.setProfileTag("fc1");
+net.layers[0].ffn.fc2.setProfileTag("fc2");
 ```
 
 Pass an empty string to remove the tag from a specific node.
 
 ```cpp
-model.lmHead.setProfileTag("");
+net.lmHead.setProfileTag("");
 ```
 
 Existing records are reset when the tag configuration changes. This prevents measurements with different targets from being mixed into one average.
@@ -115,7 +115,7 @@ Existing records are reset when the tag configuration changes. This prevents mea
 The average GPU time of a specific tag can also be read as a number without printing it.
 
 ```cpp
-double ms = model.getGpuTimeMs("Linear.[768x2304]");
+double ms = net.getGpuTimeMs("Linear.[768x2304]");
 ```
 
 `getGpuTimeMs()` does not interpret `.` as a hierarchy and **looks up the entire tag as a single name**. Therefore, if a hierarchical tag is used, the exact full tag, such as `"Linear.[768x2304]"`, must be passed instead of `"Linear"`.

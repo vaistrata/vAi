@@ -1,7 +1,8 @@
 /*=============================================================================
  Winograd-domain FP16 cooperative-matrix GEMM.
  Bindings: O=0, I=1, W=2.
- Dispatch: x/y are plan tiles, z=36 transforms times split count.
+ Dispatch: x/y are plan tiles, z=pc.batch images x 36 transforms x split count.
+ Per image, I holds 36 * pc.ci * stored tiles and O the z slices it writes.
  Push constants: PushConstants.
 =============================================================================*/
 #version 460
@@ -51,7 +52,10 @@ layout(push_constant) uniform PushConstants {
     uint splitCount;
     uint kernel;
     uint stride;
+    uint batch;             // images, stacked on the dispatch z axis
 } pc;
+
+#include "common/conv_batch.h"
 
 const uint tM = 16u, tN = 16u, tK = 16u;
 const uint sgCountM = wgM / sgM;
@@ -84,6 +88,9 @@ shared float SharedF[typeAcc == DTYPE_F16 ? SHARED_ELEMS : 1u];
 #define matB   coopmat<float16_t, gl_ScopeSubgroup, tK, tN, gl_MatrixUseB>
 #define accMatF16 coopmat<float16_t, gl_ScopeSubgroup, tM, tN, gl_MatrixUseAccumulator>
 #define accMatF32 coopmat<float, gl_ScopeSubgroup, tM, tN, gl_MatrixUseAccumulator>
+
+// The workgroup's image within the transformed I.
+uint imageInputBase = 0u;
 
 void writeO(uint i, float16_t value)
 {
@@ -212,7 +219,7 @@ uint inputTileBase(
 {
     const uint kTiles = K / tK;
     const uint nTiles = N / tN + (N % tN != 0u ? 1u : 0u);
-    return ((transform * kTiles + kTile) * nTiles + nTile) *
+    return imageInputBase + ((transform * kTiles + kTile) * nTiles + nTile) *
         B_TILE_ELEMS;
 }
 
@@ -223,7 +230,10 @@ void main()
     const uint K = pc.ci;
     const uint N = pc.n;
     const uint subgroup = gl_SubgroupID;
-    const uint dispatchBatch = gl_WorkGroupID.z;
+    const uint dispatchBatch = convImageZ(pc.batch);
+    const uint image = convImage(pc.batch);
+    const uint storedN = inputReorder ? (N / tN + (N % tN != 0u ? 1u : 0u)) * tN : N;
+    imageInputBase = image * 36u * K * storedN;
     uint batch = dispatchBatch;
     uint batchSlice = dispatchBatch;
     uint kTileStart = 0u;
@@ -253,9 +263,10 @@ void main()
     const uint n0 = nbase + subgroupN * sgN;
 
     const uint batchOffsetU = batch * M * K;
-    const uint batchOffsetV = batch * K * N;
+    const uint batchOffsetV = imageInputBase + batch * K * N;
+    // Per image, O holds one M * N slice per z of the image.
     uint batchOffsetM =
-        (splitK != 0u ? batchSlice : batch) *
+        (image * (gl_NumWorkGroups.z / pc.batch) + (splitK != 0u ? batchSlice : batch)) *
         M * N;
     const uint kTiles = K / tK;
     const uint A4Row0 = (batch * (M / tM) + (m0 / tM)) * kTiles;

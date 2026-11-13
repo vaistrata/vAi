@@ -2,7 +2,7 @@
 // every supported length can be taken as its first N tokens. The benches
 // tokenize the whole text and keep the first N, so the requested length is the
 // exact token count measured. The opening paragraph is the 146-token prompt of
-// examples/gpt2/demo.cpp. The text is byte-identical to llama3/common/bench-prompts.h.
+// models/production/gpt2/demo.cpp. The text is byte-identical to llama3/common/bench-prompts.h.
 // NOTE GPT-2's context is 1024 tokens, so with 128 decode tokens N tops out
 //      at 896.
 

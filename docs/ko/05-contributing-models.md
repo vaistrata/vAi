@@ -8,13 +8,14 @@
 
 | 파일                             |    | 내용                   |
 | ------------------------------ | -- | -------------------- |
-| `models/<모델명>/model.h`         | 필수 | 모델 정의                |
-| `models/<모델명>/nodes/*.h`       | 선택 | 기본 제공에 없는 노드         |
-| `models/<모델명>/shaders/*.comp`  | 선택 | 위 노드에서 사용하는 커널       |
-| `models/<모델명>/<배포명>-weights.h` | 필수 | 특정 배포자의 체크포인트를 읽는 로더 |
-| `examples/<모델명>/demo.cpp`      | 필수 | 모델을 실제로 구동해 보이는 데모   |
+| `models/<impl>/<모델명>/net.h`         | 필수 | 모델 정의                |
+| `models/<impl>/<모델명>/nodes/*.h`       | 선택 | 기본 제공에 없는 노드         |
+| `models/<impl>/<모델명>/shaders/*.comp`  | 선택 | 위 노드에서 사용하는 커널       |
+| `models/<impl>/<모델명>/<배포명>-weights.h` | 필수 | 특정 배포자의 체크포인트를 읽는 로더 |
+| `models/<impl>/<모델명>/demo.cpp`      | 필수 | 모델을 실제로 구동해 보이는 데모   |
 
-체크포인트와 입력 데이터는 `data/<모델명>/`에 둡니다.
+`<impl>`은 정식 구현이면 `production`, 아직 진행 중이면 `experimental`입니다.
+체크포인트는 `data/ckpts/<모델명>/<배포명>/`, 토크나이저는 `data/tokenizers/<모델명>/`, 입력 이미지는 `data/images/`에 둡니다.
 
 모델을 만드는 방법 자체는 [vAi 사용법](03-usage/README.md)에서 다룹니다. 반복 블록을
 묶는 방법은 [노드그룹](03-usage/node-group.md), 전체를 엮고 입출력 경계를 지정하는 방법은
@@ -25,7 +26,7 @@
 
 [개요의 공통 코드 컨벤션](index.md#공통-코드-컨벤션)을 지킵니다.
 
-## model.h
+## net.h
 
 #### 1. 파일 헤드 스탬프
 
@@ -61,14 +62,15 @@ namespace <모델명> {
 
 ```cpp
 struct FeedForward : public vai::NodeGroup { ... };
-struct Model : public vai::NeuralNet { ... };
+struct Net : public vai::NeuralNet { ... };
 ```
 
-#### 4. 모델 구조체의 이름은 `Model`로 고정
+#### 4. 모델 구조체의 이름은 `Net`으로 고정
 
-바깥에서는 `gpt2::Model`,
-`llama3::Model`처럼 네임스페이스로 모델을 구분합니다. 한 파일에 여러 모델을 담아야
-한다면 네임스페이스를 중첩해 나눕니다.
+바깥에서는 `model::production::gpt2::Net`,
+`model::production::llama3::Net`처럼 네임스페이스로 모델을 구분합니다. 한 파일에 여러 모델을 담아야
+한다면 네임스페이스를 중첩해 나눕니다. 모델을 쓰는 코드에서는
+`namespace gpt2 = model::production::gpt2;`처럼 별칭으로 줄여 씁니다.
 
 #### 5. 노드는 값으로 소유
 
@@ -77,7 +79,7 @@ struct Model : public vai::NeuralNet { ... };
 이 제약이 없습니다.
 
 ```cpp
-struct Model : public vai::NeuralNet {
+struct Net : public vai::NeuralNet {
     vai::node::TokenEmbedding embedding;          // OK
     MultiHeadAttention mhAttn;             // OK. 노드그룹도 값으로
     std::vector<TransformerBlock> blocks;  // OK. 값을 담는 컨테이너
@@ -99,7 +101,7 @@ struct Model : public vai::NeuralNet {
 다만 같은 `.safetensors`라도 체크포인트마다 키 이름, 텐서 형상, 레이어 퓨전 방식
 등이 제각각입니다. 그래서 체크포인트의 가중치를 vAi 모델 구조에 맞게 매핑하고
 변환하는 로딩 헬퍼가 필요합니다. 이 헬퍼는 각 모델의 기여자가 직접 작성해 함께
-제공해야 합니다. 그러면 하나의 `model.h` 구현으로 다양한 체크포인트를
+제공해야 합니다. 그러면 하나의 `net.h` 구현으로 다양한 체크포인트를
 불러올 수 있습니다.
 
 파일명은 해당 체크포인트를 학습하거나 배포한 곳의 이름을 따릅니다. 예를 들어
@@ -117,7 +119,7 @@ OpenAI가 배포한 체크포인트라면 `openai-weights.h`로 작성합니다.
 ```cpp
 /*=============================================================================
   Written by   oneway@vaistrata.com
-  Checkpoint   Each size reads data/gpt2/<ModelConfig::variant>/model.safetensors,
+  Checkpoint   Each size reads data/ckpts/gpt2/openai/<ModelConfig::variant>/model.safetensors,
                taken from the matching HuggingFace repo:
                  124M   openai-community/gpt2
                  355M   openai-community/gpt2-medium
@@ -136,22 +138,22 @@ OpenAI가 배포한 체크포인트라면 `openai-weights.h`로 작성합니다.
 배포명을 문자열 NTTP로 넘겨 배포자별 구현을 특수화합니다.
 
 ```cpp
-namespace gpt2::openai {
+namespace model::production::gpt2::openai {
 
-inline void loadWeights(Model& model, const vai::SafetensorsParser& parser)
+inline void loadWeights(Model& net, const vai::SafetensorsParser& parser)
 {
     // 체크포인트의 키를 모델 노드의 슬롯으로 매핑
 }
 
-} // namespace gpt2::openai
+} // namespace model::production::gpt2::openai
 
 
 template<>
-inline void loadWeights<"openai", gpt2::Model>(gpt2::Model& model)
+inline void loadWeights<"openai", model::production::gpt2::Net>(model::production::gpt2::Net& net)
 {
-    std::string path = std::string(VAI_DATA_DIR "/gpt2/")
-                     + model.modelCfg.variant + "/model.safetensors";
-    gpt2::openai::loadWeights(model, vai::SafetensorsParser(path.c_str()));
+    std::string path = std::string(VAI_DATA_DIR "/ckpts/gpt2/openai/")
+                     + net.modelCfg.variant + "/model.safetensors";
+    model::production::gpt2::openai::loadWeights(net, vai::SafetensorsParser(path.c_str()));
 }
 ```
 
@@ -168,18 +170,18 @@ inline void loadWeights<"openai", gpt2::Model>(gpt2::Model& model)
 
 예를 들어 yolov8은 Ultralytics에서 배포하는 `.pt` 체크포인트를 그대로 읽을 수 없기
 때문에
-[`ultralytics-weights-convertor.py`](../../models/yolov8/ultralytics-weights-convertor.py)를
+[`ultralytics-weights-convertor.py`](../../models/internal/yolov8/ultralytics-weights-convertor.py)를
 함께 제공합니다. 이 스크립트가 vAi가 읽을 수 있는 `.safetensors`로 바꿉니다.
 
 ```cpp
 /*=============================================================================
   Written by   oneway@vaistrata.com
-  Checkpoint   Each tier reads data/yolov8/yolov8<n|s|m|l|x>.safetensors.
+  Checkpoint   Each tier reads data/ckpts/yolov8/ultralytics/<tierName>/model.safetensors.
                Ultralytics ships .pt, so the file takes one conversion:
                  download   huggingface.co/Ultralytics/YOLOv8
-                              -> data/yolov8/yolov8<n|s|m|l|x>.pt
+                              -> data/ckpts/yolov8/ultralytics/<tierName>/model.pt
                  convert    ultralytics-weights-convertor.py
-                              -> data/yolov8/yolov8<n|s|m|l|x>.safetensors
+                              -> data/ckpts/yolov8/ultralytics/<tierName>/model.safetensors
 =============================================================================*/
 ```
 
@@ -196,15 +198,15 @@ inline void loadWeights<"openai", gpt2::Model>(gpt2::Model& model)
 /*=============================================================================
   Written by   oneway@vaistrata.com
   Task         GPT-2 — completes one prompt, profiles prefill and decode.
-  Assets       data/gpt2/tokenizer.json
+  Assets       data/tokenizers/gpt2/tokenizer.json
                  from  huggingface.co/openai-community/gpt2
 =============================================================================*/
 ```
 
 #### 2. 프로젝트 등록
 
-`examples/<모델명>/CMakeLists.txt`에 등록하며 프로젝트명은
-`project(demo-<모델명>)`으로 합니다. 다른 태스크를 보여주는 실행 프로그램이 필요하다면 목적에 맞는 이름으로 자유롭게 추가할 수 있습니다.
+`models/<impl>/<모델명>/CMakeLists.txt`에 등록하며 프로젝트명은
+`project(demo-<모델명>)`으로 합니다. 다른 태스크를 보여주는 프로그램은 `examples/chat-llama3/`처럼 `examples/<태스크>-<모델명>/`에 둡니다.
 
 ```cmake
 cmake_minimum_required(VERSION 3.16)
@@ -212,13 +214,8 @@ cmake_minimum_required(VERSION 3.16)
 project(demo-llama3)
 
 # demo-llama3 — one-prompt completion with timings
-add_executable(demo-llama3
+add_executable(${PROJECT_NAME}
     demo.cpp
-)
-
-# chat-llama3 — multi-turn interactive chat on the KV cache
-add_executable(chat-llama3
-    chat.cpp
 )
 ```
 
@@ -230,37 +227,27 @@ vAi의 기본 노드로 표현할 수 없는 연산이 있거나 특별한 인�
 파일명은 `<모델명>-<노드명>` 형식으로 맞추고 가능하면 노드와 커널의 이름을 동일하게 유지합니다.
 
 ```
-models/<모델명>/
+models/<impl>/<모델명>/
   nodes/<모델명>-<노드명>.h        노드
   shaders/<모델명>-<노드명>.comp   커널
 ```
 
-커널을 추가했다면 이를 사용하는 실행 타깃의 빌드에도 등록해야 합니다. `.comp` 파일을 `add_executable()`의 소스 목록에 추가하고 `eva_auto_compile_shaders()`로 컴파일된 SPIR-V(`.spv`)가 저장될 디렉토리를 지정합니다.
+`shaders/`의 커널은 `models/CMakeLists.txt`가 `<impl>-<모델명>-shaders` 타깃으로 컴파일하고, 출력 디렉토리는 `<IMPL>_<모델명>_SHADER_OUTPUT_DIR` 매크로로 코드에 전달됩니다. 커널을 쓰는 프로그램은 의존성만 추가합니다.
 
-노드는 이 디렉토리에서 컴파일된 SPIR-V를 불러옵니다. 그러니 같은 경로를 `add_definitions()`으로 매크로에 정의해 노드에서 사용할 수 있게 합니다.
-
-다음은 `examples/yolov8/CMakeLists.txt`의 예입니다.
+다음은 `models/internal/yolov8/CMakeLists.txt`의 예입니다.
 
 ```cmake
 add_executable(${PROJECT_NAME}
     demo.cpp
-    processing.cpp
-    ${CMAKE_SOURCE_DIR}/models/yolov8/shaders/decode.comp
-    ${CMAKE_SOURCE_DIR}/models/yolov8/shaders/sppf.comp
 )
 
-eva_auto_compile_shaders(${PROJECT_NAME} ${CMAKE_CURRENT_BINARY_DIR}/shaders/yolov8)
-
-add_definitions(
-    -DYOLOV8_SHADER_OUTPUT_DIR="${CMAKE_CURRENT_BINARY_DIR}/shaders/yolov8"
-)
+add_dependencies(${PROJECT_NAME} internal-yolov8-shaders)
 ```
 
-이렇게 정의한 경로는 노드에서 컴파일된 `.spv` 파일을 불러올 때 사용합니다. 다음은 `sppf.h`의 예입니다.
+노드는 이 경로에서 컴파일된 `.spv` 파일을 불러옵니다. 다음은 `decode.h`의 예입니다.
 
 ```cpp
-inline eva::SpvBlob sppfSpv = eva::SpvBlob::readFrom(
-    YOLOV8_SHADER_OUTPUT_DIR "/sppf.comp.spv");
+pipe = pipelinePool().request(INTERNAL_YOLOV8_SHADER_OUTPUT_DIR, "decode", { ... });
 ```
 
 구체적인 노드와 커널 작성법은
@@ -276,9 +263,9 @@ inline eva::SpvBlob sppfSpv = eva::SpvBlob::readFrom(
 
 ## 체크포인트
 
-`data/<모델명>/` 아래에 두고 그 경로는 로더의 `Checkpoint` 스탬프에 밝힙니다.
+`data/ckpts/<모델명>/<배포명>/` 아래에 두고 그 경로는 로더의 `Checkpoint` 스탬프에 밝힙니다.
 
 고용량이거나 라이선스가 걸린 체크포인트는 커밋하지 않습니다.
 [`.gitignore`](../../.gitignore)가 `data/` 아래의 `*.safetensors`, `*.json`, `*.pt`를
 막습니다. 크지 않고 직접 학습시킨 체크포인트만 `.gitignore`에 예외를 더해 올릴 수 있습니다.
-`data/mnist/model.safetensors`가 대표적인 사례입니다.
+`data/ckpts/mnist/jroot/model.safetensors`가 대표적인 사례입니다.

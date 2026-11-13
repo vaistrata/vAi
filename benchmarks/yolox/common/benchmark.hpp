@@ -16,7 +16,7 @@
 #include <vector>
 
 #ifndef YOLOX_WEIGHTS_DIR
-#define YOLOX_WEIGHTS_DIR ""
+    #define YOLOX_WEIGHTS_DIR ""
 #endif
 
 enum class Variant {
@@ -163,7 +163,7 @@ inline size_t precisionElementSize(Precision precision)
 
 inline std::string defaultImagePath()
 {
-    return std::string(YOLOX_WEIGHTS_DIR) + "/dog.jpg";
+    return VAI_DATA_DIR "/images/dog.jpg";
 }
 
 struct CommonCliOptions

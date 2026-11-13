@@ -9,7 +9,7 @@ struct Block : public vai::NodeGroup {       // 노드그룹
     defineSlot("in0", fc1.slot("in0"));      // 안쪽 슬롯에 이름을 붙여 내보낸다
 };
 
-struct Model : public vai::NeuralNet {       // 신경망
+struct Net : public vai::NeuralNet {       // 신경망
     input("in0") - fc1;                      // 입력 경계에 직접 잇는다
 };
 ```
@@ -19,12 +19,12 @@ struct Model : public vai::NeuralNet {       // 신경망
 ## 생성
 
 ```cpp
-struct Model : public vai::NeuralNet {
+struct Net : public vai::NeuralNet {
     vai::node::TokenEmbedding embedding;
     std::vector<TransformerBlock> layers;
     vai::node::Linear lmHead;
 
-    Model(const vai::NeuralNetConfig& netCfg, ModelConfig modelCfg)
+    Net(const vai::NeuralNetConfig& netCfg, ModelConfig modelCfg)
     : NeuralNet(netCfg)
     , embedding({ /* ... */ })
     , lmHead({ modelCfg.embedDim, modelCfg.vocabSize })
@@ -72,19 +72,21 @@ void NeuralNet::operator()(TensorDict inputs, TensorRefDict outputs, bool syncPr
 입력과 출력 모두 키는 경계 이름입니다. 넘기는 `TensorDict`의 키는 `input()`으로 만든 입력 경계에, 출력 `TensorRefDict`의 키는 `output()`으로 만든 출력 경계에 대응합니다.
 
 ```cpp
-gpt2::Model model({}, gpt2::ModelConfig::_124M());
+namespace gpt2 = model::production::gpt2;
+
+gpt2::Net net({}, gpt2::ModelConfig::_124M());
 
 Tensor tokens = Tensor(/* ... */);
 
 vai::TensorDict in = {{"inTokenIds", tokens}};
 Tensor result;
-model(in, {{"nextTokenId", &result}});
+net(in, {{"nextTokenId", &result}});
 ```
 
 입력 딕셔너리를 호출 자리에서 만들 수도 있습니다.
 
 ```cpp
-model({{"inTokenIds", tokens}}, {{"nextTokenId", &result}});
+net({{"inTokenIds", tokens}}, {{"nextTokenId", &result}});
 ```
 
 호출은 **비동기**입니다. `model(...)`이 반환되었다고 GPU 계산이 끝난 것은 아닙니다. 결과 텐서에 `Tensor::downloadToHost()` 또는 `Tensor::getData<T>()`를 호출하는 시점에 필요하면 완료를 기다린 뒤 데이터를 가져옵니다
@@ -95,9 +97,9 @@ model({{"inTokenIds", tokens}}, {{"nextTokenId", &result}});
 넘기는 이름은 `input()`으로 만든 경계와 정확히 일치해야 합니다. 입력 딕셔너리를 비우거나 존재하지 않는 이름을 추가하면 오류가 발생합니다. 여러 입력 중 일부를 생략하면 해당 입력에서 출발하는 가지가 실행에서 제외됩니다.
 
 ```cpp
-model({{"inTokenIds", tokens}}, {{"nextTokenId", &result}});                  // OK
-model({}, {{"nextTokenId", &result}});                                        // X: 입력이 빠졌다
-model({{"inTokenIds", t}, {"extra", e}}, {{"nextTokenId", &result}});         // X: 없는 경계
+net({{"inTokenIds", tokens}}, {{"nextTokenId", &result}});                  // OK
+net({}, {{"nextTokenId", &result}});                                        // X: 입력이 빠졌다
+net({{"inTokenIds", t}, {"extra", e}}, {{"nextTokenId", &result}});         // X: 없는 경계
 ```
 
 ## `onForwardBegin`

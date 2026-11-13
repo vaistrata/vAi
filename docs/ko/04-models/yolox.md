@@ -13,9 +13,11 @@ YOLOPAFPN 넥, 회귀와 분류를 분리한 anchor-free 검출 헤드로 이루
 ## Configuration
 
 ```cpp
+namespace yolox = model::experimental::yolox;
+
 auto cfg = yolox::getConfigCOCO(yolox::Tier::LARGE);
 
-yolox::Model model({
+yolox::Net net({
     .device       = device,
     .defaultDtype = Dtype::Fp16,
 }, cfg, {
@@ -61,10 +63,10 @@ YOLOX는 기본값을 그대로 씁니다. conv 가중치와 BN 파라미터 모
 
 vAi에서 모델은 노드를 `-`로 이어 만든 DAG입니다. 세부사항은 [vAi 사용법 > 노드](../03-usage/node.md)와 [노드그룹](../03-usage/node-group.md) 문서를 참조.
 
-Focus를 처리하는 stem은 전용 `FocusConvNode`가, 나머지 conv는 빌트인
+Focus를 처리하는 stem은 전용 `node::FocusConv`가, 나머지 conv는 빌트인
 [`Convolution`](../06-nodes.md#convolution)가 맡습니다. Conv-BN-SiLU 블록은
-가중치 로더가 CPU에서 BN의 `scale`·`bias`를 합성해 전달하고, 노드는
-`hasScale`·`hasBias`와 SiLU 옵션을 사용합니다. 검출 헤드의 prediction은 bias가 있는 1x1 conv입니다.
+가중치 로더가 CPU에서 BN의 `scale`·`bias`를 합성해 슬롯에 넣고, 노드는
+채워진 슬롯과 SiLU 옵션을 사용합니다. 검출 헤드의 prediction은 bias가 있는 1x1 conv입니다.
 
 *`H`와 `W`: 입력 해상도, `N`: 전 스케일 검출 위치 수 (640x640이면 8,400).*
 
@@ -87,7 +89,7 @@ detector - output("out0");  // [N, 5 + numClasses]
 
 출력은 `[8400, 85]` 형태입니다. 각 행은 `cx, cy, width, height, objectness, class[0..79]`이며,
 박스 좌표는 grid와 stride가 적용된 픽셀 단위입니다. objectness와 클래스 값은 sigmoid를 거친 확률입니다.
-NMS는 그래프 밖 후처리([`examples/yolox/processing.cpp`](../../../examples/yolox/processing.cpp))에서 합니다.
+NMS는 그래프 밖 후처리([`models/experimental/yolox/processing.h`](../../../models/experimental/yolox/processing.h))에서 합니다.
 비교 프레임워크의 배치 1 출력 `[1, 8400, 85]`와 같은 내용을 담습니다.
 
 ### NodeGroup
@@ -99,17 +101,17 @@ YOLOX를 구현하며 정의한 [노드그룹](../03-usage/node-group.md)입니�
 #### FocusModule
 
 공식 Focus는 입력의 짝수·홀수 행과 열을 나눠 채널 방향으로 쌓은 뒤 3x3 conv를 수행합니다.
-vAi는 이를 `FocusConvNode` 하나로 처리합니다. 중간 Focus 텐서를 만들지 않고 원본 입력에서
+vAi는 이를 `node::FocusConv` 하나로 처리합니다. 중간 Focus 텐서를 만들지 않고 원본 입력에서
 바로 Conv-BN-SiLU를 계산하며, `[C, H, W]`를 `[Co, H/2, W/2]`로 바꿉니다.
 
 #### Bottleneck
 
 1x1 conv와 3x3 conv를 잇는 블록입니다. `shortcut`이 켜져 있고 입력·출력 채널 수가 같으면
-잔차를 더합니다. 지원되는 경우 두 번째 conv에 잔차 덧셈을 융합하고, 그 외에는 `Add`를 사용합니다.
+두 번째 conv가 입력을 `residual`로 받아 더합니다.
 
 ```cpp
 input - conv1 - conv2;
-input - "residual"/conv2;  // 잔차 융합 경로
+input - "residual"/conv2;  // shortcut이고 채널 수가 같을 때만
 ```
 
 #### CSPLayer
@@ -129,7 +131,7 @@ concat - conv3;
 #### SPPBottleneck
 
 공식 SPP의 병렬 5x5, 9x9, 13x13 max pooling을 연속 5x5 pooling 세 번으로 계산합니다.
-전용 `SPPFNode`가 pooling과 입력을 포함한 네 텐서의 concat을 한 커널로 처리합니다.
+전용 `node::SPPF`가 pooling과 입력을 포함한 네 텐서의 concat을 한 커널로 처리합니다.
 
 ```cpp
 conv1 - sppf - conv2;
@@ -145,20 +147,20 @@ conv1 - sppf - conv2;
 | `DetectionDecoder` | 세 스케일의 출력을 직접 읽어 grid/stride decode와 sigmoid 수행 | `regobj_p3..5`, `cls_p3..5` → `out0` `[N, 5 + numClasses]` |
 
 회귀 4채널과 objectness 1채널 prediction은 하나의 5채널 conv로 계산합니다.
-`DecodeNode`는 `regobj`와 `cls`를 직접 읽으므로 스케일별 `[85, Hₚ, Wₚ]` concat 버퍼가 필요 없습니다.
+`node::Decode`는 `regobj`와 `cls`를 직접 읽으므로 스케일별 `[85, Hₚ, Wₚ]` concat 버퍼가 필요 없습니다.
 
 ### 전용 노드
 
-YOLOX에 필요한 연산입니다. [`models/yolox/nodes/`](../../../models/yolox/nodes/)와
-[`shaders/`](../../../models/yolox/shaders/)에 있습니다.
+YOLOX에 필요한 연산입니다. [`models/experimental/yolox/nodes/`](../../../models/experimental/yolox/nodes/)와
+[`shaders/`](../../../models/experimental/yolox/shaders/)에 있습니다.
 
 | 노드 | 내용 | 커널 |
 |---|---|---|
-| `FocusConvNode` | Focus와 stem Conv-BN-SiLU 융합 | `focus-conv.comp`, `focus-conv-cm.comp` |
-| `SPPFNode` | 3단 max pooling과 concat을 한 커널로 | `sppf.comp` |
-| `DecodeNode` | 회귀·objectness와 클래스 출력을 `[N, 5 + numClasses]`로 디코드 | `decode.comp` |
+| `node::FocusConv` | Focus와 stem Conv-BN-SiLU 융합 | `focus-conv.comp`, `focus-conv-cm.comp` |
+| `node::SPPF` | 3단 max pooling과 concat을 한 커널로 | `sppf.comp` |
+| `node::Decode` | 회귀·objectness와 클래스 출력을 `[N, 5 + numClasses]`로 디코드 | `decode.comp` |
 
-`FocusConvNode`의 FP16 cooperative-matrix 경로는 초기 1회
+`node::FocusConv`의 FP16 cooperative-matrix 경로는 초기 1회
 `focus-conv-transform.comp`로 가중치를 변환합니다.
 
 ### 사용 노드
@@ -171,25 +173,28 @@ YOLOX에 필요한 연산입니다. [`models/yolox/nodes/`](../../../models/yolo
 
 ## 체크포인트
 
-체크포인트는 `data/yolox/` 아래에 둡니다. 모델 크기는 파일명의 `yolox_<tier>`로 구분합니다.
-데모 입력 이미지는 모든 tier가 공유합니다.
+체크포인트는 `data/ckpts/yolox/megvii/` 아래 tier별 폴더에 둡니다.
+데모 입력 이미지는 `data/images/`에 있습니다.
 
 ```text
-data/yolox/
-├── dog.jpg                    공용 데모 입력
-├── yolox_l.pth               Megvii 원본
-├── yolox_l.safetensors       변환 결과: 로더가 읽는 파일
-└── ...
+data/
+├── ckpts/yolox/megvii/
+│   ├── large/
+│   │   ├── model.pth             Megvii 원본
+│   │   └── model.safetensors     변환 결과: 로더가 읽는 파일
+│   └── ...
+└── images/
+    └── dog.jpg                   데모 입력
 ```
 
 Megvii가 배포하는 `.pth`를 받은 뒤 `.safetensors`로 변환합니다.
 
 **1.** [공식 release](https://github.com/Megvii-BaseDetection/YOLOX/releases/tag/0.1.1rc0)에서
-필요한 체크포인트를 받아 `data/yolox/yolox_<s|m|l|x>.pth`로 둡니다. Large 기준:
+필요한 체크포인트를 받아 `data/ckpts/yolox/megvii/<small|medium|large|xlarge>/model.pth`로 둡니다. Large 기준:
 
 ```bash
-mkdir -p data/yolox
-curl -L -o data/yolox/yolox_l.pth \
+mkdir -p data/ckpts/yolox/megvii/large
+curl -L -o data/ckpts/yolox/megvii/large/model.pth \
   https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/yolox_l.pth
 ```
 
@@ -197,27 +202,27 @@ curl -L -o data/yolox/yolox_l.pth \
 
 ```bash
 pip install torch safetensors
-python models/yolox/megvii-weights-convertor.py        # 있는 것 전부
-python models/yolox/megvii-weights-convertor.py s l    # tier 지정
+python models/experimental/yolox/megvii-weights-convertor.py        # 있는 것 전부
+python models/experimental/yolox/megvii-weights-convertor.py small large    # tier 지정
 ```
 
-같은 디렉터리에 `yolox_<tier>.safetensors`가 생깁니다.
+각 `model.pth` 옆에 `model.safetensors`가 생깁니다.
 
 ### Load Weight
 
 체크포인트를 그래프 슬롯에 매핑하는 코드는
-[`models/yolox/megvii-weights.h`](../../../models/yolox/megvii-weights.h)에 있습니다.
+[`models/experimental/yolox/megvii-weights.h`](../../../models/experimental/yolox/megvii-weights.h)에 있습니다.
 실행하는 쪽은 한 줄이면 됩니다.
 
 ```cpp
-loadWeights<"megvii">(model);
+loadWeights<"megvii">(net);
 ```
 
 경로는 `model.cfg.tier`로 특수화가 조립하므로(`VAI_DATA_DIR "/yolox/yolox_<tier 글자>.safetensors"`)
 부르는 쪽은 tier만 정하면 됩니다. 배포명 태그의 원리는 [제공 모델 > 가중치 로딩](README.md#가중치-로딩) 참조.
 
 공식 state dict의 `backbone.backbone`, `backbone`, `head` 키를 각각 백본, 넥, 헤드의 멤버로 매핑합니다.
-conv 가중치와 BN 파라미터는 노드의 `wDtype`으로 읽으며, 헤드의 회귀와 objectness 가중치·bias는
+conv 가중치와 BN 파라미터는 넷의 `wDefaultDtype`으로 읽으며, 헤드의 회귀와 objectness 가중치·bias는
 합쳐서 `regObjPred`에 넣습니다.
 
 ## 실행
@@ -225,39 +230,35 @@ conv 가중치와 BN 파라미터는 노드의 `wDtype`으로 읽으며, 헤드�
 ### 폴더 구조
 
 ```text
-models/yolox/
-├── model.h                     모델 정의 및 NodeGroup 정의
+models/experimental/yolox/
+├── net.h                       모델 정의 및 NodeGroup 정의
 ├── nodes/                      전용 노드 (FocusConv, SPPF, Decode)
 ├── shaders/                    전용 노드의 커널
 ├── megvii-weights.h             Megvii 체크포인트 매핑
-└── megvii-weights-convertor.py  .pth → .safetensors 변환
-
-examples/yolox/
+├── megvii-weights-convertor.py  .pth → .safetensors 변환
 ├── demo.cpp                    demo-yolox: 이미지 한 장 검출 + 시간 측정
-├── processing.h
-├── processing.cpp              전처리, 후처리 (letterbox, NMS)
+├── processing.h                전처리, 후처리 (letterbox, NMS)
 └── CMakeLists.txt
 
-data/yolox/
-├── dog.jpg
-├── yolox_s.safetensors          SMALL
-├── yolox_m.safetensors          MEDIUM
-├── yolox_l.safetensors          LARGE
-└── yolox_x.safetensors          XLARGE
+data/
+├── ckpts/yolox/megvii/
+│   └── <tier>/model.safetensors      Tier: small, medium, large, xlarge
+└── images/
+    └── dog.jpg
 ```
 
 ### 빌드 및 실행
 
 ```bash
-cmake -B build -DVAI_BUILD_EXAMPLES=ON
+cmake -B build
 cmake --build build --config RelWithDebInfo --target demo-yolox
 
 # Run
 ./build/bin/demo-yolox
 ```
 
-`data/yolox/dog.jpg`를 LARGE tier, fp16으로 검출하고 커널 형태별 프로파일을 찍습니다.
-tier와 추론 설정은 [`demo.cpp`](../../../examples/yolox/demo.cpp)의 상단에서 바꿉니다.
+`data/images/dog.jpg`를 LARGE tier, fp16으로 검출하고 커널 형태별 프로파일을 찍습니다.
+tier와 추론 설정은 [`demo.cpp`](../../../models/experimental/yolox/demo.cpp)의 상단에서 바꿉니다.
 
 전처리는 RGB 이미지 로더의 결과를 BGR CHW로 바꾸고, 비율을 유지해 좌상단부터 배치하며
 남는 영역은 114로 채웁니다. 입력은 0–255 float이고 `1/255` 정규화를 하지 않습니다.

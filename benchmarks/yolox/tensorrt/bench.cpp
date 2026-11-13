@@ -15,7 +15,7 @@
 #include <vector>
 
 #ifndef YOLOX_WEIGHTS_DIR
-#define YOLOX_WEIGHTS_DIR ""
+    #define YOLOX_WEIGHTS_DIR ""
 #endif
 
 namespace {

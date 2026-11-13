@@ -14,7 +14,8 @@ set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 # Build options
-option(VAI_BUILD_EXAMPLES "Build vAi example demos" OFF)
+option(VAI_BUILD_MODEL_DEMO "Build each model's demo (demo-<model>)" ON)
+option(VAI_BUILD_EXAMPLES "Build vAi examples (examples/: mnist, chat-*)" OFF)
 option(VAI_BUILD_TESTS "Build vAi test projects" OFF)
 option(VAI_BUILD_BENCH "Build vAi benchmark projects" OFF)
 option(VAI_BUILD_PYTHON "Build vAi Python bindings (nanobind)" OFF)
@@ -23,16 +24,6 @@ option(VAI_BUILD_PYTHON "Build vAi Python bindings (nanobind)" OFF)
 add_definitions(
     -DVAI_DATA_DIR="${CMAKE_SOURCE_DIR}/data"
 )
-
-# Non-cached build option: always reads from command line, never persists
-# Usage: cmake -DUSE_PYTORCH_CONVENTION=OFF ...
-if(DEFINED USE_PYTORCH_CONVENTION)      # 0. a -D value lands in the cache
-    set(_VAL ${USE_PYTORCH_CONVENTION}) # 1. keep the command-line value
-else()
-    set(_VAL ON)                        # 2. default (ON) when not given
-endif()
-unset(USE_PYTORCH_CONVENTION CACHE)     # 3. drop it from the cache
-set(USE_PYTORCH_CONVENTION ${_VAL})     # 4. plain variable, not cached
 
 
 # External dependencies directory
@@ -104,15 +95,9 @@ PUBLIC
     SHADER_OUTPUT_DIR="${CMAKE_CURRENT_BINARY_DIR}/shaders"
 )
 
-if(USE_PYTORCH_CONVENTION)
-    target_compile_definitions(vAi
-    PUBLIC
-        USE_PYTORCH_CONVENTION
-    )
-endif()
-
-# Include directories. Only the repo root, so every header is spelled in full
-# (vai/nodes/linear.h, models/<model>/model.h) and no two folders can shadow each other.
+# Include directories. Only the repo root, so a header in another folder is spelled in full
+# (vai/nodes/linear.h, models/<impl>/<model>/net.h) and no two folders can shadow each other.
+# A header in the same folder or below is included by its relative path.
 target_include_directories(vAi
 PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
@@ -149,7 +134,7 @@ if(VAI_BUILD_BENCH)
     message(STATUS "[vAi] Building benchmark projects...")
 
     # Vision benchmarks
-    add_subdirectory(benchmarks/yolox)
+    # add_subdirectory(benchmarks/yolox)
 
     # LLM benchmarks
     add_subdirectory(benchmarks/gpt2)

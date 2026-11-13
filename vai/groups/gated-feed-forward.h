@@ -42,7 +42,9 @@ struct GatedFeedForward : public vai::NodeGroup
         .outDim = config.outDim,
         .acceptResidual = config.acceptResidual})
     {
+        // clang-format off
         gateValue - gatedMul - out;
+        // clang-format on
 
         defineSlot("in0", gateValue.slot("in0"));
         if (config.acceptResidual)

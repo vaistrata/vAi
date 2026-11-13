@@ -1,7 +1,7 @@
 #ifndef VAI_NODES_INDEX_COPY_H
 #define VAI_NODES_INDEX_COPY_H
 
-#include "vai/nodes/node-common.h"
+#include "node-common.h"
 
 namespace vai::node {
 
@@ -88,9 +88,11 @@ inline void IndexCopy::prepare()
     vecWords = rowBytes % 16 == 0 ? 4 : rowBytes % 8 == 0 ? 2 : 1;
     rowWords = uint32_t(rowBytes / (4 * vecWords));
 
+    // clang-format off
     pipe = pipelinePool().request("index-copy", {
         eva::constant_id<0>(vecWords)       // vecWords
     });
+    // clang-format on
     if (!descSet)
         descSet = gVaiDestSetPool(pipe.descSetLayout(0));
 }

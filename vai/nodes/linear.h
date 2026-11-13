@@ -3,17 +3,7 @@
 
 // Linear / fully-connected layer, tile (scalar / coopmat) and slab kernels
 // (ports of the ggml/llama.cpp Vulkan mul_mm / mul_mat_vec kernels).
-#include "vai/nodes/node-common.h"
-
-namespace vai {
-
-// Where Linear folds its "residual" in, relative to the epilogue.
-enum class ResidualOrder : uint32_t {
-    AfterEpilogue  = 0,   // a following Add (e.g. YOLO's bottleneck)
-    BeforeEpilogue = 1,   // a bias that changes per run (e.g. pi0's time MLP)
-};
-
-}   // namespace vai
+#include "node-common.h"
 
 namespace vai::node {
 
@@ -32,8 +22,12 @@ namespace vai::node {
   - tile (M > 8): a workgroup owns a wgM x wgN tile. Two kernels share the
     frame, chosen per device in ggmlMulmmTileParams(): scalar
     (linear-tile, each thread accumulates its own outputs) and
-    cooperative-matrix (linear-cm, subgroup MMA tiles). Everything
-    below applies to both:
+    cooperative-matrix (linear-cm, subgroup MMA tiles).
+  - Intel (useIntelTile; every M, slab included): linear-tile-intel, a port of
+    OpenVINO's fully_connected_gpu_bf_tiled, reading W packed once on the GPU
+    (packWeightIntel); its tile choice is intelTileParams(), its split
+    intelTileSplitCount().
+  Everything below applies to every tile kernel:
 
   The tile params are selected per output shape in prepare(); when a shape
   change selects a different tile, the pipeline is re-requested from the pool.
@@ -49,9 +43,10 @@ namespace vai::node {
 
   s is Config::scalarScale (e.g. dt of an Euler step x + dt · v), 1 by default.
 
-  "bias" (wDtype) is a parameter and "residual" R (oDtype) an input. Each is
+  "bias" (its own dtype) is a parameter and "residual" R (oDtype) an input. Each is
   [M, N] or rows that repeat over M: [N], or one image's position table under
-  a batch.
+  a batch. The "bias" slot always exists; the bias applies only when the
+  weight loader filled it.
 =============================================================================*/
 class Linear : public vai::Node
 {
@@ -150,6 +145,17 @@ public:
         bool operator==(const PipeParamsReduce&) const = default;
     };
 
+    // Intel scalar path (linear-tile-intel): tileB rows x 32 columns per subgroup.
+    struct PipeParamsIntel
+    {
+        uint32_t tileB = 0;
+        uint32_t bandTiles = 0;
+        vai::Dtype accDtype = vai::Dtype::None;
+        vai::Dtype iDtype = vai::Dtype::None;
+
+        bool operator==(const PipeParamsIntel&) const = default;
+    };
+
     // A warptile's workgroup grid over the (M, N) output: workgroup counts
     // per axis, and whether the grid's padding reaches M/2 rows.
     struct TileGrid {
@@ -168,38 +174,45 @@ public:
         uint32_t inDim;
         uint32_t outDim;
 
-        bool hasBias = false;
         bool acceptResidual = false;  // input "residual"
         vai::ResidualOrder residualOrder = vai::ResidualOrder::AfterEpilogue;
         vai::Epilogue epilogue = vai::Epilogue::None;
-        float scalarScale = 1.0f;     // s, right after the epilogue
-        vai::Dtype wDtype = vai::Dtype::None;
-        vai::Dtype oDtype = vai::Dtype::None;   // None: oDefaultDtype
+        float scalarScale = 1.0f;   // s, right after the epilogue
 
         uint32_t splitSize = 0;   // split-K: K length per split (0: ggml auto heuristic)
-        vai::Dtype accDtype = vai::Dtype::None;
     } config_;
 
     Linear(Config config);
     void prepare() override;
     void run(eva::CommandBuffer cmdBuff) override;
 
+    // The weight loader filled "bias"; fixed once the weights are up.
+    bool hasBias() const { return (*this)["bias"].validShape(); }
+
+    void setAccDtype(vai::Dtype dtype, vai::DtypeKey) { accDtype_ = dtype; }
+
 private:
+    vai::Dtype accDtype_ = vai::Dtype::None;   // the matmul accumulator; None: the weight's dtype
+
+    // Intel path: the "weight" slot rewritten into linear-tile-intel's layout,
+    // [ceil(N / 32), ceil(K / 2), 64], once (the first prepare).
+    void packWeightIntel();
+    bool weightPackedIntel() const;
+
     // The reduce pass runs when K is split and/or bias / epilogue / the residual
     // is requested (the tile kernel itself carries no epilogue).
     bool needReducePass() const
     {
-        return splitCount > 1 || config_.hasBias || config_.acceptResidual
-            || config_.epilogue != Epilogue::None || config_.scalarScale != 1.0f;
+        return splitCount > 1 || hasBias() || config_.acceptResidual || config_.epilogue != Epilogue::None ||
+               config_.scalarScale != 1.0f;
     }
 
     // Small batches run the slab kernel instead of the tile one;
     // 8 = ggml mul_mat_vec_max_cols.
-    bool useSlabPath(uint32_t M) const
-    {
-        return M <= 8u;
-    }
+    bool useSlabPath(uint32_t M) const { return M <= 8u && !intel_; }
 
+    bool intel_ = false;   // the Intel tile path (useIntelTile), set by prepare()
+    PipeParamsIntel pipeParamsIntel;
     PipeParamsTile pipeParamsTile;
     PipeParamsSlab pipeParamsSlab;
     PipeParamsReduce pipeParamsReduce;
@@ -220,10 +233,12 @@ inline bool ggmlCoopmatAllowedLinear(eva::Device device)
     switch (device.vendorID())
     {
     case eva::VENDOR_ID::INTEL:
-        return device.architectureID() == eva::Architecture::INTEL_XE2
-            || (device.architectureID() == eva::Architecture::INTEL_XE1
-                && device.deviceType() == eva::DEVICE_TYPE::INTEGRATED_GPU
-                && device.driverID() == eva::DRIVER_ID::INTEL_PROPRIETARY_WINDOWS);
+        return device.architectureID() == eva::Architecture::INTEL_XE2 ||
+               device.architectureID() == eva::Architecture::INTEL_XE3 ||
+               ((device.architectureID() == eva::Architecture::INTEL_XE ||
+                 device.architectureID() == eva::Architecture::INTEL_XE_LPG) &&
+                device.deviceType() == eva::DEVICE_TYPE::INTEGRATED_GPU &&
+                device.driverID() == eva::DRIVER_ID::INTEL_PROPRIETARY_WINDOWS);
     case eva::VENDOR_ID::AMD:
         if (device.driverID() == eva::DRIVER_ID::AMD_PROPRIETARY
             || device.driverID() == eva::DRIVER_ID::AMD_OPEN_SOURCE)
@@ -455,7 +470,7 @@ inline Linear::PipeParamsTile ggmlMulmmWarptile(uint32_t M, uint32_t N, uint32_t
     // Per-shape refinement of the ggml pick (= upstream's vendor l_warptile
     // overrides, made shape-aware). Wherever no rule applies, ggml's pick
     // stands; the paired split rules live in ggmlGuessSplitCount.
-    const uint32_t cores = device.coreClusterCount();
+    const uint32_t cores = device.computeBlockCount();
     // Every rule below wants a core count and was measured on whole k-blocks
     // (the picks step k32 / k64; the lone k128 pick checks K % 128 itself).
     if (cores == 0 || K % 64 != 0) return t;
@@ -626,7 +641,7 @@ inline Linear::PipeParamsTile ggmlMulmmTileParams(uint32_t M, uint32_t N, uint32
 inline uint32_t ggmlGuessSplitCount(uint32_t M, uint32_t N, uint32_t K,
                                     const Linear::PipeParamsTile& t, eva::Device device)
 {
-    const uint32_t cores = device.coreClusterCount();
+    const uint32_t cores = device.computeBlockCount();
     const uint32_t tiles = Linear::TileGrid(M, N, t.wgM, t.wgN).tiles();
 
     if (cmRefinedTile(t))
@@ -706,6 +721,96 @@ inline uint32_t ggmlSlabWgSize(uint32_t K, uint32_t N, uint32_t sgSize, eva::Dev
     return sgSize;            // SUBGROUP
 }
 
+// linear-tile-intel runs at subgroup 16 and broadcasts fp16 across it
+// (subgroup extended types).
+inline bool useIntelTile(eva::Device device)
+{
+    return device.vendorID() == eva::VENDOR_ID::INTEL && !ggmlCoopmatShape(device).valid() &&
+           device.minSubgroupSize() <= 16u && 16u <= device.maxSubgroupSize() && device.supportsSubgroupExtendedTypes();
+}
+
+// Workgroups the GPU keeps resident on the Intel tile path (one subgroup each):
+// 16 XVEs x 8 threads per Xe-core (Xe-LPG).
+inline uint32_t intelTileWave(eva::Device device)
+{
+    return device.computeBlockCount() * 128u;
+}
+
+inline uint32_t intelTileMaxSplits(uint32_t K)
+{
+    uint32_t s = 1;
+    while (s < 16 && K / (s * 2) >= 64)
+        s *= 2;
+    return s;
+}
+
+// Intel tile choice (tests/linear-tune-intel, linear-tile-21), a wave being
+// intelTileWave() workgroups:
+//   1. rows per subgroup, most FMAs per load first, within the registers a
+//      lane holds two sets of (32 fp16 / 16 fp32 accumulators); those padding
+//      M by at most 25% (failing all, the least padding);
+//   2. the first of at least 8 rows that fills a whole wave without split-K;
+//      failing that, the first that split-K can bring to half a wave;
+//   3. order: N-first over bands of 256 rows.
+inline Linear::PipeParamsIntel intelTileParams(uint32_t M, uint32_t N, uint32_t K, Dtype iDtype, bool accF32,
+                                               eva::Device device)
+{
+    static constexpr uint32_t kRowsF16[] = { 16, 8, 4, 2, 1 };
+    static constexpr uint32_t kRowsF32[] = { 8, 4, 2, 1 };
+    const uint32_t* rows = accF32 ? kRowsF32 : kRowsF16;
+    const uint32_t count = accF32 ? std::size(kRowsF32) : std::size(kRowsF16);
+    const uint32_t wave = intelTileWave(device);
+
+    const auto pad = [&](uint32_t b) { return float(M) / float(ROUNDUP(M, b)); };
+    float bestPad = 0.0f;
+    for (uint32_t i = 0; i < count; i++)
+        bestPad = std::max(bestPad, pad(rows[i]));
+    const auto usable = [&](uint32_t b) { return pad(b) >= std::min(0.75f, bestPad - 1e-6f); };
+    const auto wgs = [&](uint32_t b) { return CEIL_DIV(M, b) * CEIL_DIV(N, 32u); };
+
+    uint32_t tileB = 0, last = 0;
+    for (uint32_t i = 0; i < count && !tileB; i++)
+        if (usable(rows[i]) && rows[i] >= 8 && wgs(rows[i]) >= wave)
+            tileB = rows[i];
+    for (uint32_t i = 0; i < count && !tileB; i++)
+        if (usable(rows[i]))
+        {
+            last = rows[i];
+            if (wgs(rows[i]) * intelTileMaxSplits(K) >= wave / 2)
+                tileB = rows[i];
+        }
+    if (!tileB)
+        tileB = last;
+
+    return { .tileB = tileB,
+             .bandTiles = std::min(CEIL_DIV(M, tileB), std::max(1u, 256u / tileB)),
+             .accDtype = accF32 ? Dtype::Fp32 : Dtype::Fp16,
+             .iDtype = iDtype };
+}
+
+// Split-K for an Intel tile: the least count reaching half a wave, then doubled
+// while it cuts the whole waves per unit of work, ceil(wgs s / wave) / s, and
+// K / s stays >= 1024.
+inline uint32_t intelTileSplitCount(uint32_t M, uint32_t N, uint32_t K, const Linear::PipeParamsIntel& t,
+                                    eva::Device device)
+{
+    const uint32_t wave = intelTileWave(device), wgs = CEIL_DIV(M, t.tileB) * CEIL_DIV(N, 32u);
+    uint32_t s = 1;
+    while (wgs * s < wave / 2 && s < intelTileMaxSplits(K))
+        s *= 2;
+    float perWork = float(CEIL_DIV(wgs * s, wave)) / float(s);
+    for (uint32_t s2 = s * 2; s2 <= 16 && K / s2 >= 1024; s2 *= 2)
+    {
+        const float w = float(CEIL_DIV(wgs * s2, wave)) / float(s2);
+        if (w < perWork - 1e-6f)
+        {
+            s = s2;
+            perWork = w;
+        }
+    }
+    return s;
+}
+
 inline Linear::Linear(Config config)
 : config_(config)
 {
@@ -714,16 +819,57 @@ inline Linear::Linear(Config config)
     addSlot("weight", NodeSlot::persistent);
     addSlot("partial", NodeSlot::temporary);   // assigned only when the reduce pass runs
 
-    if (config_.hasBias)        addSlot("bias", NodeSlot::persistent);
+    addSlot("bias", NodeSlot::persistent);
     if (config_.acceptResidual) addSlot("residual", NodeSlot::input);
+}
 
-    config_.wDtype = (config_.wDtype == Dtype::None) ? wDefaultDtype() : config_.wDtype;
-    config_.oDtype = (config_.oDtype == Dtype::None) ? oDefaultDtype() : config_.oDtype;
-    config_.accDtype = (config_.accDtype == Dtype::None) ? wDefaultDtype() : config_.accDtype;
+inline bool Linear::weightPackedIntel() const
+{
+    return (*this)["weight"].isShapeOf(CEIL_DIV(config_.outDim, 32u), CEIL_DIV(config_.inDim, 2u), 64u);
+}
+
+// W [N, K] -> W'[n / 32, k / 2, n % 16, (k % 2) * 2 + (n % 32) / 16]
+// (linear-pack-intel), into a buffer from the net's pool that the slot then
+// holds: the [N, K] tensor goes back to the pool, where the next weight of its
+// size can take it, unless something else still holds it.
+inline void Linear::packWeightIntel()
+{
+    const uint32_t N = config_.outDim, K = config_.inDim;
+    Tensor& wTen = (*this)["weight"];
+    Tensor packed({ CEIL_DIV(N, 32u), CEIL_DIV(K, 2u), 64u }, wTen.dtype());
+    packed.bindBuffer(bufferPool().requestBuffer(eva::BUFFER_USAGE::STORAGE_BUFFER | eva::BUFFER_USAGE::TRANSFER_DST,
+                                                 eva::MEMORY_PROPERTY::DEVICE_LOCAL,
+                                                 packed.numBytes(),
+                                                 packed.numBytes()));
+
+    // clang-format off
+    eva::ComputePipeline pipe = pipelinePool().request("linear-pack-intel", {
+        eva::constant_id<SPEC_ID_TYPE_W>(wTen.dtype())   // typeW
+    });
+    // clang-format on
+    eva::DescriptorSet descSet = gVaiDestSetPool(pipe.descSetLayout(0));
+    descSet.write({ packed.buffer(), wTen.buffer() });   // 0 = W', 1 = W
+
+    const uint32_t total = packed.numElements();
+    const uint32_t groups = CEIL_DIV(total, 256u), maxX = device().maxComputeWorkGroupCount()[0];
+    const uint32_t gy = CEIL_DIV(groups, maxX), gx = CEIL_DIV(groups, gy);
+    const uint32_t constants[] = { N, K, total };
+
+    auto cmd = device().newCommandBuffer(eva::queue_compute);
+    cmd.begin(eva::COMMAND_BUFFER_USAGE::ONE_TIME_SUBMIT)
+        .bindPipeline(pipe)
+        .bindDescSets({ descSet })
+        .setPushConstants(0, sizeof(constants), constants)
+        .dispatch(gx, gy, 1)
+        .end();
+    device().queue() << cmd << eva::waiting;
+
+    wTen = packed;
 }
 
 inline void Linear::prepare()
 {
+    const Dtype oDtype = (oDtype_ == Dtype::None) ? oDefaultDtype() : oDtype_;
     const Tensor& inTen = (*this)["in0"];
     const Tensor& wTen  = (*this)["weight"];
 
@@ -732,11 +878,15 @@ inline void Linear::prepare()
     VAI_ASSERT(inTen.shape().back() == K);
 
     const Dtype iDtype = inTen.dtype();
-    VAI_ASSERT(wTen.dtype() == config_.wDtype);
-    VAI_ASSERT(wTen.isShapeOf(N, K));
+    const Dtype wDtype = wTen.dtype();
+    const Dtype accDtype = (accDtype_ == Dtype::None) ? wDtype : accDtype_;
 
     const auto& inShape = inTen.shape();
     uint32_t M = outerSize(inShape);
+    intel_ = useIntelTile(device());
+    if (intel_ && wTen.isShapeOf(N, K))
+        packWeightIntel();
+    VAI_ASSERT(intel_ ? weightPackedIntel() : wTen.isShapeOf(N, K));
 
     // An operand block that covers O is 0, so the shader indexes it directly;
     // a shorter one ([N], or one image's rows) is its length, read modulo.
@@ -747,19 +897,18 @@ inline void Linear::prepare()
         return (elems == outElems) ? 0u : elems;
     };
 
+    const Dtype bDtype = hasBias() ? (*this)["bias"].dtype() : Dtype::None;
     uint32_t biasElems = 0;
-    if (config_.hasBias)
+    if (hasBias())
     {
-        const Tensor& bTen = (*this)["bias"];
-        VAI_ASSERT(bTen.dtype() == config_.wDtype);
-        biasElems = repeatOf(bTen);
+        biasElems = repeatOf((*this)["bias"]);
     }
 
     uint32_t residualElems = 0;
     if (config_.acceptResidual)
     {
         const Tensor& rTen = (*this)["residual"];
-        VAI_ASSERT(rTen.dtype() == config_.oDtype);
+        VAI_ASSERT(rTen.dtype() == oDtype);
         residualElems = repeatOf(rTen);
     }
 
@@ -769,7 +918,7 @@ inline void Linear::prepare()
         // the tile params below; run() only re-derives wgN.
         const uint32_t sgSize  = ggmlSlabSgSize(device());
         const uint32_t wgSize  = ggmlSlabWgSize(K, N, sgSize, device());
-        const uint32_t wgN = (config_.wDtype == Dtype::Fp16) ? 2u : 1u;   // fp16 W pairs N positions
+        const uint32_t wgN = (wDtype == Dtype::Fp16) ? 2u : 1u;   // fp16 W pairs N positions
         const bool     aligned = (K % 4 == 0);   // K_PER_ITER = 4 wide loads
 
         const PipeParamsSlab p = { .M = M, .biasRepeat = biasElems, .residualRepeat = residualElems, .iDtype = iDtype };
@@ -777,24 +926,27 @@ inline void Linear::prepare()
         {
             pipeParamsSlab = p;
 
+            // clang-format off
             pipeSlab = pipelinePool().request("linear-slab", {
                 eva::constant_id<0>(wgSize),                          // wgSize (= local_size_x)
                 eva::constant_id<1>(sgSize),                          // sgSize (pinned subgroup size)
                 eva::constant_id<2>(M),                               // M (flattened batch)
                 eva::constant_id<3>(wgN),                             // wgN
-                eva::constant_id<4>(config_.hasBias ? 1u : 0u),       // hasBias
+                eva::constant_id<4>(hasBias() ? 1u : 0u),             // hasBias
                 eva::constant_id<5>(biasElems),                       // bias repeat (0: covers O)
                 eva::constant_id<6>(config_.acceptResidual ? 1u : 0u),   // hasResidual
                 eva::constant_id<7>(residualElems),                   // residual repeat (0: covers O)
                 eva::constant_id<8>((uint32_t) config_.residualOrder),   // residualOrder
-                eva::constant_id<SPEC_ID_TYPE_O>(config_.oDtype),     // typeO
+                eva::constant_id<9>(bDtype),                          // typeB (bias)
+                eva::constant_id<SPEC_ID_TYPE_O>(oDtype),     // typeO
                 eva::constant_id<SPEC_ID_TYPE_I>(iDtype),             // typeI
-                eva::constant_id<SPEC_ID_TYPE_W>(config_.wDtype),     // typeW (W & bias)
+                eva::constant_id<SPEC_ID_TYPE_W>(wDtype),             // typeW
                 eva::constant_id<SPEC_ID_ALIGNED>(aligned ? 1u : 0u), // aligned (K % 4 == 0)
                 eva::constant_id<SPEC_ID_EPILOGUE>((uint32_t) config_.epilogue)   // epilogue
             }, {
                 .requiredSubgroupSize = sgSize,
             });
+            // clang-format on
 
             if (!descSetSlab)
                 descSetSlab = gVaiDestSetPool(pipeSlab.descSetLayout(0));
@@ -802,140 +954,178 @@ inline void Linear::prepare()
     }
     else
     {
-        // fp32 x fp32 on the scalar tile kernel stages and accumulates fp32;
-        // coopmat (like llama.cpp) and any fp16 operand keep fp16 staging.
-        const bool stageF32 = iDtype == Dtype::Fp32 && config_.wDtype == Dtype::Fp32;
-        const PipeParamsTile t = ggmlMulmmTileParams(M, N, K, iDtype, config_.wDtype, device());
-
-        // Resolve split-K for this shape: explicit splitSize, or the ggml
-        // heuristic when 0.
-        if (config_.splitSize > 0)
+        if (intel_)
         {
-            VAI_ASSERT(config_.splitSize >= 32);
-            splitSize  = config_.splitSize;
+            const bool accF32 = (iDtype == Dtype::Fp32 && wDtype == Dtype::Fp32) || accDtype == Dtype::Fp32;
+            const PipeParamsIntel pi = intelTileParams(M, N, K, iDtype, accF32, device());
+
+            // Split-K: explicit splitSize, or the Intel rule; spans of whole 16-k trips.
+            const uint32_t splits =
+                (config_.splitSize > 0) ? CEIL_DIV(K, config_.splitSize) : intelTileSplitCount(M, N, K, pi, device());
+            splitSize = (splits > 1) ? ROUNDUP(CEIL_DIV(K, splits), 16u) : K;
             splitCount = CEIL_DIV(K, splitSize);
+
+            if (!pipeTile || pi != pipeParamsIntel)
+            {
+                pipeParamsIntel = pi;
+                // clang-format off
+                pipeTile = pipelinePool().request("linear-tile-intel", {
+                    eva::constant_id<7>(pi.tileB),                          // tileB
+                    eva::constant_id<10>(pi.bandTiles),                     // bandTiles
+                    eva::constant_id<11>(pi.accDtype),                      // accType
+                    eva::constant_id<SPEC_ID_TYPE_O>(oDtype),       // typeO
+                    eva::constant_id<SPEC_ID_TYPE_I>(iDtype),               // typeI
+                    eva::constant_id<SPEC_ID_TYPE_W>(wDtype)        // typeW
+                }, {
+                    .requiredSubgroupSize = 16,
+                });
+                // clang-format on
+
+                if (!descSetTile)
+                    descSetTile = gVaiDestSetPool(pipeTile.descSetLayout(0));
+            }
         }
         else
         {
-            splitCount = ggmlGuessSplitCount(M, N, K, t, device());
-            splitSize  = (splitCount > 1) ? ggmlSplitSize(K, splitCount) : K;
-        }
+            // fp32 x fp32 on the scalar tile kernel stages and accumulates fp32;
+            // coopmat (like llama.cpp) and any fp16 operand keep fp16 staging.
+            const bool stageF32 = iDtype == Dtype::Fp32 && wDtype == Dtype::Fp32;
+            const PipeParamsTile t = ggmlMulmmTileParams(M, N, K, iDtype, wDtype, device());
 
-        if (!pipeTile || t != pipeParamsTile)
-        {
-            pipeParamsTile = t;
-
-            // Whole k-blocks need K % wgK == 0 (and each split starting on a
-            // k-block boundary); otherwise the kernel's scalar masked-load path
-            // is selected. Heuristic splits are multiples of 256, so only wgK
-            // among the key moves this.
-            const bool aligned = (K % t.wgK == 0) && (splitSize % t.wgK == 0);
-
-            // Robustness folds the loaders' row-tail guards away (spec 12):
-            // garbage from a robust OOB tail read only feeds outputs the
-            // stores mask off (the K-tail masks stay — that axis is summed).
-            // Guarded loads stall staging: 17-33% measured with device-local
-            // input (pinned inputs invert that — see tests/linear-cm).
-            // NOTE (vs llama.cpp): ggml relies on core robustBufferAccess,
-            // always on; vai needs VK_EXT_pipeline_robustness, else guards stay.
-            const bool robust = device().supportsPipelineRobustness();
-
-            // Loader constraints, common to both tile kernels (they share
-            // the cooperative loaders): wgK 8-wide-load aligned, and the
-            // loaders sweep whole wgM/wgN tiles per pass (elements per load
-            // call: aligned 8, scalar 2).
-            const uint32_t el = aligned ? 8u : 2u;
-            VAI_ASSERT(t.wgK % 8 == 0);
-            VAI_ASSERT((t.wgSize * el) % t.wgK == 0);
-            VAI_ASSERT(t.wgM % (t.wgSize * el / t.wgK) == 0 && t.wgN % (t.wgSize * el / t.wgK) == 0);
-
-            if (t.tK != 0)   // coopmat kernel
+            // Resolve split-K for this shape: explicit splitSize, or the ggml
+            // heuristic when 0.
+            if (config_.splitSize > 0)
             {
-                // fp16 accumulation only when the locked shape reports it;
-                // otherwise promote to fp32 (ggml falls back to its f32acc
-                // pipeline the same way).
-                const Dtype acc = (config_.accDtype == Dtype::Fp16
-                                   && !ggmlCoopmatShape(device()).accF16)
-                                ? Dtype::Fp32 : config_.accDtype;
-
-                // NOTE (vs llama.cpp): ggml passes REQUIRE_FULL_SUBGROUPS_BIT
-                // here; eva doesn't expose it (see ggmlCoopmatShape).
-                pipeTile = pipelinePool().request("linear-cm", {
-                    eva::constant_id<0>(t.wgSize),                       // wgSize (= local_size_x)
-                    eva::constant_id<1>(t.sgSize),                       // sgSize (= device subgroup size)
-                    eva::constant_id<2>(t.wgM),                          // wgM
-                    eva::constant_id<3>(t.wgN),                          // wgN
-                    eva::constant_id<4>(t.wgK),                          // wgK
-                    eva::constant_id<5>(t.sgM),                          // sgM
-                    eva::constant_id<6>(t.sgN),                          // sgN
-                    eva::constant_id<7>(t.tM),                           // tM
-                    eva::constant_id<8>(t.tN),                           // tN
-                    eva::constant_id<9>(t.tK),                           // tK
-                    eva::constant_id<11>(acc),                           // accType
-                    eva::constant_id<12>(robust ? 1u : 0u),              // robustBufferAccess
-                    eva::constant_id<SPEC_ID_TYPE_O>(config_.oDtype),    // typeO
-                    eva::constant_id<SPEC_ID_TYPE_I>(iDtype),            // typeI
-                    eva::constant_id<SPEC_ID_TYPE_W>(config_.wDtype),    // typeW
-                    eva::constant_id<SPEC_ID_ALIGNED>(aligned ? 1u : 0u) // aligned
-                }, {
-                    .robustBufferAccess = robust,
-                });
+                VAI_ASSERT(config_.splitSize >= 32);
+                splitSize = config_.splitSize;
+                splitCount = CEIL_DIV(K, splitSize);
             }
-            else   // scalar tile kernel
+            else
             {
-                // Force the tile's assumed subgroup size onto the pipeline when the
-                // device supports that size; otherwise leave the driver's choice.
-                // (measured on Intel Arc iGPU: forcing 32 doubles the kernel time —
-                //  the driver prefers a narrower SIMD width for this kernel)
-                const bool forceSg = t.sgSize >= device().minSubgroupSize()
-                                  && t.sgSize <= device().maxSubgroupSize()
-                                  && false;
-
-                // tN even: the kernel accumulates W-row pairs.
-                VAI_ASSERT(t.tN % 2 == 0);
-
-                pipeTile = pipelinePool().request("linear-tile", {
-                    eva::constant_id<0>(t.wgSize),                                     // wgSize (= local_size_x)
-                    eva::constant_id<1>(t.sgSize),                                     // sgSize
-                    eva::constant_id<2>(t.wgM),                                        // wgM
-                    eva::constant_id<3>(t.wgN),                                        // wgN
-                    eva::constant_id<4>(t.wgK),                                        // wgK
-                    eva::constant_id<5>(t.sgM),                                        // sgM
-                    eva::constant_id<6>(t.sgN),                                        // sgN
-                    eva::constant_id<7>(t.tM),                                         // tM
-                    eva::constant_id<8>(t.tN),                                         // tN
-                    eva::constant_id<9>(t.sgpMIter),                                   // sgpMIter
-                    eva::constant_id<10>(t.sgpNIter),                                  // sgpNIter
-                    eva::constant_id<11>(stageF32 ? Dtype::Fp32 : config_.accDtype),   // accType (fp32 over fp32 staging)
-                    eva::constant_id<12>(robust ? 1u : 0u),                            // robustBufferAccess
-                    eva::constant_id<SPEC_ID_TYPE_O>(config_.oDtype),                  // typeO
-                    eva::constant_id<SPEC_ID_TYPE_I>(iDtype),                          // typeI
-                    eva::constant_id<SPEC_ID_TYPE_W>(config_.wDtype),                  // typeW
-                    eva::constant_id<SPEC_ID_ALIGNED>(aligned ? 1u : 0u)               // aligned
-                }, {
-                    .requiredSubgroupSize = forceSg ? t.sgSize : 0u,
-                    .robustBufferAccess = robust,
-                });
+                splitCount = ggmlGuessSplitCount(M, N, K, t, device());
+                splitSize = (splitCount > 1) ? ggmlSplitSize(K, splitCount) : K;
             }
 
-            if (!descSetTile)
-                descSetTile = gVaiDestSetPool(pipeTile.descSetLayout(0));
+            if (!pipeTile || t != pipeParamsTile)
+            {
+                pipeParamsTile = t;
+
+                // Whole k-blocks need K % wgK == 0 (and each split starting on a
+                // k-block boundary); otherwise the kernel's scalar masked-load path
+                // is selected. Heuristic splits are multiples of 256, so only wgK
+                // among the key moves this.
+                const bool aligned = (K % t.wgK == 0) && (splitSize % t.wgK == 0);
+
+                // Robustness folds the loaders' row-tail guards away (spec 12):
+                // garbage from a robust OOB tail read only feeds outputs the
+                // stores mask off (the K-tail masks stay — that axis is summed).
+                // Guarded loads stall staging: 17-33% measured with device-local
+                // input (pinned inputs invert that — see tests/linear-cm).
+                // NOTE (vs llama.cpp): ggml relies on core robustBufferAccess,
+                // always on; vai needs VK_EXT_pipeline_robustness, else guards stay.
+                const bool robust = device().supportsPipelineRobustness();
+
+                // Loader constraints, common to both tile kernels (they share
+                // the cooperative loaders): wgK 8-wide-load aligned, and the
+                // loaders sweep whole wgM/wgN tiles per pass (elements per load
+                // call: aligned 8, scalar 2).
+                const uint32_t el = aligned ? 8u : 2u;
+                VAI_ASSERT(t.wgK % 8 == 0);
+                VAI_ASSERT((t.wgSize * el) % t.wgK == 0);
+                VAI_ASSERT(t.wgM % (t.wgSize * el / t.wgK) == 0 && t.wgN % (t.wgSize * el / t.wgK) == 0);
+
+                if (t.tK != 0)   // coopmat kernel
+                {
+                    // fp16 accumulation only when the locked shape reports it;
+                    // otherwise promote to fp32 (ggml falls back to its f32acc
+                    // pipeline the same way).
+                    const Dtype acc =
+                        (accDtype == Dtype::Fp16 && !ggmlCoopmatShape(device()).accF16) ? Dtype::Fp32 : accDtype;
+
+                    // NOTE (vs llama.cpp): ggml passes REQUIRE_FULL_SUBGROUPS_BIT
+                    // here; eva doesn't expose it (see ggmlCoopmatShape).
+                    // clang-format off
+                    pipeTile = pipelinePool().request("linear-cm", {
+                        eva::constant_id<0>(t.wgSize),                       // wgSize (= local_size_x)
+                        eva::constant_id<1>(t.sgSize),                       // sgSize (= device subgroup size)
+                        eva::constant_id<2>(t.wgM),                          // wgM
+                        eva::constant_id<3>(t.wgN),                          // wgN
+                        eva::constant_id<4>(t.wgK),                          // wgK
+                        eva::constant_id<5>(t.sgM),                          // sgM
+                        eva::constant_id<6>(t.sgN),                          // sgN
+                        eva::constant_id<7>(t.tM),                           // tM
+                        eva::constant_id<8>(t.tN),                           // tN
+                        eva::constant_id<9>(t.tK),                           // tK
+                        eva::constant_id<11>(acc),                           // accType
+                        eva::constant_id<12>(robust ? 1u : 0u),              // robustBufferAccess
+                        eva::constant_id<SPEC_ID_TYPE_O>(oDtype),    // typeO
+                        eva::constant_id<SPEC_ID_TYPE_I>(iDtype),            // typeI
+                        eva::constant_id<SPEC_ID_TYPE_W>(wDtype),    // typeW
+                        eva::constant_id<SPEC_ID_ALIGNED>(aligned ? 1u : 0u) // aligned
+                    }, {
+                        .robustBufferAccess = robust,
+                    });
+                    // clang-format on
+                }
+                else   // scalar tile kernel
+                {
+                    // Force the tile's assumed subgroup size onto the pipeline when the
+                    // device supports that size; otherwise leave the driver's choice.
+                    // (measured on Intel Arc iGPU: forcing 32 doubles the kernel time —
+                    //  the driver prefers a narrower SIMD width for this kernel)
+                    const bool forceSg =
+                        t.sgSize >= device().minSubgroupSize() && t.sgSize <= device().maxSubgroupSize() && false;
+
+                    // tN even: the kernel accumulates W-row pairs.
+                    VAI_ASSERT(t.tN % 2 == 0);
+
+                    // clang-format off
+                    pipeTile = pipelinePool().request("linear-tile", {
+                        eva::constant_id<0>(t.wgSize),                                     // wgSize (= local_size_x)
+                        eva::constant_id<1>(t.sgSize),                                     // sgSize
+                        eva::constant_id<2>(t.wgM),                                        // wgM
+                        eva::constant_id<3>(t.wgN),                                        // wgN
+                        eva::constant_id<4>(t.wgK),                                        // wgK
+                        eva::constant_id<5>(t.sgM),                                        // sgM
+                        eva::constant_id<6>(t.sgN),                                        // sgN
+                        eva::constant_id<7>(t.tM),                                         // tM
+                        eva::constant_id<8>(t.tN),                                         // tN
+                        eva::constant_id<9>(t.sgpMIter),                                   // sgpMIter
+                        eva::constant_id<10>(t.sgpNIter),                                  // sgpNIter
+                        eva::constant_id<11>(stageF32 ? Dtype::Fp32 : accDtype),   // accType (fp32 over fp32 staging)
+                        eva::constant_id<12>(robust ? 1u : 0u),                            // robustBufferAccess
+                        eva::constant_id<SPEC_ID_TYPE_O>(oDtype),                  // typeO
+                        eva::constant_id<SPEC_ID_TYPE_I>(iDtype),                          // typeI
+                        eva::constant_id<SPEC_ID_TYPE_W>(wDtype),                  // typeW
+                        eva::constant_id<SPEC_ID_ALIGNED>(aligned ? 1u : 0u)               // aligned
+                    }, {
+                        .requiredSubgroupSize = forceSg ? t.sgSize : 0u,
+                        .robustBufferAccess = robust,
+                    });
+                    // clang-format on
+                }
+
+                if (!descSetTile)
+                    descSetTile = gVaiDestSetPool(pipeTile.descSetLayout(0));
+            }
         }
 
         const PipeParamsReduce r = { .biasRepeat = biasElems, .residualRepeat = residualElems };
         if (needReducePass() && (!pipeReduce || r != pipeParamsReduce))
         {
             pipeParamsReduce = r;
+            // clang-format off
             pipeReduce = pipelinePool().request("linear-reduce", {
-                eva::constant_id<0>(config_.hasBias ? 1u : 0u),          // hasBias
+                eva::constant_id<0>(hasBias() ? 1u : 0u),                // hasBias
                 eva::constant_id<1>(biasElems),                          // bias repeat (0: covers O)
                 eva::constant_id<2>(config_.acceptResidual ? 1u : 0u),   // hasResidual
                 eva::constant_id<3>(residualElems),                      // residual repeat (0: covers O)
                 eva::constant_id<4>((uint32_t) config_.residualOrder),   // residualOrder
-                eva::constant_id<SPEC_ID_TYPE_O>(config_.oDtype),        // typeO (O, P & residual)
-                eva::constant_id<SPEC_ID_TYPE_W>(config_.wDtype),        // typeW (bias)
+                eva::constant_id<5>(bDtype),                             // typeB (bias)
+                eva::constant_id<SPEC_ID_TYPE_O>(oDtype),        // typeO (O, P & residual)
                 eva::constant_id<SPEC_ID_EPILOGUE>((uint32_t) config_.epilogue)   // epilogue
             });
+            // clang-format on
 
             if (!descSetReduce)
                 descSetReduce = gVaiDestSetPool(pipeReduce.descSetLayout(0));
@@ -944,13 +1134,12 @@ inline void Linear::prepare()
         // The partial buffer stays inside the tile branch: on the slab path
         // splitCount keeps the previous shape's value and must not be read.
         if (needReducePass())
-            (*this)["partial"] = Tensor({splitCount, M, N}, config_.oDtype);
+            (*this)["partial"] = Tensor({ splitCount, M, N }, oDtype);
     }
 
     auto outShape = inShape;
     outShape.back() = N;
-    (*this)["out0"] = Tensor(outShape, config_.oDtype);
-
+    (*this)["out0"] = Tensor(outShape, oDtype);
 }
 
 inline void Linear::run(eva::CommandBuffer cmdBuff)
@@ -972,8 +1161,8 @@ inline void Linear::run(eva::CommandBuffer cmdBuff)
     // {K, N} (the tile kernel below uses {M, N, K, splitSize}).
     if (useSlabPath(M))
     {
-        const uint32_t wgN = (config_.wDtype == Dtype::Fp16) ? 2u : 1u;   // fp16 W pairs N positions
-        auto bBuf = findSlot("bias") ? (*this)["bias"].buffer() : eva::Buffer();
+        const uint32_t wgN = ((*this)["weight"].dtype() == Dtype::Fp16) ? 2u : 1u;   // fp16 W pairs N positions
+        auto bBuf = hasBias() ? (*this)["bias"].buffer() : eva::Buffer();
         struct { uint32_t K, N; float scalarScale; } slabConstants = { K, N, config_.scalarScale };
 
         // 1 workgroup = wgN N positions. An N past the device's X-grid limit folds
@@ -998,16 +1187,31 @@ inline void Linear::run(eva::CommandBuffer cmdBuff)
     }
 
     uint32_t constants[] = { M, N, K, splitSize };
-    const TileGrid grid(M, N, pipeParamsTile.wgM, pipeParamsTile.wgN);
+    uint32_t gx, gy;
+    if (intel_)
+    {
+        // One flat tile index (linear-tile-intel), folded into y past the x limit.
+        const uint32_t bands = CEIL_DIV(CEIL_DIV(M, pipeParamsIntel.tileB), pipeParamsIntel.bandTiles);
+        const uint32_t total = CEIL_DIV(N, 32u) * bands * pipeParamsIntel.bandTiles;
+        gy = (total <= device().maxComputeWorkGroupCount()[0])
+                 ? 1u
+                 : CEIL_DIV(total, CEIL_DIV(total, device().maxComputeWorkGroupCount()[1]));
+        gx = CEIL_DIV(total, gy);
+    }
+    else
+    {
+        const TileGrid grid(M, N, pipeParamsTile.wgM, pipeParamsTile.wgN);
+        gx = grid.tilesN;
+        gy = grid.tilesM;
+    }
 
     if (!needReducePass())
     {
         descSetTile.write({ outBuf, inBuf, wBuf });
-        cmdBuff
-            .bindPipeline(pipeTile)
-            .bindDescSets({descSetTile})
+        cmdBuff.bindPipeline(pipeTile)
+            .bindDescSets({ descSetTile })
             .setPushConstants(0, sizeof(constants), &constants)
-            .dispatch(grid.tilesN, grid.tilesM, 1)
+            .dispatch(gx, gy, 1)
             .barrier(eva::SYNC_SCOPE::COMPUTE_WRITE / outBuf / eva::SYNC_SCOPE::COMPUTE_READ);
         return;
     }
@@ -1015,7 +1219,7 @@ inline void Linear::run(eva::CommandBuffer cmdBuff)
     // Split path: the tile kernel writes partials P[splitCount, M, N], then the
     // reduce pass folds them and applies bias / epilogue / the residual.
     auto pBuf = (*this)["partial"].buffer();
-    auto bBuf = findSlot("bias") ? (*this)["bias"].buffer() : eva::Buffer();
+    auto bBuf = hasBias() ? (*this)["bias"].buffer() : eva::Buffer();
     descSetTile.write({ pBuf, inBuf, wBuf });
     descSetReduce.write({ outBuf, pBuf, bBuf, rBuf });   // 0 = O, 1 = P, 2 = bias, 3 = residual
 
@@ -1023,14 +1227,13 @@ inline void Linear::run(eva::CommandBuffer cmdBuff)
     constexpr uint32_t reduceBatch  = 4;     // elements folded per invocation
     struct { uint32_t MN, splitCount, N; float scalarScale; } reduceConstants = { M * N, splitCount, N, config_.scalarScale };
 
-    cmdBuff
-        .bindPipeline(pipeTile)
-        .bindDescSets({descSetTile})
+    cmdBuff.bindPipeline(pipeTile)
+        .bindDescSets({ descSetTile })
         .setPushConstants(0, sizeof(constants), &constants)
-        .dispatch(grid.tilesN, grid.tilesM, splitCount)
+        .dispatch(gx, gy, splitCount)
         .barrier(eva::SYNC_SCOPE::COMPUTE_WRITE / pBuf / eva::SYNC_SCOPE::COMPUTE_READ)
         .bindPipeline(pipeReduce)
-        .bindDescSets({descSetReduce})
+        .bindDescSets({ descSetReduce })
         .setPushConstants(0, sizeof(reduceConstants), &reduceConstants)
         .dispatch(CEIL_DIV(M * N, reduceWgSize * reduceBatch), 1, 1)
         .barrier(eva::SYNC_SCOPE::COMPUTE_WRITE / outBuf / eva::SYNC_SCOPE::COMPUTE_READ);

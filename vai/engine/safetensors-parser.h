@@ -1,5 +1,5 @@
-#ifndef SAFETENSORSPARSER_H
-#define SAFETENSORSPARSER_H
+#ifndef VAI_ENGINE_SAFETENSORS_PARSER_H
+#define VAI_ENGINE_SAFETENSORS_PARSER_H
 
 #include <vector>
 #include <memory>
@@ -67,4 +67,4 @@ inline void SafetensorRef::readInto(void* dst, size_t byteOffset, size_t byteCou
 
 } // namespace vai
 
-#endif // SAFETENSORSPARSER_H
+#endif   // VAI_ENGINE_SAFETENSORS_PARSER_H

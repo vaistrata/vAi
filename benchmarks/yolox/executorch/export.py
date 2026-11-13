@@ -11,6 +11,7 @@ from pathlib import Path
 import torch
 from executorch.backends.vulkan.partitioner.vulkan_partitioner import VulkanPartitioner
 from executorch.backends.vulkan.utils import DEFAULT_TEXTURE_LIMITS
+
 try:
     from executorch.backends.vulkan.utils import SMALL_TEXTURE_LIMITS
 except ImportError:
@@ -49,7 +50,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=(REPO_ROOT / "data/yolox").resolve(),
+        default=(REPO_ROOT / "data/benchmarks/yolox").resolve(),
         help="Directory where .pte files will be written.",
     )
     parser.add_argument(
@@ -107,9 +108,7 @@ def get_vulkan_compile_options(gpu: int) -> dict[str, bool]:
         except subprocess.TimeoutExpired as error:
             raise RuntimeError("vulkaninfo timed out while querying the target GPU.") from error
         except subprocess.CalledProcessError as error:
-            details = "\n".join(
-                value.strip() for value in (error.stdout, error.stderr) if value
-            )
+            details = "\n".join(value.strip() for value in (error.stdout, error.stderr) if value)
             raise RuntimeError(f"Failed to query Vulkan GPU {gpu}:\n{details}") from error
 
         try:
@@ -152,15 +151,14 @@ def resolve_weights_path(
     if weights_dir is not None:
         candidates.append(weights_dir / relative_path)
     candidates.append(output_dir / relative_path)
-    candidates.append((REPO_ROOT / "data/yolox" / relative_path).resolve())
+    candidates.append((REPO_ROOT / "data/benchmarks/yolox" / relative_path).resolve())
 
     for candidate in candidates:
         if candidate.exists():
             return candidate.resolve()
 
     searched = ", ".join(str(candidate) for candidate in candidates)
-    raise FileNotFoundError(
-        f"YOLOX weights not found: {relative_path}; searched: {searched}")
+    raise FileNotFoundError(f"YOLOX weights not found: {relative_path}; searched: {searched}")
 
 
 def make_example_inputs(

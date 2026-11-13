@@ -39,13 +39,14 @@ Build options:
 
 | Option | Default | Description |
 |---|---|---|
-| `VAI_BUILD_EXAMPLES` | ON | Model-specific demos (`demo-mnist`, `demo-gpt2`, etc.) |
+| `VAI_BUILD_MODEL_DEMO` | ON | Each model's demo (`demo-gpt2`, `demo-yolox`, etc.) |
+| `VAI_BUILD_EXAMPLES` | OFF | Examples outside the models (`demo-mnist`, `chat-llama3`, `chat-gemma3`) |
 | `VAI_BUILD_TESTS` | OFF | Kernel-level tests, A/B |
 | `VAI_BUILD_BENCH` | OFF | Benchmarks against llama.cpp, ncnn, and other frameworks |
 
 ## Simple Example
 
-MNIST classfier—from model definition and weight loading to execution [`examples/mnist/main.cpp`](../../examples/mnist/main.cpp)—is contained in a single file. Below, we walk through this file from top to bottom. The checkpoint and input images are also included in [`data/mnist/`](../../data/mnist/).
+MNIST classfier—from model definition and weight loading to execution [`examples/mnist/main.cpp`](../../examples/mnist/main.cpp)—is contained in a single file. Below, we walk through this file from top to bottom. The checkpoint is in [`data/ckpts/mnist/jroot/`](../../data/ckpts/mnist/jroot/) and the input images in [`data/images/`](../../data/images/).
 
 ### Connecting Nodes
 
@@ -62,7 +63,6 @@ struct ConvBlock : public vai::NodeGroup {
         .outChannels = outChannels,
         .kernelSize = kernelSize,
         .stride = 1,
-        .hasBias = true,
         .epilogue = vai::Epilogue::Relu
     })
     , maxpool({
@@ -121,12 +121,12 @@ Inherit from `vai::NeuralNet`, creates the graph's input and output, using `inpu
 
 
 ```cpp
-struct Model : public vai::NeuralNet {
+struct Net : public vai::NeuralNet {
     ConvSequence convX2;
     vai::node::Flatten flatten;
     vai::node::Linear linear;
 
-    Model(const vai::NeuralNetConfig& netCfg)
+    Net(const vai::NeuralNetConfig& netCfg)
     : NeuralNet(netCfg)
     , convX2({1, 32, 64}, 3)
     , flatten()
@@ -145,27 +145,26 @@ Weight loading is implemented by specializing `loadWeights<deployment_name>(mode
 
 ```cpp
 template<>
-void loadWeights<"jroooot", mnist::Model>(mnist::Model& model)
+void loadWeights<"jroooot", mnist::Net>(mnist::Net& net)
 {
-    std::string path = VAI_DATA_DIR "/mnist/model.safetensors";
+    std::string path = VAI_DATA_DIR "/ckpts/mnist/jroot/model.safetensors";
     auto parser = vai::SafetensorsParser(path.c_str());
 
-    // Each tensor is read using the dtype declared by the node that owns it.
-
+    // Weights load at the net's wDefaultDtype.
+    const vai::Dtype wDt = net.config().wDefaultDtype;
     auto load = [&](auto& node, const std::string& wKey, const std::string& bKey)
     {
-        vai::Dtype dt = node.config_.wDtype;
-        node["weight"] = vai::Tensor(parser[wKey], dt);
-        node["bias"]   = vai::Tensor(parser[bKey], dt);
+        node["weight"] = vai::Tensor(parser[wKey], wDt);
+        node["bias"]   = vai::Tensor(parser[bKey], wDt);
     };
 
-    load(model.convX2.blocks[0].conv, "conv1.weight", "conv1.bias");
-    load(model.convX2.blocks[1].conv, "conv2.weight", "conv2.bias");
-    load(model.linear, "fc.weight", "fc.bias");
+    load(net.convX2.blocks[0].conv, "conv1.weight", "conv1.bias");
+    load(net.convX2.blocks[1].conv, "conv2.weight", "conv2.bias");
+    load(net.linear, "fc.weight", "fc.bias");
 }
 ```
 
-`VAI_DATA_DIR` is the repository's data/ path embedded by the build system. This function is the only place that knows the checkpoint key names and disk paths, and the model definition knows neither. For the provided models, these specializations are placed in a separate file named `models/<model>/<deployment_name>-weights.h` (see [Weight loading in Provided Models](04-models/README.md#weight-loading) for details on this structure).
+`VAI_DATA_DIR` is the repository's data/ path embedded by the build system. This function is the only place that knows the checkpoint key names and disk paths, and the model definition knows neither. For the provided models, these specializations are placed in a separate file named `models/<impl>/<model>/<deployment_name>-weights.h` (see [Weight loading in Provided Models](04-models/README.md#weight-loading) for details on this structure).
 
 ### Execution
 
@@ -173,23 +172,23 @@ void loadWeights<"jroooot", mnist::Model>(mnist::Model& model)
 int main()
 {
     // Load the 28x28 gray image and normalize it to [0, 1]
-    std::vector<float> inputData = ImageProcessor(VAI_DATA_DIR "/mnist/0.png", 1)
+    std::vector<float> inputData = vai::utils::ImageProcessor(VAI_DATA_DIR "/images/0.png", 1)
         .normalize(0.0f, 1.0f)
         .chw();
 
     // Create the model. defaultDtype is the default precision for parameters.
-    mnist::Model model({
+    mnist::Net net({
         .defaultDtype = Dtype::Fp32,
     });
 
     // Load weights from the check point ("jroooot"is the contributor who trained it)
-    loadWeights<"jroooot">(model);
+    loadWeights<"jroooot">(net);
 
     Tensor input = Tensor({1, 28, 28}, Dtype::Fp32).setFloats(inputData);
     Tensor output;
 
     // Run the model and get the logits
-    model({{"in0", input}}, {{"out0", &output}});
+    net({{"in0", input}}, {{"out0", &output}});
 
     // The network output is fp32.
     const float* data = output.getData();

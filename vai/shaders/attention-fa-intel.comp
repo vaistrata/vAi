@@ -1,0 +1,427 @@
+/*=============================================================================
+ attention-fa-intel.comp: flash attention for Intel GPUs without a coopmat
+     path (Xe-LPG, Xe-HPG), separate Q/K/V, GQA
+
+     1) append the new K / V tokens to the K / V cache (fused)
+     2) O[nq, h, dh] = sum_j softmax(Q[h, nq] · K(h/groupSize, j) * scale)[j] * V(h/groupSize, j, dh)
+
+     O is token-major [B, Tq, Hq, Dh]; O (typeO), the Q / K / V inputs (typeI)
+     and the K / V cache (typeCache) are fp32 or fp16. The interface (bindings,
+     push constants, fused append, split-K partials, causal blocks, span, ring) is
+     attention-fa.comp's.
+
+ One workgroup owns 16 rows: tileTokens query tokens x the groupSize query
+ heads of one KV head (row r: token r / groupSize, head r % groupSize), so a
+ KV group reads each K / V row once. Subgroup size 16 is forced. Per KV block
+ of BK = 8 * NSG keys:
+   - S = Q K^T: subgroup s takes keys 8s .. 8s + 7 for all 16 rows; lane l
+     owns row l. Each key row loads once (lane = a head-dim pair) and every
+     lane takes it pair by pair through subgroupBroadcast. qkAccF32 = 0 sums
+     32 head dims in fp16 and the chunks in fp32; 1 keeps Q in fp32 and sums
+     in fp32.
+   - softmax: a lane owns its row, so no subgroup reduction; the subgroups
+     exchange their block maxima through shared memory and keep their own
+     partial sums. P (fp16) goes to shared memory.
+   - O += P V: the subgroups split 16 rows x Dh as PRB row blocks x DS head-
+     dim slices of 64; lane l owns head dims 4l .. 4l + 3 of its slice. P loads
+     16 keys at a time (lane = key) and is broadcast key by key; V loads from
+     global memory (lane = 4 head dims). accF16 = 1 accumulates in fp16.
+ The f16 broadcasts need shaderSubgroupExtendedTypes (host-gated).
+
+ Split-K (push kCount > 1): the keys the tile reaches (cache and new) are cut
+ into kCount spans, split 0 appends, and attention-fa-reduce.comp folds the
+ partials.
+
+ The K / V inputs carry Tkv rows (0 = the cache alone), aligned with the Tq
+ queries at their ends; Tkv > Tq rows append a grid of tiles apart.
+
+ Requirements (host-gated): Dh % 8 == 0, 16 <= Dh <= 256; groupSize <= 16;
+ tileTokens * groupSize <= 16; wgSize = 16 * NSG with NSG % DS == 0.
+ Dispatch (host): (ceil(Tq / tileTokens) * kCount, Hkv, B)
+=============================================================================*/
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_control_flow_attributes : enable
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_ballot : require
+#extension GL_EXT_shader_subgroup_extended_types_float16 : require
+#include "common/spec_constants.h"
+
+layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;   // = wgSize (same SpecId)
+
+layout(constant_id = 0) const uint wgSize     = 256;  // threads per workgroup (= local_size_x)
+layout(constant_id = 1) const uint tileTokens = 2;    // query tokens per workgroup
+layout(constant_id = 3) const uint Dh         = 256;  // head dim
+layout(constant_id = 4) const uint qkAccF32   = 0;    // Q K^T: 0 = fp16 within 32 dims, fp32 across; 1 = fp32
+layout(constant_id = 10) const uint accF16    = 0;    // O accumulator: 0 = fp32, 1 = fp16
+layout(constant_id = 12) const uint kvCacheRing = 0;  // 1: the cache keeps the last Tmax positions, p at row p % Tmax
+layout(constant_id = 13) const uint typeI      = 0;   // Q / K / V input dtype
+layout(constant_id = 14) const uint typeCache  = 0;   // K / V cache dtype
+layout(constant_id = 15) const uint kvCaching  = 1;   // 0: skip the append; the cache bindings are null
+layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0;  // O (output) dtype
+
+// The S pass reads K in head-dim pairs, the PV pass reads V and the append
+// copies in vec4s.
+layout(set = 0, binding = 0) writeonly buffer O_BUF_F32 { vec4 bufferO_f32[]; };   // attention O [B, Tq, Hq, Dh]
+layout(set = 0, binding = 0) writeonly buffer O_BUF_F16 { f16vec4 bufferO_f16[]; };
+//////////////////////////////////////////////////////////////////////////////
+layout(set = 0, binding = 1) readonly buffer Q_BUF_F32 { vec4 bufferQ_f32[]; };   // query Q [B, Hq, Tq, Dh]
+layout(set = 0, binding = 1) readonly buffer Q_BUF_F16 { f16vec4 bufferQ_f16[]; };
+layout(set = 0, binding = 2) readonly buffer K_BUF_F32 { vec4 bufferK_f32[]; };   // key   K [B, Hkv, Tkv, Dh] (new tokens)
+layout(set = 0, binding = 2) readonly buffer K_BUF_F16 { f16vec4 bufferK_f16[]; };
+layout(set = 0, binding = 2) readonly buffer K2_BUF_F32 { vec2 bufferK2_f32[]; };
+layout(set = 0, binding = 2) readonly buffer K2_BUF_F16 { f16vec2 bufferK2_f16[]; };
+layout(set = 0, binding = 3) readonly buffer V_BUF_F32 { vec4 bufferV_f32[]; };   // value V [B, Hkv, Tkv, Dh] (new tokens)
+layout(set = 0, binding = 3) readonly buffer V_BUF_F16 { f16vec4 bufferV_f16[]; };
+//////////////////////////////////////////////////////////////////////////////
+layout(set = 0, binding = 4) readonly buffer KCACHE_BUF_F32 { vec4 bufferKCache_f32[]; };   // K cache [B, Hkv, Tmax, Dh]
+layout(set = 0, binding = 4) readonly buffer KCACHE_BUF_F16 { f16vec4 bufferKCache_f16[]; };
+layout(set = 0, binding = 4) readonly buffer KCACHE2_BUF_F32 { vec2 bufferKCache2_f32[]; };
+layout(set = 0, binding = 4) readonly buffer KCACHE2_BUF_F16 { f16vec2 bufferKCache2_f16[]; };
+layout(set = 0, binding = 4) writeonly buffer KCACHE_W_F32  { vec4 bufferKCacheW_f32[]; };
+layout(set = 0, binding = 4) writeonly buffer KCACHE_W_F16  { f16vec4 bufferKCacheW_f16[]; };
+layout(set = 0, binding = 5) readonly buffer VCACHE_BUF_F32 { vec4 bufferVCache_f32[]; };   // V cache [B, Hkv, Tmax, Dh]
+layout(set = 0, binding = 5) readonly buffer VCACHE_BUF_F16 { f16vec4 bufferVCache_f16[]; };
+layout(set = 0, binding = 5) writeonly buffer VCACHE_W_F32  { vec4 bufferVCacheW_f32[]; };
+layout(set = 0, binding = 5) writeonly buffer VCACHE_W_F16  { f16vec4 bufferVCacheW_f16[]; };
+//////////////////////////////////////////////////////////////////////////////
+layout(set = 0, binding = 6) uniform UB { uint kvCacheCount; };
+//////////////////////////////////////////////////////////////////////////////
+layout(set = 0, binding = 7) buffer PO_BUF  { vec4 partialO[];   };   // [B*Tq*Hq, kCount, Dh/4] unnormalized acc (fp32)
+layout(set = 0, binding = 8) buffer PML_BUF { float partialML[]; };   // [B*Tq*Hq, kCount, (m, l)] (fp32)
+
+layout(push_constant) uniform PushConstants {
+    uint DhPush;     // unused (Dh is a spec constant); keeps the naive kernel's layout
+    uint Hq;
+    uint groupSize;  // Hq / Hkv: query heads sharing one KV head
+    uint Tq;
+    uint Tkv;        // K / V input rows
+    uint Tmax;
+    uint gqaRatio;   // unused: every tile packs its KV group
+    uint kCount;     // KV splits (1 = no split; > 1 = two-pass with the reduce kernel)
+    float scale;
+};
+
+#define CAUSAL_MASK_BINDING 9
+#include "common/causal_mask.h"
+
+// newTokenEnd among the Tkv new keys, queries and keys aligned at their ends:
+// query t sits at key t + Tkv - Tq.
+uint keyEnd(uint t)
+{
+    return uint(max(int(newTokenEnd(t) + Tkv) - int(Tq), 0));
+}
+
+// Query t's own key position, in the same alignment keyEnd uses.
+uint keyPos(uint t)
+{
+    return kvCacheCount + uint(max(int(t + Tkv) - int(Tq), 0));
+}
+
+const uint SG   = 16u;                        // forced subgroup size = rows per tile
+const uint NSG  = wgSize / SG;                // subgroups = S key groups
+const uint KG   = 8u;                         // keys a subgroup scores per block (more spill the fp32 scores)
+const uint BK   = KG * NSG;                   // keys per block
+const uint DH2  = Dh / 2u;                    // head dim in pairs
+const uint DH4  = Dh / 4u;                    // head dim in vec4s
+const uint DS   = (DH4 <= 16u) ? 1u : ((DH4 <= 32u) ? 2u : 4u);   // PV head-dim slices of 16 vec4s
+const uint PRB  = NSG / DS;                   // PV row blocks
+const uint TMP  = SG / PRB;                   // PV rows per subgroup
+const uint PST  = BK + 4u;                    // sP row stride, off the bank of the next row
+const float NEG_BIG = -1e30;                  // masked score / empty row max (exp() of the gap is 0)
+
+shared f16vec2   sQh[(qkAccF32 == 0u) ? DH2 * SG : 1u];   // [dim pair][row], fp16, pre-scaled
+shared vec2      sQf[(qkAccF32 != 0u) ? DH2 * SG : 1u];   // [dim pair][row], fp32, pre-scaled
+shared float16_t sP[SG * PST];                            // [row][key]
+shared float     sMax[NSG * SG];                          // block maxima per key group, then the partial sums
+shared float     sAlpha[SG];                              // rescale factor of this block, then the row max
+
+vec4 readQ4(uint i) { return (typeI == DTYPE_F32) ? bufferQ_f32[i] : vec4(bufferQ_f16[i]); }
+void writeO4(uint i, vec4 v) { if (typeO == DTYPE_F32) bufferO_f32[i] = v; else bufferO_f16[i] = f16vec4(v); }
+void writeKCache4(uint i, vec4 v) { if (typeCache == DTYPE_F32) bufferKCacheW_f32[i] = v; else bufferKCacheW_f16[i] = f16vec4(v); }
+void writeVCache4(uint i, vec4 v) { if (typeCache == DTYPE_F32) bufferVCacheW_f32[i] = v; else bufferVCacheW_f16[i] = f16vec4(v); }
+// Append copies without the f32 roundtrip when both ends are f16 (spec-folded).
+void copyKToCache(uint dst, uint src)
+{
+    if (typeI != DTYPE_F32 && typeCache != DTYPE_F32) bufferKCacheW_f16[dst] = bufferK_f16[src];
+    else writeKCache4(dst, (typeI == DTYPE_F32) ? bufferK_f32[src] : vec4(bufferK_f16[src]));
+}
+void copyVToCache(uint dst, uint src)
+{
+    if (typeI != DTYPE_F32 && typeCache != DTYPE_F32) bufferVCacheW_f16[dst] = bufferV_f16[src];
+    else writeVCache4(dst, (typeI == DTYPE_F32) ? bufferV_f32[src] : vec4(bufferV_f16[src]));
+}
+
+// Per-invocation state the block passes share.
+uint kvCacheBase, kvInputBase;   // this KV head's first row in the cache / the inputs
+uint blockShift;                 // ring: the block's rows sit this far below its positions
+uint cached, inputEnd;           // tokens in the cache; and with the new ones
+uint sRow, sKey0;                // S: my row, my key group's first key in a block
+uint pRow0, vSlot;               // PV: my first row, my head-dim vec4
+float s[KG];                     // S: my row's scores for my KG keys
+vec4    acc32[(accF16 == 0u) ? TMP : 1u];   // PV: my rows' O for my vec4
+f16vec4 acc16[(accF16 != 0u) ? TMP : 1u];
+
+// Key reads by source, a block-uniform constant: 0 = every key in the cache,
+// 1 = every key past it, 2 = the one block straddling the cache end, which
+// reads both buffers and picks per key, keeping the loads free of branches.
+// Keys past a source's end read its last row, which the mask drops. A block
+// never wraps a ring cache, so one shift maps its positions to rows.
+uint cacheRow(uint j) { return kvCacheBase + min(j, cached - 1u) - blockShift; }
+uint inputRow(uint j) { return kvInputBase + min(j, inputEnd - 1u) - cached; }
+f16vec2 kPairH(const uint src, uint j, uint p)
+{
+    const f16vec2 c = (src == 1u) ? f16vec2(0.0) : (typeCache == DTYPE_F32) ? f16vec2(bufferKCache2_f32[cacheRow(j) * DH2 + p]) : bufferKCache2_f16[cacheRow(j) * DH2 + p];
+    const f16vec2 i = (src == 0u) ? f16vec2(0.0) : (typeI == DTYPE_F32) ? f16vec2(bufferK2_f32[inputRow(j) * DH2 + p]) : bufferK2_f16[inputRow(j) * DH2 + p];
+    return (src == 0u || (src == 2u && j < cached)) ? c : i;
+}
+vec2 kPairF(const uint src, uint j, uint p)
+{
+    const vec2 c = (src == 1u) ? vec2(0.0) : (typeCache == DTYPE_F32) ? bufferKCache2_f32[cacheRow(j) * DH2 + p] : vec2(bufferKCache2_f16[cacheRow(j) * DH2 + p]);
+    const vec2 i = (src == 0u) ? vec2(0.0) : (typeI == DTYPE_F32) ? bufferK2_f32[inputRow(j) * DH2 + p] : vec2(bufferK2_f16[inputRow(j) * DH2 + p]);
+    return (src == 0u || (src == 2u && j < cached)) ? c : i;
+}
+f16vec4 v4H(const uint src, uint j, uint d)
+{
+    const f16vec4 c = (src == 1u) ? f16vec4(0.0) : (typeCache == DTYPE_F32) ? f16vec4(bufferVCache_f32[cacheRow(j) * DH4 + d]) : bufferVCache_f16[cacheRow(j) * DH4 + d];
+    const f16vec4 i = (src == 0u) ? f16vec4(0.0) : (typeI == DTYPE_F32) ? f16vec4(bufferV_f32[inputRow(j) * DH4 + d]) : bufferV_f16[inputRow(j) * DH4 + d];
+    return (src == 0u || (src == 2u && j < cached)) ? c : i;
+}
+vec4 v4F(const uint src, uint j, uint d)
+{
+    const vec4 c = (src == 1u) ? vec4(0.0) : (typeCache == DTYPE_F32) ? bufferVCache_f32[cacheRow(j) * DH4 + d] : vec4(bufferVCache_f16[cacheRow(j) * DH4 + d]);
+    const vec4 i = (src == 0u) ? vec4(0.0) : (typeI == DTYPE_F32) ? bufferV_f32[inputRow(j) * DH4 + d] : vec4(bufferV_f16[inputRow(j) * DH4 + d]);
+    return (src == 0u || (src == 2u && j < cached)) ? c : i;
+}
+
+// S = Q K^T for my row and my KG keys of the block at jBase.
+void scoreBlock(const uint src, uint jBase)
+{
+    [[unroll]] for (uint jj = 0u; jj < KG; ++jj) s[jj] = 0.0;
+    const uint lane = gl_SubgroupInvocationID;
+    [[dont_unroll]]
+    for (uint dp = 0u; dp < DH2; dp += SG)
+    {
+        const uint p = min(dp + lane, DH2 - 1u);
+        const bool pLive = dp + lane < DH2;
+        if (qkAccF32 != 0u)
+        {
+            vec2 q[SG];
+            [[unroll]] for (uint i = 0u; i < SG; ++i) q[i] = sQf[min(dp + i, DH2 - 1u) * SG + sRow];
+            [[unroll]] for (uint jj = 0u; jj < KG; ++jj)
+            {
+                const vec2 k = pLive ? kPairF(src, jBase + sKey0 + jj, p) : vec2(0.0);
+                [[unroll]] for (uint i = 0u; i < SG; ++i)
+                {
+                    const vec2 kb = subgroupBroadcast(k, i);
+                    s[jj] = fma(kb.x, q[i].x, fma(kb.y, q[i].y, s[jj]));
+                }
+            }
+        }
+        else
+        {
+            f16vec2 q[SG];
+            [[unroll]] for (uint i = 0u; i < SG; ++i) q[i] = sQh[min(dp + i, DH2 - 1u) * SG + sRow];
+            [[unroll]] for (uint jj = 0u; jj < KG; ++jj)
+            {
+                const f16vec2 k = pLive ? kPairH(src, jBase + sKey0 + jj, p) : f16vec2(0.0);
+                float16_t c = float16_t(0.0);
+                [[unroll]] for (uint i = 0u; i < SG; ++i)
+                {
+                    const f16vec2 kb = subgroupBroadcast(k, i);
+                    c = fma(kb.x, q[i].x, fma(kb.y, q[i].y, c));
+                }
+                s[jj] += float(c);
+            }
+        }
+    }
+}
+
+// O += P V over the first kEnd keys of the block at jBase.
+void valueBlock(const uint src, uint jBase, uint kEnd)
+{
+    const uint lane = gl_SubgroupInvocationID;
+    [[dont_unroll]]
+    for (uint kc = 0u; kc < kEnd; kc += SG)
+    {
+        float16_t p[TMP];   // my rows' P of key kc + lane
+        [[unroll]] for (uint m = 0u; m < TMP; ++m) p[m] = sP[(pRow0 + m) * PST + kc + lane];
+        [[unroll]] for (uint i = 0u; i < SG; ++i)
+        {
+            const uint j = jBase + kc + i;
+            if (accF16 != 0u)
+            {
+                const f16vec4 v = v4H(src, j, vSlot);
+                [[unroll]] for (uint m = 0u; m < TMP; ++m) acc16[m] += subgroupBroadcast(p[m], i) * v;
+            }
+            else
+            {
+                const vec4 v = v4F(src, j, vSlot);
+                [[unroll]] for (uint m = 0u; m < TMP; ++m) acc32[m] += float(subgroupBroadcast(p[m], i)) * v;
+            }
+        }
+    }
+}
+
+
+void main()
+{
+    const uint split = gl_WorkGroupID.x % kCount;   // my KV split
+    const uint qTile = gl_WorkGroupID.x / kCount;   // query-token tile
+    const uint kvh   = gl_WorkGroupID.y;            // KV head
+    const uint b     = gl_WorkGroupID.z;            // sequence
+    const uint tid   = gl_LocalInvocationIndex;
+    const uint sg    = gl_SubgroupID;
+    const uint lane  = gl_SubgroupInvocationID;
+
+    const uint tok0        = qTile * tileTokens;
+    const uint Hkv         = Hq / groupSize;
+    const uint kvHead      = b * Hkv + kvh;
+    kvCacheBase = kvHead * Tmax;
+    kvInputBase = kvHead * Tkv;
+    cached      = kvCacheCount;
+    inputEnd    = cached + Tkv;
+
+    // Q tile to shared, pre-scaled; rows past the tile or Tq zero-filled.
+    for (uint i = tid; i < SG * DH4; i += wgSize)
+    {
+        const uint r = i / DH4, d = i % DH4, t = tok0 + r / groupSize;
+        const bool live = r < tileTokens * groupSize && t < Tq;
+        const vec4 q = live ? readQ4(((b * Hq + kvh * groupSize + r % groupSize) * Tq + t) * DH4 + d) * scale : vec4(0.0);
+        if (qkAccF32 != 0u) { sQf[(2u * d) * SG + r] = q.xy; sQf[(2u * d + 1u) * SG + r] = q.zw; }
+        else                { sQh[(2u * d) * SG + r] = f16vec2(q.xy); sQh[(2u * d + 1u) * SG + r] = f16vec2(q.zw); }
+    }
+
+    // Fused append (split 0): this KV head's tile tokens, then (Tkv > Tq) the
+    // tokens a whole grid of tiles apart; no barrier, the sweep never reads
+    // cache[>= cached].
+    if (kvCaching != 0u && split == 0u)
+    {
+        const uint gridTokens = (Tq + tileTokens - 1u) / tileTokens * tileTokens;
+        for (uint first = tok0; first < Tkv; first += gridTokens)
+        {
+            for (uint i = tid; i < tileTokens * DH4; i += wgSize)
+            {
+                const uint t = first + i / DH4, d = i % DH4;
+                if (t < Tkv)
+                {
+                    const uint row = (kvCacheRing != 0u) ? (cached + t) % Tmax : cached + t;
+                    copyKToCache((kvCacheBase + row) * DH4 + d, (kvInputBase + t) * DH4 + d);
+                    copyVToCache((kvCacheBase + row) * DH4 + d, (kvInputBase + t) * DH4 + d);
+                }
+            }
+        }
+    }
+    barrier();   // sQ ready
+
+    // My split's span of the keys the tile reaches, which run up to the tile's
+    // last row (keyEnd rises with the token).
+    const uint lastTok   = min(Tq, tok0 + tileTokens) - 1u;
+    const uint tileEnd   = cached + keyEnd(lastTok);
+    const uint splitSpan = ((tileEnd + kCount - 1u) / kCount + BK - 1u) / BK * BK;
+    const uint spanStart = min(split * splitSpan, tileEnd);
+    const uint sweepEnd  = min(tileEnd, spanStart + splitSpan);
+    // Spanned sweeps start at the bound of the tile's oldest token, rounded
+    // down to a whole block, so no block wraps a ring cache.
+    const uint winStart  = keyStart(keyPos(tok0));
+    const uint jStart    = max(spanStart, winStart - winStart % BK);
+
+    // S / softmax role: row sRow = lane, keys sKey0 .. sKey0 + KG - 1 of each block.
+    sRow = lane; sKey0 = sg * KG;
+    const uint sTok = tok0 + sRow / groupSize;
+    const bool sLive = sRow < tileTokens * groupSize && sTok < Tq;
+    const uint rowEnd   = sLive ? min(cached + keyEnd(sTok), sweepEnd) : 0u;
+    const uint rowStart = keyStart(keyPos(sTok));
+    float rowMax = NEG_BIG, rowSum = 0.0;   // rowSum: this key group's share
+
+    // PV role: rows pRow0 .. pRow0 + TMP - 1, head-dim vec4 vSlot.
+    const uint pSlot = (sg / PRB) * SG + lane;
+    pRow0 = (sg % PRB) * TMP;
+    vSlot = min(pSlot, DH4 - 1u);
+    [[unroll]] for (uint m = 0u; m < TMP; ++m)
+    {
+        if (accF16 != 0u) acc16[m] = f16vec4(0.0);
+        else acc32[m] = vec4(0.0);
+    }
+
+    [[dont_unroll]]
+    for (uint jBase = jStart; jBase < sweepEnd; jBase += BK)
+    {
+        blockShift = (kvCacheRing != 0u) ? jBase - jBase % Tmax : 0u;
+
+        // S = Q K^T, the block's key source fixed for the whole block (with no
+        // input rows the cache, whose last row the mask drops past); a key group
+        // wholly past the sweep has nothing to score.
+        const uint src = (jBase + BK <= cached || inputEnd == cached) ? 0u : ((jBase >= cached) ? 1u : 2u);
+        if (jBase + sKey0 >= sweepEnd) [[unroll]] for (uint jj = 0u; jj < KG; ++jj) s[jj] = 0.0;
+        else if (src == 0u) scoreBlock(0u, jBase);
+        else if (src == 1u) scoreBlock(1u, jBase);
+        else scoreBlock(2u, jBase);
+
+        // softmax: causality, span and range in one compare pair; the block
+        // max across key groups, P, this group's sum.
+        float mx = NEG_BIG;
+        [[unroll]] for (uint jj = 0u; jj < KG; ++jj)
+        {
+            const uint j = jBase + sKey0 + jj;
+            s[jj] = (j >= rowStart && j < rowEnd) ? s[jj] : NEG_BIG;
+            mx = max(mx, s[jj]);
+        }
+        sMax[sg * SG + sRow] = mx;
+        barrier();
+        [[unroll]] for (uint g = 0u; g < NSG; ++g) mx = max(mx, sMax[g * SG + sRow]);
+        const float newMax = max(rowMax, mx), alpha = exp(rowMax - newMax);
+        float sum = 0.0;
+        [[unroll]] for (uint jj = 0u; jj < KG; ++jj)
+        {
+            const float p = (s[jj] > NEG_BIG) ? exp(s[jj] - newMax) : 0.0;
+            sP[sRow * PST + sKey0 + jj] = float16_t(p);
+            sum += p;
+        }
+        rowSum = rowSum * alpha + sum;
+        rowMax = newMax;
+        if (sg == 0u) sAlpha[sRow] = alpha;
+        barrier();
+
+        [[unroll]] for (uint m = 0u; m < TMP; ++m)
+        {
+            if (accF16 != 0u) acc16[m] *= float16_t(sAlpha[pRow0 + m]);
+            else acc32[m] *= sAlpha[pRow0 + m];
+        }
+        const uint kEnd = min(BK, sweepEnd - jBase);
+        if (src == 0u) valueBlock(0u, jBase, kEnd);
+        else if (src == 1u) valueBlock(1u, jBase, kEnd);
+        else valueBlock(2u, jBase, kEnd);
+    }
+
+    // The key groups' partial sums and the row maxima to the PV owners.
+    barrier();
+    sMax[sg * SG + sRow] = rowSum;
+    if (sg == 0u) sAlpha[sRow] = rowMax;
+    barrier();
+
+    [[unroll]] for (uint m = 0u; m < TMP; ++m)
+    {
+        const uint r = pRow0 + m, t = tok0 + r / groupSize;
+        if (r >= tileTokens * groupSize || t >= Tq || pSlot >= DH4) continue;
+        float l = 0.0;
+        [[unroll]] for (uint g = 0u; g < NSG; ++g) l += sMax[g * SG + r];
+        const uint row = (b * Tq + t) * Hq + kvh * groupSize + r % groupSize;
+        const vec4 o = (accF16 != 0u) ? vec4(acc16[m]) : acc32[m];
+        if (kCount > 1u)
+        {
+            // Split partials: unnormalized acc + per-row (m, l) for the reduce.
+            partialO[(row * kCount + split) * DH4 + pSlot] = o;
+            if (pSlot == 0u)
+            {
+                partialML[(row * kCount + split) * 2u]      = sAlpha[r];
+                partialML[(row * kCount + split) * 2u + 1u] = l;
+            }
+        }
+        else
+            writeO4(row * DH4 + pSlot, o * ((l == 0.0) ? 0.0 : 1.0 / l));
+    }
+}

@@ -1,5 +1,5 @@
-#ifndef NEURAL_NET_H
-#define NEURAL_NET_H
+#ifndef VAI_ENGINE_NEURAL_NET_H
+#define VAI_ENGINE_NEURAL_NET_H
 
 #include "tensor.h"
 #include "pipeline-pool.h"
@@ -138,6 +138,15 @@ public:
 };
 
 
+// Only NeuralNet makes one, and only a net derived from it can ask for one
+// (NeuralNet::dtypeKey()), so the nodes' dtype setters are a model net's to call.
+class DtypeKey
+{
+    friend class NeuralNet;
+    DtypeKey() = default;
+};
+
+
 class Node
 {
     friend class NeuralNet;
@@ -153,6 +162,7 @@ public:
 protected:
     const NeuralNet* ownedNet_ = nullptr;
     uint32_t flags_ = 0;
+    vai::Dtype oDtype_ = vai::Dtype::None;
 
     void addSlot(const std::string& name, NodeSlot::Type type)
     {
@@ -166,10 +176,13 @@ public:
     vai::Dtype wDefaultDtype() const;
     vai::Dtype oDefaultDtype() const;
     PipelinePool& pipelinePool() const;
+    BufferPool& bufferPool() const;
 
     const std::string& getProfileTag() const;
 
     void setProfileTag(const std::string& tag);
+
+    void setODtype(vai::Dtype dtype, DtypeKey) { oDtype_ = dtype; }
 
     uint32_t flags() const
     {
@@ -261,7 +274,7 @@ struct NeuralNetConfig
     // Shared pipeline cache. When null, the net creates its own pool.
     std::shared_ptr<vai::PipelinePool> pipelinePool = nullptr;
 
-    // Fallback dtype for parameters such as weights and KV cache.
+    // Fallback dtype for parameters such as weights.
     // Layers may override it; Dtype::None is not allowed.
     Dtype wDefaultDtype = Dtype::Fp16;
 
@@ -307,6 +320,11 @@ class NeuralNet
 
     std::unique_ptr<class NodeProfiler> profiler_;
 
+protected:
+    // What the nodes' dtype setters ask for; a model net calls them at the end
+    // of its constructor.
+    static DtypeKey dtypeKey() { return {}; }
+
 public:
     static NeuralNet* current() { return currentNet_; }
 
@@ -321,6 +339,8 @@ public:
     eva::Device device() const { return device_; }
 
     PipelinePool& pipelinePool() const { return *pipelinePool_; }
+
+    BufferPool& bufferPool() const { return *bufferPool_; }
 
     InputNode& input(const std::string& name)
     {
@@ -435,6 +455,10 @@ inline eva::Device Node::device() const { return ownedNet_->device_; }
 inline vai::Dtype Node::wDefaultDtype() const { return ownedNet_->config().wDefaultDtype; }
 inline vai::Dtype Node::oDefaultDtype() const { return ownedNet_->config().oDefaultDtype; }
 inline PipelinePool& Node::pipelinePool() const { return ownedNet_->pipelinePool(); }
+inline BufferPool& Node::bufferPool() const
+{
+    return ownedNet_->bufferPool();
+}
 
 inline void Node::setProfileTag(const std::string& tag) { ownedNet_->setProfileTag(this, tag); }
 inline const std::string& Node::getProfileTag() const { return ownedNet_->profileTagOf(this); }
@@ -442,4 +466,4 @@ inline const std::string& Node::getProfileTag() const { return ownedNet_->profil
 
 }
 
-#endif
+#endif   // VAI_ENGINE_NEURAL_NET_H
