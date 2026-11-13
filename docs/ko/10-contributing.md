@@ -1,7 +1,7 @@
 # 기여 절차와 자동 검사
 
 이 문서는 수정한 코드가 `master`에 들어가기까지의 절차를 설명합니다.
-처음 한 번 준비할 것, 커밋과 PR에서 실행되는 검사, 검사가 실패했을 때 고치는 방법을 순서대로 다룹니다.
+처음 한 번 준비할 것, 커밋과 PR에서 실행되는 검사, 검사가 실패했을 때 고치는 방법, 브랜치·커밋 메시지·버전 규칙을 순서대로 다룹니다.
 
 코드 자체의 작성 방법은 [커스텀 모델 작성](05-contributing-models.md), [커스텀 노드와 커널 작성](07-contributing-nodes.md), [커스텀 그룹 작성](08-contributing-groups.md)을 참조하면 됩니다.
 
@@ -241,11 +241,93 @@ def test_slice_axis0_block():
 
 [4.4](#44-노드-문서)의 방법으로 문서를 다시 생성하고, 생성된 두 파일을 `Node`와 함께 커밋합니다.
 
-## 7. PR 올리고 머지하기
+## 7. 브랜치, 커밋 메시지, PR
+
+브랜치는 [GitHub Flow](https://docs.github.com/en/get-started/using-github/github-flow), 커밋 메시지는 [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/)를 따릅니다.
+
+### 7.1 브랜치
+
+`master`에서 작업 브랜치를 만들고 PR로 합칩니다. `develop` 브랜치는 두지 않습니다.
+
+| 브랜치 | 용도 |
+|---|---|
+| `master` | 리뷰와 검사를 마친 코드 |
+| `feat/reshape-op` | 기능 추가 |
+| `fix/model-loader-crash` | 버그 수정 |
+| `docs/build-guide` | 문서 수정 |
+
+- 이름은 `<종류>/<짧은-설명>` 형식이고, 소문자와 하이픈을 사용합니다. 종류는 [7.2](#72-커밋-메시지)의 표와 같습니다.
+- 작업 하나에 브랜치 하나, PR 하나를 만듭니다.
+- 포크에서 올리는 PR은 브랜치 이름을 검사하지 않습니다. 같은 형식을 권장합니다.
+
+### 7.2 커밋 메시지
+
+제목은 `종류(범위): 설명` 형식입니다.
+
+- `범위`는 변경한 모듈이며 생략할 수 있습니다. (예: `python`, `engine`, `linear`, `yolox`.)
+- `설명`은 영어 동사 원형으로 시작하고, 변경한 내용을 적습니다.
+
+| 종류 | 사용하는 경우 | 예시 |
+|---|---|---|
+| `feat` | 새로운 기능 | `feat(graph): add reshape operation` |
+| `fix` | 잘못된 동작 수정 | `fix(loader): reject truncated model files` |
+| `perf` | 동작을 유지하는 성능 개선 | `perf(vulkan): reduce allocation overhead` |
+| `refactor` | 동작을 유지하는 구조 변경 | `refactor(graph): extract shape helpers` |
+| `docs` | 문서 수정 | `docs: clarify build requirements` |
+| `test` | 테스트만 변경 | `test(loader): cover empty model files` |
+| `build` | 빌드와 의존성 변경 | `build: require CMake 3.16` |
+| `ci` | CI 변경 | `ci: add compiler checks` |
+| `style` | 동작과 무관한 서식 변경 | `style: format public headers` |
+| `chore` | 그 밖의 유지보수 | `chore: update the issue templates` |
+
+종류는 다음 기준으로 고릅니다.
+
+- 새로 할 수 있는 일이 생기면 `feat`입니다.
+- 잘못된 동작을 바로잡으면 `fix`입니다.
+- 같은 일을 더 빠르게 하면 `perf`입니다.
+
+**한 커밋은 하나의 목적을 담습니다.** 기능과 그 테스트는 함께 넣고, 관계없는 리팩터링은 분리합니다. PR도 같은 기준으로 나눕니다.
+나누는 기준은 "이 변경만 되돌려도 나머지 코드가 빌드되고 테스트를 통과하는가"입니다. 함께 되돌려야 하는 구현, 호출부, 테스트는 한 단위로 묶습니다.
+
+기존 사용법과 호환되지 않는 변경은 종류 뒤에 `!`를 붙이고, 본문의 `BREAKING CHANGE:` 뒤에 영향과 전환 방법을 적습니다.
+
+```text
+feat(loader)!: require explicit model format
+
+BREAKING CHANGE: load_model(path) now takes a format argument.
+Change existing calls to load_model(path, format).
+```
+
+### 7.3 PR 올리고 머지하기
 
 | 항목 | 규칙 |
 |---|---|
-| 머지 경로 | `master`에는 PR로만 반영합니다. 머지 커밋으로 합칩니다. |
+| 머지 경로 | `master`에는 PR로만 반영합니다. |
+| PR 제목 | [7.2](#72-커밋-메시지)의 커밋 제목 형식으로 적습니다. 머지하면 이 제목이 `master`의 커밋 제목이 됩니다. |
+| PR 설명 | 바꾼 내용과 확인한 방법을 적습니다. 자신의 변경과 관계없는 이유로 실패한 검사가 있으면 그 사실도 적습니다. 호환되지 않는 변경이면 `BREAKING CHANGE:` 문단을 포함합니다. |
 | 승인 | 관리자 팀의 승인 두 개가 필요합니다. [`CODEOWNERS`](../../.github/CODEOWNERS)에 적힌 경로를 바꿨다면 해당 코드 소유자의 승인이 포함되어야 합니다. |
-| PR 설명 | 바꾼 내용과 확인한 방법을 적습니다. 자신의 변경과 관계없는 이유로 실패한 검사가 있으면 그 사실도 적습니다. |
-| 커밋 제목 | 기존 기록은 `종류(범위): 제목` 형식을 사용합니다. (예: `fix(python): ...`, `ci: ...`, `feat(core): ...`.) |
+| 머지 방식 | 스쿼시 머지(squash merge)를 사용합니다. PR의 커밋들이 커밋 하나로 합쳐져 `master`에 들어갑니다. |
+| 머지 후 | 머지한 작업 브랜치는 삭제합니다. |
+
+## 8. 버전
+
+태그는 `vMAJOR.MINOR.PATCH` 형식이고, [SemVer](https://semver.org/)를 따릅니다.
+
+| 변경 | 올리는 자리 | 예시 |
+|---|---|---|
+| 기존 공개 API와 호환되지 않는 변경 | MAJOR | `v1.2.3` → `v2.0.0` |
+| 호환되는 기능 추가, 공개 API의 사용 중단 예고 | MINOR | `v1.2.3` → `v1.3.0` |
+| 호환되는 버그 수정, 호환되는 성능 개선 | PATCH | `v1.2.3` → `v1.2.4` |
+
+릴리즈 버전은 `master`에 들어간 커밋의 종류로 정합니다. 브랜치 이름은 버전에 영향을 주지 않습니다.
+
+| `master`에 들어간 커밋 | 버전 영향 |
+|---|---|
+| 종류와 관계없이 `!` 또는 `BREAKING CHANGE` | MAJOR |
+| `feat` | MINOR |
+| `fix`, `perf` | PATCH |
+| 그 밖의 종류 | 단독으로는 릴리즈하지 않음 |
+
+- 여러 변경을 묶어 릴리즈하면 가장 높은 자리를 올립니다.
+- `0.x`는 API가 안정되기 전의 버전입니다. 위 두 표는 `1.0` 이후에 적용합니다.
+- 정식 릴리즈 전의 검증에는 `v1.0.0-rc.1` 같은 후보 버전을 사용합니다.
