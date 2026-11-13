@@ -21,3 +21,20 @@ def test_layer_norm_no_shift():
         lambda in0, scale: F.layer_norm(in0, (50,), scale, None, 1e-5),
         params={"scale": (50,)},
     )
+
+
+def test_layer_norm_residual():
+    check_node(
+        lambda: nodes.LayerNormNode(eps=1e-5, accept_residual=True),
+        {"in0": (5, 64), "residual": (5, 64)},
+        lambda in0, residual, scale, shift: F.layer_norm(in0, (64,), scale, shift, 1e-5) + residual,
+        params={"scale": (64,), "shift": (64,)},
+    )
+
+
+def test_layer_norm_coeffs_as_inputs():
+    check_node(
+        lambda: nodes.LayerNormNode(eps=1e-5, coeffs_as_inputs=True),
+        {"in0": (5, 64), "scale": (64,), "shift": (64,)},
+        lambda in0, scale, shift: F.layer_norm(in0, (64,), scale, shift, 1e-5),
+    )

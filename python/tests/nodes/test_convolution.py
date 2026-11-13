@@ -46,3 +46,42 @@ def test_convolution(ci, co, k, stride, hw, epilogue, has_scale):
         params=params,
         tol=FP16,
     )
+
+
+@pytest.mark.parametrize(
+    "k, order",
+    [
+        pytest.param(3, "AFTER_EPILOGUE", id="k3s1_after"),
+        pytest.param(3, "BEFORE_EPILOGUE", id="k3s1_before"),
+        pytest.param(1, "BEFORE_EPILOGUE", id="k1s1_before"),
+    ],
+)
+def test_convolution_residual(k, order):
+    c, hw = 8, 10
+
+    def ref(in0, residual, weight, bias, scale):
+        out = F.conv2d(in0[None], weight, padding=k // 2)[0]
+        out = out * scale[:, None, None] + bias[:, None, None]
+        if order == "BEFORE_EPILOGUE":
+            return F.relu(out + residual)
+        return F.relu(out) + residual
+
+    check_node(
+        lambda: nodes.ConvolutionNode(
+            in_channels=c,
+            out_channels=c,
+            kernel_size=k,
+            stride=1,
+            accept_residual=True,
+            residual_order=getattr(pyvai.ResidualOrder, order),
+            epilogue=pyvai.Epilogue.RELU,
+        ),
+        {"in0": (c, hw, hw), "residual": (c, hw, hw)},
+        ref,
+        params={
+            "weight": normal((c, c, k, k), 1.0 / np.sqrt(c * k * k)),
+            "bias": (c,),
+            "scale": uniform((c,), 0.5, 1.5),
+        },
+        tol=FP16,
+    )
