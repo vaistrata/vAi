@@ -29,7 +29,10 @@ from .yolox import YOLOXModel
 # Supporting types: configs, enums, detection records. The tokenizer and a
 # layer config's RopeConfig are engine-wide: pyvai.Tokenizer, pyvai.RopeConfig.
 from .._pyvai import (
-    TransformerLayerConfig, TransformerConfig, VisionModelConfig, LanguageModelConfig,
+    TransformerLayerConfig,
+    TransformerConfig,
+    VisionModelConfig,
+    LanguageModelConfig,
 )
 from .gpt2 import GPT2Config
 from .llama3 import Llama3Config, LLAMA3_CHAT_TEMPLATE

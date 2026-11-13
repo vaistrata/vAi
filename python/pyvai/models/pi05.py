@@ -4,6 +4,7 @@
 The model is `models/pi05/model.h` (C++); a chunk runs the way the C++ demo
 (`examples/pi05/demo.cpp`) runs it.
 """
+
 from __future__ import annotations
 
 from collections.abc import Sequence
@@ -11,8 +12,17 @@ from pathlib import Path
 
 import numpy as np
 
-from .._pyvai import (Pi05Model, Pi05Config, pi05_make_prompt, pi0_sample_noise,
-                      Tokenizer, Device, Dtype, Tensor, Align)
+from .._pyvai import (
+    Pi05Model,
+    Pi05Config,
+    pi05_make_prompt,
+    pi0_sample_noise,
+    Tokenizer,
+    Device,
+    Dtype,
+    Tensor,
+    Align,
+)
 from ._image import image_processor
 
 
@@ -28,16 +38,24 @@ class Pi05:
     its two halves, so several chunks can be decoded, from different seeds,
     over one observation."""
 
-    def __init__(self, config: Pi05Config | None = None,
-                 w_default_dtype: Dtype = Dtype.F16,
-                 o_default_dtype: Dtype = Dtype.F32,
-                 device: Device | None = None,
-                 denoise_steps: int = 10,
-                 kv_cache_dtype: Dtype = Dtype.F16):
+    def __init__(
+        self,
+        config: Pi05Config | None = None,
+        w_default_dtype: Dtype = Dtype.F16,
+        o_default_dtype: Dtype = Dtype.F32,
+        device: Device | None = None,
+        denoise_steps: int = 10,
+        kv_cache_dtype: Dtype = Dtype.F16,
+    ):
         self.config = config if config is not None else Pi05Config.preset("3B")
-        self.model = Pi05Model(self.config, w_default_dtype=w_default_dtype,
-                               o_default_dtype=o_default_dtype, device=device,
-                               denoise_steps=denoise_steps, kv_cache_dtype=kv_cache_dtype)
+        self.model = Pi05Model(
+            self.config,
+            w_default_dtype=w_default_dtype,
+            o_default_dtype=o_default_dtype,
+            device=device,
+            denoise_steps=denoise_steps,
+            kv_cache_dtype=kv_cache_dtype,
+        )
         self.tokenizer: Tokenizer | None = None
         self._weights_loaded = False
 
@@ -94,11 +112,13 @@ class Pi05:
         """An image (a file path, or an HWC uint8 RGB array) letterboxed on
         black into the model's square and scaled to [-1, 1]: one [3, S, S]
         float32 camera."""
-        return (image_processor(image)
-                .letterbox(self.image_size, Align.CENTER, 0.0)
-                .normalize(-1.0, 1.0)
-                .chw()
-                .to_numpy())
+        return (
+            image_processor(image)
+            .letterbox(self.image_size, Align.CENTER, 0.0)
+            .normalize(-1.0, 1.0)
+            .chw()
+            .to_numpy()
+        )
 
     def make_prompt(self, prompt: str, state) -> str:
         """The text prefill() encodes: `prompt` and `state` (at most
@@ -106,10 +126,12 @@ class Pi05:
         through pi05_make_prompt."""
         vec = np.asarray(state, dtype=np.float32).reshape(-1)
         if vec.size > self.action_dim:
-            raise ValueError(f"Pi05.make_prompt: the state has {vec.size} values, action_dim "
-                             f"is {self.action_dim}")
+            raise ValueError(
+                f"Pi05.make_prompt: the state has {vec.size} values, action_dim "
+                f"is {self.action_dim}"
+            )
         padded = np.zeros(self.action_dim, dtype=np.float32)
-        padded[:vec.size] = vec
+        padded[: vec.size] = vec
         return pi05_make_prompt(prompt, padded.tolist())
 
     def prefill(self, images: Sequence, prompt: str, state) -> None:
@@ -121,10 +143,11 @@ class Pi05:
         tok = self._require_tokenizer("prefill")
         self._require_weights("prefill")
         if not 1 <= len(images) <= self.max_cameras:
-            raise ValueError(f"Pi05.prefill: expected 1 to {self.max_cameras} camera images, "
-                             f"got {len(images)}")
+            raise ValueError(
+                f"Pi05.prefill: expected 1 to {self.max_cameras} camera images, got {len(images)}"
+            )
         text = self.make_prompt(prompt, state)
-        ids = tok.encode(text, add_special=True)   # BOS, as the C++ demo encodes
+        ids = tok.encode(text, add_special=True)  # BOS, as the C++ demo encodes
         cameras = np.stack([self.preprocess(image) for image in images])
         self.model.prefill(Tensor.from_numpy(cameras), Tensor.from_u32(ids))
 
@@ -135,8 +158,9 @@ class Pi05:
         self._require_weights("decode")
         shape = (self.action_horizon, self.action_dim)
         if noise is None:
-            x = np.asarray(pi0_sample_noise(shape[0] * shape[1], seed),
-                           dtype=np.float32).reshape(shape)
+            x = np.asarray(pi0_sample_noise(shape[0] * shape[1], seed), dtype=np.float32).reshape(
+                shape
+            )
         else:
             x = np.array(noise, dtype=np.float32).reshape(shape)
         return self.model.decode(Tensor.from_numpy(x)).to_numpy().reshape(shape)

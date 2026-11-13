@@ -3,6 +3,7 @@ IndexCopy's binding-owned index buffer.
 
 The kernels themselves are the core's to test.
 """
+
 import numpy as np
 
 import pyvai
@@ -12,9 +13,13 @@ from pyvai import nodes
 def test_nodes_reexports_every_bound_node():
     """pyvai.nodes lists its names by hand, so a node bound in C++ but never
     re-exported is caught here."""
-    bound = {name for name, cls in vars(pyvai._pyvai).items()
-             if isinstance(cls, type) and issubclass(cls, pyvai.Node)
-             and cls not in (pyvai.Node, pyvai.InputNode, pyvai.OutputNode)}
+    bound = {
+        name
+        for name, cls in vars(pyvai._pyvai).items()
+        if isinstance(cls, type)
+        and issubclass(cls, pyvai.Node)
+        and cls not in (pyvai.Node, pyvai.InputNode, pyvai.OutputNode)
+    }
     assert set(nodes.__all__) == bound
     for name in nodes.__all__:
         assert getattr(nodes, name) is getattr(pyvai._pyvai, name)
@@ -22,6 +27,7 @@ def test_nodes_reexports_every_bound_node():
 
 def test_linear_with_bias():
     """Identity weight + bias: out = x + b."""
+
     class Net(pyvai.NeuralNet):
         def __init__(self):
             super().__init__(w_default_dtype=pyvai.Dtype.F32)
@@ -30,7 +36,7 @@ def test_linear_with_bias():
 
     net = Net()
     net.l["weight"] = pyvai.Tensor.from_numpy(np.eye(4, dtype=np.float32))
-    net.l["bias"]   = pyvai.Tensor.from_numpy(np.array([10.0, 20.0, 30.0, 40.0], dtype=np.float32))
+    net.l["bias"] = pyvai.Tensor.from_numpy(np.array([10.0, 20.0, 30.0, 40.0], dtype=np.float32))
     out = net(pyvai.Tensor.from_numpy(np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32)))
     np.testing.assert_allclose(out.to_numpy(), [11.0, 22.0, 33.0, 44.0])
 
@@ -44,8 +50,8 @@ def test_index_copy_rewrites_and_grows_its_index():
         def __init__(self):
             super().__init__()
             self.c = nodes.IndexCopyNode()
-            self.input("dst") - "in0"/self.c - self.output("out0")
-            self.input("src") - "in1"/self.c
+            self.input("dst") - "in0" / self.c - self.output("out0")
+            self.input("src") - "in1" / self.c
 
     dst = np.zeros((5, 2), dtype=np.float32)
     net = Net()

@@ -10,6 +10,7 @@ python python/examples/gemma3/demo.py --preset 1B \\
 
 chat.py in this folder is the multi-turn session.
 """
+
 from __future__ import annotations
 
 import os
@@ -32,23 +33,43 @@ IMAGE_PATHS = ["data/gemma3/captured0.png"]
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Gemma 3 generation with pyvai (built-in models).")
-    parser.add_argument("--weights_dir", type=str, required=True,
-                        help="Folder of the HuggingFace Gemma 3 checkpoint (google/gemma-3-1b-it, "
-                             "-4b-it, ...; data/gemma3/ckpts/<variant>): every *.safetensors "
-                             "in it is read.")
-    parser.add_argument("--tokenizer_path", type=str, required=True,
-                        help="Path to the checkpoint's tokenizer.json.")
-    parser.add_argument("--preset", type=str, default="4B", choices=Gemma3Config.presets,
-                        help="Checkpoint variant; 4B and 12B are VLMs and take --image_path.")
-    parser.add_argument("--image_path", type=str, nargs="*", default=None,
-                        help="Images to ask about (a VLM preset; JPEG, PNG, ...). A VLM preset "
-                             "defaults to the C++ demo's data/gemma3/captured0.png; the flag "
-                             "with no path asks for text only.")
-    parser.add_argument("--max_runtime_context", type=int, default=4096,
-                        help="KV-cache budget in tokens, clamped to the trained "
-                             "context (the C++ demos run at 4096).")
-    parser.add_argument("--max_new_tokens", type=int, default=128,
-                        help="Number of tokens to generate.")
+    parser.add_argument(
+        "--weights_dir",
+        type=str,
+        required=True,
+        help="Folder of the HuggingFace Gemma 3 checkpoint (google/gemma-3-1b-it, "
+        "-4b-it, ...; data/gemma3/ckpts/<variant>): every *.safetensors "
+        "in it is read.",
+    )
+    parser.add_argument(
+        "--tokenizer_path", type=str, required=True, help="Path to the checkpoint's tokenizer.json."
+    )
+    parser.add_argument(
+        "--preset",
+        type=str,
+        default="4B",
+        choices=Gemma3Config.presets,
+        help="Checkpoint variant; 4B and 12B are VLMs and take --image_path.",
+    )
+    parser.add_argument(
+        "--image_path",
+        type=str,
+        nargs="*",
+        default=None,
+        help="Images to ask about (a VLM preset; JPEG, PNG, ...). A VLM preset "
+        "defaults to the C++ demo's data/gemma3/captured0.png; the flag "
+        "with no path asks for text only.",
+    )
+    parser.add_argument(
+        "--max_runtime_context",
+        type=int,
+        default=4096,
+        help="KV-cache budget in tokens, clamped to the trained "
+        "context (the C++ demos run at 4096).",
+    )
+    parser.add_argument(
+        "--max_new_tokens", type=int, default=128, help="Number of tokens to generate."
+    )
     return parser.parse_args()
 
 
@@ -62,9 +83,11 @@ def main():
             raise FileNotFoundError(path)
 
     # w_default_dtype=Dtype.F32 runs the weights in FP32; tagging turns profiling on.
-    gemma = Gemma3(Gemma3Config.preset(args.preset),
-                   w_default_dtype=pyvai.Dtype.F16,
-                   max_runtime_context=args.max_runtime_context)
+    gemma = Gemma3(
+        Gemma3Config.preset(args.preset),
+        w_default_dtype=pyvai.Dtype.F16,
+        max_runtime_context=args.max_runtime_context,
+    )
     if args.image_path and not gemma.has_vision:
         raise SystemExit(f"--image_path goes with a VLM preset; {args.preset} has no vision tower")
     gemma.set_profile_tags()

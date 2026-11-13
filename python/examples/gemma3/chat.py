@@ -6,6 +6,7 @@ python python/examples/gemma3/chat.py \\
     --weights_dir    data/gemma3/ckpts/4B \\
     --tokenizer_path data/gemma3/tokenizer.json
 """
+
 from __future__ import annotations
 
 import os
@@ -17,20 +18,37 @@ from pyvai.models import Gemma3, Gemma3Config, ContextFullError
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Gemma 3 chat with pyvai (built-in models).")
-    parser.add_argument("--weights_dir", type=str, required=True,
-                        help="Folder of the HuggingFace Gemma 3 checkpoint (google/gemma-3-1b-it, "
-                             "-4b-it, ...; data/gemma3/ckpts/<variant>): every *.safetensors "
-                             "in it is read.")
-    parser.add_argument("--tokenizer_path", type=str, required=True,
-                        help="Path to the checkpoint's tokenizer.json.")
-    parser.add_argument("--preset", type=str, default="4B", choices=Gemma3Config.presets,
-                        help="Checkpoint variant; 4B and 12B are VLMs and take <image:file> tags.")
-    parser.add_argument("--image_dir", type=str, default="data/gemma3",
-                        help="Where the files of <image:file> tags are read from (a VLM "
-                             "preset).")
-    parser.add_argument("--max_runtime_context", type=int, default=4096,
-                        help="KV-cache budget in tokens, clamped to the trained "
-                             "context (the C++ demos run at 4096).")
+    parser.add_argument(
+        "--weights_dir",
+        type=str,
+        required=True,
+        help="Folder of the HuggingFace Gemma 3 checkpoint (google/gemma-3-1b-it, "
+        "-4b-it, ...; data/gemma3/ckpts/<variant>): every *.safetensors "
+        "in it is read.",
+    )
+    parser.add_argument(
+        "--tokenizer_path", type=str, required=True, help="Path to the checkpoint's tokenizer.json."
+    )
+    parser.add_argument(
+        "--preset",
+        type=str,
+        default="4B",
+        choices=Gemma3Config.presets,
+        help="Checkpoint variant; 4B and 12B are VLMs and take <image:file> tags.",
+    )
+    parser.add_argument(
+        "--image_dir",
+        type=str,
+        default="data/gemma3",
+        help="Where the files of <image:file> tags are read from (a VLM preset).",
+    )
+    parser.add_argument(
+        "--max_runtime_context",
+        type=int,
+        default=4096,
+        help="KV-cache budget in tokens, clamped to the trained "
+        "context (the C++ demos run at 4096).",
+    )
     return parser.parse_args()
 
 
@@ -63,8 +81,7 @@ def run_chat(gemma: Gemma3, image_dir: str) -> None:
         print()
 
         if full or chat.context_left <= 0:
-            print(f"\n[context full: {gemma.tokens_so_far} of "
-                  f"{gemma.context_budget} tokens used]")
+            print(f"\n[context full: {gemma.tokens_so_far} of {gemma.context_budget} tokens used]")
             break
 
     print("\n--- Chat ended ---")
@@ -77,9 +94,11 @@ def main():
             raise FileNotFoundError(path)
 
     # w_default_dtype=Dtype.F32 runs the weights in FP32.
-    gemma = Gemma3(Gemma3Config.preset(args.preset),
-                   w_default_dtype=pyvai.Dtype.F16,
-                   max_runtime_context=args.max_runtime_context)
+    gemma = Gemma3(
+        Gemma3Config.preset(args.preset),
+        w_default_dtype=pyvai.Dtype.F16,
+        max_runtime_context=args.max_runtime_context,
+    )
     gemma.load_weights(args.weights_dir)
     gemma.load_tokenizer(args.tokenizer_path)
 

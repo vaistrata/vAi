@@ -4,6 +4,7 @@ python python/examples/gpt2/demo.py \\
     --weights_dir    data/gpt2/ckpts/124M \\
     --tokenizer_path data/gpt2/tokenizer.json
 """
+
 from __future__ import annotations
 
 import os
@@ -32,13 +33,18 @@ PROMPT = (
 
 def parse_args():
     parser = argparse.ArgumentParser(description="GPT-2 generation with pyvai (built-in models).")
-    parser.add_argument("--weights_dir", type=str, required=True,
-                        help="Folder of the HuggingFace GPT-2 checkpoint "
-                             "(data/gpt2/ckpts/<variant>).")
-    parser.add_argument("--tokenizer_path", type=str, required=True,
-                        help="Path to the HuggingFace tokenizer.json.")
-    parser.add_argument("--max_new_tokens", type=int, default=128,
-                        help="Number of tokens to generate.")
+    parser.add_argument(
+        "--weights_dir",
+        type=str,
+        required=True,
+        help="Folder of the HuggingFace GPT-2 checkpoint (data/gpt2/ckpts/<variant>).",
+    )
+    parser.add_argument(
+        "--tokenizer_path", type=str, required=True, help="Path to the HuggingFace tokenizer.json."
+    )
+    parser.add_argument(
+        "--max_new_tokens", type=int, default=128, help="Number of tokens to generate."
+    )
     return parser.parse_args()
 
 
