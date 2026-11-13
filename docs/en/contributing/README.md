@@ -62,17 +62,30 @@ Hooks help catch problems early. PRs run the same checks again, so skipping hook
 
 ### 3.1 Check list
 
-| Check | When it runs | Failure conditions |
+Checks run when a PR is opened and when commits are added to it. Only the checks that the changed files need are run.
+
+| Check | What it does | When it does not run |
 |---|---|---|
-| `format` | Every PR | Changed C++ lines differ from clang-format output. Changed Python files differ from ruff format output. ruff check finds a problem anywhere in the repository. |
-| `tidy` | PRs that change files outside `python/`, `docs/`, and `*.md` | clang-tidy finds a problem on changed C++ lines in `vai/`, `models/`, or `examples/`. |
-| `vai-linux`, `vai-windows` | PRs that change files outside `python/`, `docs/`, and `*.md` | The C++ build fails. (GCC 14, MSVC.) |
-| `pyvai-linux` | PRs that change files outside `docs/` and `*.md` | The Python package build or `python/tests` fails. |
-| `docs` | PRs that change `docs/`, `mkdocs.yml`, or `vai/nodes/` | [Built-in nodes](../06-nodes.md) differs from the `Node` headers, or the documentation site build fails. |
+| `format` | Checks code formatting and Python mistakes. | Never. It runs on every PR. |
+| `tidy` | Checks C++ naming rules and mistakes. | PRs that change only the `python/` folder, the `docs/` folder, `mkdocs.yml`, or `.md` files |
+| `vai-linux`, `vai-windows` | Builds the C++ code. (GCC 14, MSVC.) | Same as above. |
+| `pyvai-linux` | Builds the Python package and runs `python/tests`. | PRs that change only the `docs/` folder, `mkdocs.yml`, or `.md` files |
+| `docs` | Checks that [Built-in nodes](../06-nodes.md) matches the `Node` headers, and builds the documentation site. | PRs that change none of the `docs/` folder, `mkdocs.yml`, and the `vai/nodes/` folder |
+
+For example, a PR that changes only documentation runs `format` and `docs`.
+
+In `format` and `tidy`, each tool examines a different scope.
+
+| Check | Tool | Scope | Failure condition |
+|---|---|---|---|
+| `format` | clang-format | C++ lines added or changed in this PR | Formatting such as line breaks or indentation differs from the settings in [`.clang-format`](../../../.clang-format). |
+| `format` | ruff format | The whole of each Python file changed in this PR | Formatting differs from ruff's format. |
+| `format` | ruff check | Every Python file in the repository | There is a mistake such as an unused `import`. |
+| `tidy` | clang-tidy | C++ lines added or changed in this PR in the `vai/`, `models/`, and `examples/` folders | A naming rule is broken or there is a mistake. |
 
 ### 3.2 Checking only changed lines
 
-C++ checks examine only lines added or changed by the PR, rather than entire files.
+C++ checks examine only the lines added or changed in this PR, rather than entire files.
 Since the repository's code predates the checking tools, existing problems are outside the scope of the PR.
 Problems on untouched lines do not cause the PR to fail.
 

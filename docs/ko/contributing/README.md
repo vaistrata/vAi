@@ -62,17 +62,30 @@ Windows에서는 C++ 도구가 설치된 최신 Visual Studio를 찾아 그 환�
 
 ### 3.1 검사 목록
 
-| 검사 | 실행 조건 | 실패하는 경우 |
+검사는 PR을 올릴 때와 PR에 커밋을 추가할 때 실행됩니다. 고친 파일의 종류에 따라 필요한 검사만 실행됩니다.
+
+| 검사 | 하는 일 | 실행되지 않는 경우 |
 |---|---|---|
-| `format` | 모든 PR | PR이 바꾼 C++ 줄이 clang-format과 다릅니다. PR이 바꾼 Python 파일이 ruff format과 다릅니다. 저장소 전체에서 ruff check가 문제를 찾았습니다. |
-| `tidy` | `python/`, `docs/`, `*.md` 밖의 파일을 바꾼 PR | `vai/`, `models/`, `examples/`에서 PR이 바꾼 C++ 줄에 clang-tidy가 문제를 찾았습니다. |
-| `vai-linux`, `vai-windows` | `python/`, `docs/`, `*.md` 밖의 파일을 바꾼 PR | C++ 빌드가 실패했습니다. (GCC 14, MSVC.) |
-| `pyvai-linux` | `docs/`, `*.md` 밖의 파일을 바꾼 PR | Python 패키지 빌드가 실패했거나 `python/tests`가 실패했습니다. |
-| `docs` | `docs/`, `mkdocs.yml`, `vai/nodes/`를 바꾼 PR | [제공 노드들](../06-nodes.md)이 `Node` 헤더와 다르거나, 문서 사이트 빌드가 실패했습니다. |
+| `format` | 코드 형식과 Python 실수를 검사합니다. | 없습니다. 모든 PR에서 실행됩니다. |
+| `tidy` | C++ 이름 규칙과 실수를 검사합니다. | `python/` 폴더, `docs/` 폴더, `mkdocs.yml`, `.md` 파일만 고친 PR |
+| `vai-linux`, `vai-windows` | C++ 코드를 빌드합니다. (GCC 14, MSVC.) | 위와 같습니다. |
+| `pyvai-linux` | Python 패키지를 빌드하고 `python/tests`를 실행합니다. | `docs/` 폴더, `mkdocs.yml`, `.md` 파일만 고친 PR |
+| `docs` | [제공 노드들](../06-nodes.md)이 `Node` 헤더와 같은지 확인하고, 문서 사이트를 빌드합니다. | `docs/` 폴더, `mkdocs.yml`, `vai/nodes/` 폴더 중 어느 것도 고치지 않은 PR |
 
-### 3.2 바꾼 줄만 검사
+예를 들어 문서만 고친 PR에서는 `format`과 `docs`만 실행됩니다.
 
-C++ 검사는 파일 전체가 아니라 PR이 추가하거나 바꾼 줄만 확인합니다.
+`format`과 `tidy`는 도구마다 확인하는 범위가 다릅니다.
+
+| 검사 | 도구 | 확인하는 범위 | 실패하는 경우 |
+|---|---|---|---|
+| `format` | clang-format | 이번 PR에서 추가하거나 고친 C++ 줄 | 줄바꿈이나 들여쓰기 같은 코드 형식이 [`.clang-format`](../../../.clang-format)의 설정과 다를 때 |
+| `format` | ruff format | 이번 PR에서 고친 Python 파일 전체 | 코드 형식이 ruff의 형식과 다를 때 |
+| `format` | ruff check | 저장소의 모든 Python 파일 | 사용하지 않는 `import` 같은 실수가 있을 때 |
+| `tidy` | clang-tidy | `vai/`, `models/`, `examples/` 폴더에서 이번 PR이 추가하거나 고친 C++ 줄 | 이름 규칙을 어겼거나 실수가 있을 때 |
+
+### 3.2 고친 줄만 검사
+
+C++ 검사는 파일 전체가 아니라 이번 PR에서 추가하거나 고친 줄만 확인합니다.
 저장소의 코드가 검사 도구보다 먼저 작성되었기 때문에, 이미 있는 코드의 문제는 PR에서 고칠 대상이 아닙니다.
 손대지 않은 줄에서 나온 문제로 PR이 실패하지 않습니다.
 
@@ -93,7 +106,7 @@ C++ 검사는 파일 전체가 아니라 PR이 추가하거나 바꾼 줄만 확
 
 ### 4.1 clang-format
 
-브랜치에서 바꾼 줄만 포맷하고, 결과를 커밋합니다.
+브랜치에서 고친 줄만 포맷하고, 결과를 커밋합니다.
 
 ```bash
 git clang-format $(git merge-base origin/master HEAD)
