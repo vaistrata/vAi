@@ -73,6 +73,7 @@ Windows에서는 C++ 도구가 설치된 최신 Visual Studio를 찾아 그 환�
 | `docs` | [제공 노드들](../06-nodes.md)이 `Node` 헤더와 같은지 확인하고, 문서 사이트를 빌드합니다. | `docs/` 폴더, `mkdocs.yml`, `vai/nodes/` 폴더 중 어느 것도 고치지 않은 PR |
 
 예를 들어 문서만 고친 PR에서는 `format`과 `docs`만 실행됩니다.
+PR 화면에는 검사가 `CI / format`처럼 워크플로 이름과 함께 표시됩니다. `docs` 검사는 `docs / build`로 표시됩니다.
 
 `format`과 `tidy`는 도구마다 확인하는 범위가 다릅니다.
 
@@ -158,6 +159,10 @@ python docs/tools/gen-node-docs.py
 | 들여쓰기와 줄 길이 | 공백 4칸을 쓰고 탭은 쓰지 않습니다. 한 줄은 120자까지입니다. |
 | 여는 중괄호 | [공통 코드 컨벤션](../index.md#3-공통-코드-컨벤션)의 3.2를 따릅니다. |
 | 한 줄에 쓸 수 있는 것 | 클래스 안의 짧은 함수, 본문이 빈 함수, 짧은 람다, 짧은 `enum`입니다. `if`와 `for`의 본문은 항상 다음 줄에 둡니다. |
+| 함수 호출의 인자 | 한 줄에 다 들어가지 않으면 인자마다 한 줄씩 씁니다. |
+| 생성자 초기화 목록 | 멤버마다 한 줄씩 쓰고, `:`와 `,`를 줄 앞에 둡니다. |
+| 중괄호 초기화 | 중괄호 안쪽에 공백을 둡니다. (예: `{ .inDim = 64, .outDim = 32 }`.) |
+| 전처리 지시문 | `#if` 안의 지시문은 한 단계 들여씁니다. 포함 가드 안은 들여쓰지 않습니다. |
 | 포인터와 참조 | `*`와 `&`는 타입에 붙입니다. (예: `const char* path`, `Node& node`.) |
 | 포함문과 주석 | 포함문의 순서와 주석의 줄바꿈은 작성한 그대로 둡니다. |
 | 제외 대상 | `external/`, `vai/shaders/`, `vai/utils/`의 외부 헤더(`stb_image.h`, `stb_image_write.h`, `tiny-json.h`)는 포맷하지 않습니다. |
@@ -171,7 +176,7 @@ python docs/tools/gen-node-docs.py
 ### 5.3 C++ 실수 검사
 
 [`.clang-tidy`](../../../.clang-tidy)가 `bugprone-*`, `performance-*`, `clang-analyzer-*` 검사를 실행합니다.
-취향에 가까운 검사 네 개(`narrowing-conversions`, `exception-escape`, `easily-swappable-parameters`, `enum-size`)는 제외했습니다.
+취향에 가까운 검사 네 개(`narrowing-conversions`, `exception-escape`, `easily-swappable-parameters`, `enum-size`)와 선택형 분석 검사(`clang-analyzer-optin.*`)는 제외했습니다.
 
 검사 결과가 해당 줄에 맞지 않으면, 그 줄에서 그 검사 하나만 끄고 이유를 적습니다.
 

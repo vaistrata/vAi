@@ -73,6 +73,7 @@ Checks run when a PR is opened and when commits are added to it. Only the checks
 | `docs` | Checks that [Built-in nodes](../06-nodes.md) matches the `Node` headers, and builds the documentation site. | PRs that change none of the `docs/` folder, `mkdocs.yml`, and the `vai/nodes/` folder |
 
 For example, a PR that changes only documentation runs `format` and `docs`.
+The PR page shows a check with its workflow name, as in `CI / format`. The `docs` check appears as `docs / build`.
 
 In `format` and `tidy`, each tool examines a different scope.
 
@@ -158,6 +159,10 @@ Checked by [`.clang-format`](../../../.clang-format).
 | Indentation and line length | Use four spaces, no tabs. Lines are limited to 120 characters. |
 | Opening braces | Follow 3.2 of [Common code conventions](../index.md#3-common-code-conventions). |
 | Constructs allowed on one line | Short functions inside classes, empty functions, short lambdas, and short `enum` declarations. Bodies of `if` and `for` always start on the next line. |
+| Arguments of a function call | If they do not fit on one line, put each argument on its own line. |
+| Constructor initializer lists | Put each member on its own line, with `:` and `,` at the start of the line. |
+| Braced initializers | Put a space inside the braces. (Example: `{ .inDim = 64, .outDim = 32 }`.) |
+| Preprocessor directives | Indent directives inside `#if` by one level. Do not indent inside an include guard. |
 | Pointers and references | Attach `*` and `&` to the type. (Examples: `const char* path`, `Node& node`.) |
 | Includes and comments | Preserve include order and comment line breaks as written. |
 | Exclusions | Do not format `external/`, `vai/shaders/`, or the third-party headers in `vai/utils/` (`stb_image.h`, `stb_image_write.h`, `tiny-json.h`). |
@@ -171,7 +176,7 @@ The tool cannot enforce the rule against prefixing constants with `k`, because `
 ### 5.3 C++ bug checks
 
 [`.clang-tidy`](../../../.clang-tidy) runs `bugprone-*`, `performance-*`, and `clang-analyzer-*` checks.
-Four checks that are closer to style preferences (`narrowing-conversions`, `exception-escape`, `easily-swappable-parameters`, `enum-size`) are excluded.
+Four checks that are closer to style preferences (`narrowing-conversions`, `exception-escape`, `easily-swappable-parameters`, `enum-size`) and the opt-in analyzer checks (`clang-analyzer-optin.*`) are excluded.
 
 If a diagnostic does not apply to a line, disable only that check on that line and explain why.
 
