@@ -1,7 +1,6 @@
 #include "python/bindings/nodes/bind-node.h"
 #include "vai/nodes/permute.h"
 #include <cstdint>
-#include <optional>
 #include <string>
 #include <vector>
 
@@ -12,10 +11,7 @@ static void bindPermute(nb::module_& m)
     nb::class_<vai::node::Permute, vai::Node>(m, "PermuteNode")
         .def(
             "__init__",
-            [](vai::node::Permute* self,
-               std::vector<uint32_t> perms,
-               std::optional<vai::Dtype> o_dtype)
-            {
+            [](vai::node::Permute* self, std::vector<uint32_t> perms) {
                 requireCurrentNet("PermuteNode");
                 // The core stores perms unvalidated and indexes with them —
                 // out-of-range or duplicate entries are an OOB read at prepare.
@@ -32,18 +28,12 @@ static void bindPermute(nb::module_& m)
                             "PermuteNode: perms must be a permutation of (0, .., len(perms) - 1)");
                     seen[axis] = true;
                 }
-                new (self) vai::node::Permute(
-                    std::move(perms),
-                    vai::node::Permute::Config{
-                        .oDtype = o_dtype.value_or(vai::Dtype::None),
-                    });
+                new (self) vai::node::Permute(std::move(perms));
             },
             nb::arg("perms"),
-            nb::arg("o_dtype") = nb::none(),
             "out0 dimension i is in0 dimension perms[i], so perms lists each axis of "
             "in0 once. out0 aliases in0's buffer when the permutation keeps memory "
-            "order and the dtype is unchanged."
-        );
+            "order and in0 is at the net's o_default_dtype.");
 }
 PYVAI_NODE_BINDING(bindPermute);
 

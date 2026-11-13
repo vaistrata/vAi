@@ -2,8 +2,8 @@
 #include "python/bindings/models/yolo.h"
 #include "python/bindings/models/yolox/profile-tags.h"
 #include "python/bindings/models/yolox/processing.h"
-#include "models/yolox/model.h"
-#include "models/yolox/megvii-weights.h"
+#include "models/experimental/yolox/net.h"
+#include "models/experimental/yolox/megvii-weights.h"
 #include <string>
 #include <utility>
 
@@ -23,6 +23,7 @@ void bindYOLOX(nb::module_& m)
         "'l' LARGE, 'x' XLARGE.",
         "The Megvii size letter of this tier (yolox_<letter>).");
 
+    using vai::utils::ImageGeometry;
     using yolox_processing::Detection;
     nb::class_<Detection>(m, "YOLOXDetection")
         .def_ro("x1", &Detection::x1)
@@ -37,48 +38,50 @@ void bindYOLOX(nb::module_& m)
                  + std::to_string(d.confidence) + ">";
         });
 
-    auto cls = nb::class_<yolox::Model, vai::NeuralNet>(m, "YOLOXModel")
-        .def(
-            "__init__",
-            [](yolox::Model* self,
-               yolox::Tier tier,
-               uint32_t image_size, float conf_threshold, float iou_threshold,
-               vai::Dtype w_default_dtype,
-               vai::Dtype o_default_dtype,
-               std::optional<eva::Device> device)
-            {
-                // The core ctor asserts on an illegal size.
-                if (image_size < 32 || image_size % 32 != 0)
-                    throw nb::value_error(
-                        "YOLOXModel: image_size must be a multiple of 32, at least 32");
-                yolox::ModelConfig mcfg = yolox::getConfigCOCO(tier);
-                yolox::RuntimeConfig run{
-                    .imageSize     = image_size,
-                    .confThreshold = conf_threshold,
-                    .iouThreshold  = iou_threshold,
-                };
-                const vai::NeuralNetConfig cfg = netConfig(w_default_dtype, o_default_dtype, device);
-                new (self) yolox::Model(cfg, mcfg, run);
-            },
-            nb::arg("tier")           = yolox::Tier::LARGE,
-            nb::arg("image_size")     = 640u,
-            nb::arg("conf_threshold") = 0.25f,
-            nb::arg("iou_threshold")  = 0.45f,
-            nb::arg("w_default_dtype")  = vai::Dtype::Fp16,
-            nb::arg("o_default_dtype")  = vai::Dtype::Fp32,
-            nb::arg("device")         = nb::none(),
-            "Build a YOLOX model (COCO config). image_size must be a multiple "
-            "of 32. out0 is [N, 5 + 80]: one row per anchor of cx, cy, w, h, "
-            "objectness and the class scores, in network pixels."
-        );
-    bindWeightsAndTags<yolox::Model>(cls, "YOLOXModel", yolox::megvii::loadWeights,
+    auto cls = nb::class_<yolox::Net, vai::NeuralNet>(m, "YOLOXModel")
+                   .def(
+                       "__init__",
+                       [](yolox::Net* self,
+                          yolox::Tier tier,
+                          uint32_t image_size,
+                          float conf_threshold,
+                          float iou_threshold,
+                          vai::Dtype w_default_dtype,
+                          vai::Dtype o_default_dtype,
+                          std::optional<eva::Device>
+                              device) {
+                           // The core ctor asserts on an illegal size.
+                           if (image_size < 32 || image_size % 32 != 0)
+                               throw nb::value_error("YOLOXModel: image_size must be a multiple of 32, at least 32");
+                           yolox::ModelConfig mcfg = yolox::getConfigCOCO(tier);
+                           yolox::RuntimeConfig run{
+                               .imageSize = image_size,
+                               .confThreshold = conf_threshold,
+                               .iouThreshold = iou_threshold,
+                           };
+                           const vai::NeuralNetConfig cfg = netConfig(w_default_dtype, o_default_dtype, device);
+                           new (self) yolox::Net(cfg, mcfg, run);
+                       },
+                       nb::arg("tier") = yolox::Tier::LARGE,
+                       nb::arg("image_size") = 640u,
+                       nb::arg("conf_threshold") = 0.25f,
+                       nb::arg("iou_threshold") = 0.45f,
+                       nb::arg("w_default_dtype") = vai::Dtype::Fp16,
+                       nb::arg("o_default_dtype") = vai::Dtype::Fp32,
+                       nb::arg("device") = nb::none(),
+                       "Build a YOLOX model (COCO config). image_size must be a multiple "
+                       "of 32. out0 is [N, 5 + 80]: one row per anchor of cx, cy, w, h, "
+                       "objectness and the class scores, in network pixels.");
+    bindWeightsAndTags<yolox::Net>(
+        cls,
+        "YOLOXModel",
+        yolox::megvii::loadWeights,
         "Load weights from a checkpoint folder (data/yolox/ckpts/<tier name>; the "
-        "Megvii .pth converted with models/yolox/megvii-weights-convertor.py): every "
+        "Megvii .pth converted with models/experimental/yolox/megvii-weights-convertor.py): every "
         "*.safetensors in it is read, and it must match this model's tier.",
         examples::setProfileTags);
-    cls.def_prop_ro("num_classes",
-        [](yolox::Model& self) { return self.cfg.numClasses; },
-        "Class count of the head (80, COCO).");
+    cls.def_prop_ro(
+        "num_classes", [](yolox::Net& self) { return self.cfg.numClasses; }, "Class count of the head (80, COCO).");
 
     // The graph is built in C++, out of sight of the Python input()/output().
     declareBoundaries(cls, {"in0"}, {"out0"});

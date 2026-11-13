@@ -90,13 +90,13 @@ Each model below pairs its Python API with the matching runnable script in [`pyt
 import pyvai
 from pyvai.models import GPT2
 
-gpt = GPT2()                                     # config=GPT2Config.preset("124M") by default
-gpt.load_weights("data/gpt2/ckpts/124M")         # every *.safetensors in the folder
-gpt.load_tokenizer("data/gpt2/tokenizer.json")   # HuggingFace tokenizer.json
+gpt = GPT2()  # config=GPT2Config.preset("124M") by default
+gpt.load_weights("data/gpt2/ckpts/124M")  # every *.safetensors in the folder
+gpt.load_tokenizer("data/gpt2/tokenizer.json")  # HuggingFace tokenizer.json
 text = gpt.generate("The future of artificial intelligence is", max_new_tokens=50)
-print(text)                                      # the completion only, not the prompt
+print(text)  # the completion only, not the prompt
 
-for piece in gpt.stream("Once upon a time", max_new_tokens=50):   # or token by token
+for piece in gpt.stream("Once upon a time", max_new_tokens=50):  # or token by token
     print(piece, end="", flush=True)
 ```
 
@@ -110,14 +110,14 @@ python python/examples/gpt2/demo.py --weights_dir data/gpt2/ckpts/124M --tokeniz
 import pyvai
 from pyvai.models import Llama3
 
-llama = Llama3()                                     # 4096-token KV cache; None = trained context (128K)
+llama = Llama3()  # 4096-token KV cache; None = trained context (128K)
 llama.load_weights("data/llama3/ckpts/3.2-1B")
 llama.load_tokenizer("data/llama3/tokenizer.json")
-print(llama.generate("The capital of France is"))    # completion; stops at the model's EOS
+print(llama.generate("The capital of France is"))  # completion; stops at the model's EOS
 
-chat = llama.chat()                                  # the conversation lives in the KV cache
-while msg := input("> "):                            # blank line ends the chat
-    for piece in chat.stream(msg):                   # each turn prefills only its delta
+chat = llama.chat()  # the conversation lives in the KV cache
+while msg := input("> "):  # blank line ends the chat
+    for piece in chat.stream(msg):  # each turn prefills only its delta
         print(piece, end="", flush=True)
     print()
 ```
@@ -137,8 +137,8 @@ python python/examples/llama3/chat.py --weights_dir data/llama3/ckpts/3.2-1B --t
 ```python
 from pyvai.models import Gemma3, Gemma3Config
 
-gemma = Gemma3(Gemma3Config.preset("1B"))            # text only; the default is the 4B VLM
-gemma.load_weights("data/gemma3/ckpts/1B")           # google/gemma-3-1b-it (gated)
+gemma = Gemma3(Gemma3Config.preset("1B"))  # text only; the default is the 4B VLM
+gemma.load_weights("data/gemma3/ckpts/1B")  # google/gemma-3-1b-it (gated)
 gemma.load_tokenizer("data/gemma3/tokenizer.json")
 print(gemma.generate("The capital of France is"))
 
@@ -152,8 +152,8 @@ while msg := input("> "):
 ```python
 from pyvai.models import Gemma3
 
-vlm = Gemma3()                             # the 4B VLM, 4096-token KV cache
-vlm.load_weights("data/gemma3/ckpts/4B")   # google/gemma-3-4b-it (gated)
+vlm = Gemma3()  # the 4B VLM, 4096-token KV cache
+vlm.load_weights("data/gemma3/ckpts/4B")  # google/gemma-3-4b-it (gated)
 vlm.load_tokenizer("data/gemma3/tokenizer.json")
 
 print(vlm.generate("<start_of_image>Summarize the image(s).", images=["data/gemma3/captured0.png"]))
@@ -180,11 +180,13 @@ On the 4B / 12B VLMs each `<start_of_image>` takes one image from `images=`, and
 ```python
 from pyvai.models import PaliGemma
 
-pg = PaliGemma()                                     # 2048-token KV cache; 8K trained
-pg.load_weights("data/paligemma/ckpts/3B-224")       # google/paligemma-3b-mix-224 (gated)
+pg = PaliGemma()  # 2048-token KV cache; 8K trained
+pg.load_weights("data/paligemma/ckpts/3B-224")  # google/paligemma-3b-mix-224 (gated)
 pg.load_tokenizer("data/paligemma/tokenizer.json")
 
-print(pg.generate("caption en", image="data/paligemma/dog.jpg"))   # a task prefix: caption en, detect <object>, ...
+print(
+    pg.generate("caption en", image="data/paligemma/dog.jpg")
+)  # a task prefix: caption en, detect <object>, ...
 ```
 
 ```bash
@@ -196,14 +198,18 @@ python python/examples/paligemma/demo.py --weights_dir data/paligemma/ckpts/3B-2
 ```python
 from pyvai.models import Pi0
 
-pi0 = Pi0()                                          # up to 3 cameras, 10 denoise steps
-pi0.load_weights("data/pi0/ckpts/3B")                # lerobot/pi0_base
+pi0 = Pi0()  # up to 3 cameras, 10 denoise steps
+pi0.load_weights("data/pi0/ckpts/3B")  # lerobot/pi0_base
 pi0.load_tokenizer("data/paligemma/tokenizer.json")  # PaliGemma's tokenizer
 
 cams = [f"data/pi0/{v}.jpg" for v in ("cam_high", "cam_left_wrist", "cam_right_wrist")]
-state = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6]               # normalized joint positions, zero-padded to 32
-chunk = pi0.act(cams, "Take the shoe with patterned bottom from the table and place it on the mat",
-                state, seed=0)                       # [50, 32] float32
+state = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6]  # normalized joint positions, zero-padded to 32
+chunk = pi0.act(
+    cams,
+    "Take the shoe with patterned bottom from the table and place it on the mat",
+    state,
+    seed=0,
+)  # [50, 32] float32
 ```
 
 ```bash
@@ -215,14 +221,18 @@ python python/examples/pi0/demo.py --weights_dir data/pi0/ckpts/3B --tokenizer_p
 ```python
 from pyvai.models import Pi05
 
-pi05 = Pi05()                                         # up to 3 cameras, 10 denoise steps
-pi05.load_weights("data/pi05/ckpts/3B")               # lerobot/pi05_base
+pi05 = Pi05()  # up to 3 cameras, 10 denoise steps
+pi05.load_weights("data/pi05/ckpts/3B")  # lerobot/pi05_base
 pi05.load_tokenizer("data/paligemma/tokenizer.json")  # PaliGemma's tokenizer
 
 cams = [f"data/pi0/{v}.jpg" for v in ("cam_high", "cam_left_wrist", "cam_right_wrist")]
-state = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6]                # normalized to [-1, 1]; binned into the prompt
-chunk = pi05.act(cams, "Take the shoe with patterned bottom from the table and place it on the mat",
-                 state, seed=0)                       # [50, 32] float32
+state = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6]  # normalized to [-1, 1]; binned into the prompt
+chunk = pi05.act(
+    cams,
+    "Take the shoe with patterned bottom from the table and place it on the mat",
+    state,
+    seed=0,
+)  # [50, 32] float32
 ```
 
 ```bash
@@ -235,7 +245,9 @@ python python/examples/pi05/demo.py --weights_dir data/pi05/ckpts/3B --tokenizer
 from pyvai.models import YOLOX, YOLOXTier
 
 yolox = YOLOX(tier=YOLOXTier.LARGE)
-yolox.load_weights("data/yolox/ckpts/large")   # converted with models/yolox/megvii-weights-convertor.py
+yolox.load_weights(
+    "data/yolox/ckpts/large"
+)  # converted with models/experimental/yolox/megvii-weights-convertor.py
 for d in yolox.detect("data/yolox/dog.jpg"):
     print(d.class_name, d.confidence, d.x1, d.y1, d.x2, d.y2)
 ```

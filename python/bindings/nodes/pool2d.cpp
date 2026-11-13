@@ -12,12 +12,16 @@ void bindPool2dMode(nb::module_& m, const char* name, const char* doc)
     using Node = vai::node::Pool2d<mode>;
     using C = typename Node::Config;
     bindNode<Node>(
-        m, name, doc, required("kernel_size", &C::kernelSize).check(atLeast(1u), "must be >= 1"),
+        m,
+        name,
+        doc,
+        required("kernel_size", &C::kernelSize).check(atLeast(1u), "must be >= 1"),
         required("stride", &C::stride).check(atLeast(1u), "must be >= 1"),
         field("padding", &C::padding)
             .check([](uint32_t p, const C& c) { return p * 2 <= c.kernelSize; }, "must be at most half of kernel_size"),
-        field("ceil_mode", &C::ceilMode), field("count_include_pad", &C::countIncludePad),
-        field("channels_last", &C::channelsLast), field("o_dtype", &C::oDtype));
+        field("ceil_mode", &C::ceilMode),
+        field("count_include_pad", &C::countIncludePad),
+        field("channels_last", &C::channelsLast));
 }
 
 }   // namespace

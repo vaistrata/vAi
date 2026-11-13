@@ -25,7 +25,8 @@ def test_convolution(ci, co, k, stride, hw, epilogue, has_scale):
     if has_scale:
         params["scale"] = uniform((co,), 0.5, 1.5)
 
-    # Same padding over [C, H, W]: out0 = epilogue(scale * conv + bias).
+    # Same padding over [C, H, W]: out0 = epilogue(scale * conv + bias). `scale`
+    # applies when the test sets it.
     def ref(in0, weight, bias, scale=None):
         out = F.conv2d(in0[None], weight, stride=stride, padding=k // 2)[0]
         if scale is not None:
@@ -38,11 +39,49 @@ def test_convolution(ci, co, k, stride, hw, epilogue, has_scale):
             out_channels=co,
             kernel_size=k,
             stride=stride,
-            has_scale=has_scale,
             epilogue=getattr(pyvai.Epilogue, epilogue),
         ),
         {"in0": (ci, hw, hw)},
         ref,
         params=params,
+        tol=FP16,
+    )
+
+
+@pytest.mark.parametrize(
+    "k, order",
+    [
+        pytest.param(3, "AFTER_EPILOGUE", id="k3s1_after"),
+        pytest.param(3, "BEFORE_EPILOGUE", id="k3s1_before"),
+        pytest.param(1, "BEFORE_EPILOGUE", id="k1s1_before"),
+    ],
+)
+def test_convolution_residual(k, order):
+    c, hw = 8, 10
+
+    def ref(in0, residual, weight, bias, scale):
+        out = F.conv2d(in0[None], weight, padding=k // 2)[0]
+        out = out * scale[:, None, None] + bias[:, None, None]
+        if order == "BEFORE_EPILOGUE":
+            return F.relu(out + residual)
+        return F.relu(out) + residual
+
+    check_node(
+        lambda: nodes.ConvolutionNode(
+            in_channels=c,
+            out_channels=c,
+            kernel_size=k,
+            stride=1,
+            accept_residual=True,
+            residual_order=getattr(pyvai.ResidualOrder, order),
+            epilogue=pyvai.Epilogue.RELU,
+        ),
+        {"in0": (c, hw, hw), "residual": (c, hw, hw)},
+        ref,
+        params={
+            "weight": normal((c, c, k, k), 1.0 / np.sqrt(c * k * k)),
+            "bias": (c,),
+            "scale": uniform((c,), 0.5, 1.5),
+        },
         tol=FP16,
     )

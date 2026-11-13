@@ -7,15 +7,13 @@
 //     bindNode<vai::node::Slice>(m, "SliceNode", "Take `count` ...",
 //         required("start", &C::start),
 //         field("count", &C::count).check(atLeast(1u), "must be >= 1"),
-//         field("axis", &C::axis),
-//         field("o_dtype", &C::oDtype));
+//         field("axis", &C::axis));
 //     PYVAI_NODE_BINDING(bindSlice);
 //
 // The fields become the constructor's keyword arguments, in the order listed:
 // - field(name, &C::member): the default is Config{}'s. A vai::Dtype field has
 //   None as its Python default instead, and None leaves Config{}'s value in
-//   place: `o_dtype=None` keeps the core's own (the net's default for
-//   Dtype::None, F32 where the core says F32).
+//   place.
 // - field(name, &C::member, value): the binding's `value` is the default.
 // - required(name, &C::member): no default.
 // .check(predicate, errorMessage) runs once every field is set, in field order;

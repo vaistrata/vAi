@@ -91,7 +91,8 @@ static void bindRope(nb::module_& m)
     bindRopeConfig(m);
 
     using C = vai::node::Rope::Config;
-    bindNode<vai::node::Rope>(m, "RopeNode",
+    bindNode<vai::node::Rope>(m,
+                              "RopeNode",
                               "Rotary position embedding of Q or K [..., H, Tq, head_dim], head_dim "
                               "even and >= 2. out0 has in0's shape.",
                               required("head_dim", &C::headDim)
@@ -103,8 +104,7 @@ static void bindRope(nb::module_& m)
                                           checkRopeConfig(rope, "RopeNode", "rope");
                                           return true;
                                       },
-                                      ""),
-                              field("o_dtype", &C::oDtype))
+                                      ""))
         .def(
             "set_kv_cache_counter",
             [](vai::node::Rope& self, KVCacheCounter& counter) { self.setKvCacheCounter(counter.buf); },

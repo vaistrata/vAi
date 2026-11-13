@@ -1,10 +1,11 @@
 """PaliGemma — high-level wrapper over the C++-bound vision-language model
 + tokenizer.
 
-The model is `models/paligemma/model.h` (C++); generate() / stream() /
+The model is `models/production/paligemma/net.h` (C++); generate() / stream() /
 iter_tokens() come from `_CausalLM`, and here each takes the image its prompt
 is about.
 """
+
 from __future__ import annotations
 
 from collections.abc import Iterable, Iterator
@@ -27,17 +28,26 @@ class PaliGemma(_CausalLM):
     _bos_piece = "<bos>"
     _eos_pieces = ("<eos>",)
 
-    def __init__(self, config: PaliGemmaConfig | None = None,
-                 w_default_dtype: Dtype = Dtype.F16,
-                 o_default_dtype: Dtype = Dtype.F32,
-                 device: Device | None = None,
-                 max_runtime_context: int | None = 2048,
-                 kv_cache_dtype: Dtype = Dtype.F16):
+    def __init__(
+        self,
+        config: PaliGemmaConfig | None = None,
+        w_default_dtype: Dtype = Dtype.F16,
+        o_default_dtype: Dtype = Dtype.F32,
+        device: Device | None = None,
+        max_runtime_context: int | None = 2048,
+        kv_cache_dtype: Dtype = Dtype.F16,
+    ):
         self.config = config if config is not None else PaliGemmaConfig.preset("3B-224")
-        super().__init__(PaliGemmaModel(self.config, w_default_dtype=w_default_dtype,
-                                        o_default_dtype=o_default_dtype, device=device,
-                                        max_runtime_context=max_runtime_context,
-                                        kv_cache_dtype=kv_cache_dtype))
+        super().__init__(
+            PaliGemmaModel(
+                self.config,
+                w_default_dtype=w_default_dtype,
+                o_default_dtype=o_default_dtype,
+                device=device,
+                max_runtime_context=max_runtime_context,
+                kv_cache_dtype=kv_cache_dtype,
+            )
+        )
 
     # -- image -----------------------------------------------------------------
 
@@ -52,11 +62,13 @@ class PaliGemma(_CausalLM):
         prefill takes. A Tensor of that shape passes through."""
         if isinstance(image, Tensor):
             return image
-        return Tensor.from_numpy(image_processor(image)
-                                 .resize(self.image_size, Resize.BILINEAR_ALIGN_CORNERS)
-                                 .normalize(-1.0, 1.0)
-                                 .chw()
-                                 .to_numpy())
+        return Tensor.from_numpy(
+            image_processor(image)
+            .resize(self.image_size, Resize.BILINEAR_ALIGN_CORNERS)
+            .normalize(-1.0, 1.0)
+            .chw()
+            .to_numpy()
+        )
 
     # -- prefill hooks -----------------------------------------------------------
 
@@ -68,11 +80,16 @@ class PaliGemma(_CausalLM):
 
     # -- completion about an image -----------------------------------------------
 
-    def iter_tokens(self, prompt: str, max_new_tokens: int | None = 128,
-                    stop_ids: Iterable[int] | None = None, *,
-                    image,
-                    reset_cache: bool = True,
-                    add_bos: bool | None = None) -> Iterator[int]:
+    def iter_tokens(
+        self,
+        prompt: str,
+        max_new_tokens: int | None = 128,
+        stop_ids: Iterable[int] | None = None,
+        *,
+        image,
+        reset_cache: bool = True,
+        add_bos: bool | None = None,
+    ) -> Iterator[int]:
         """As _CausalLM.iter_tokens; the required `image` (see preprocess())
         is prefilled ahead of `prompt` as num_patches soft tokens, which the
         budget check counts. The prompt gets the trailing newline the
@@ -82,25 +99,56 @@ class PaliGemma(_CausalLM):
             add_bos = reset_cache
         if not prompt.endswith("\n"):
             prompt += "\n"
-        yield from self._iter_ids(self._encode(prompt, add_bos), max_new_tokens, stop_ids,
-                                  reset_cache=reset_cache, image=self.preprocess(image))
+        yield from self._iter_ids(
+            self._encode(prompt, add_bos),
+            max_new_tokens,
+            stop_ids,
+            reset_cache=reset_cache,
+            image=self.preprocess(image),
+        )
 
-    def stream(self, prompt: str, max_new_tokens: int | None = 128,
-               stop_ids: Iterable[int] | None = None, *,
-               image,
-               reset_cache: bool = True,
-               add_bos: bool | None = None) -> Iterator[str]:
+    def stream(
+        self,
+        prompt: str,
+        max_new_tokens: int | None = 128,
+        stop_ids: Iterable[int] | None = None,
+        *,
+        image,
+        reset_cache: bool = True,
+        add_bos: bool | None = None,
+    ) -> Iterator[str]:
         """The completion as text deltas; `image` as in iter_tokens()."""
         tok = self._require_ready("stream")
         yield from _decode_stream(
-            tok, self.iter_tokens(prompt, max_new_tokens, stop_ids, image=image,
-                                  reset_cache=reset_cache, add_bos=add_bos))
+            tok,
+            self.iter_tokens(
+                prompt,
+                max_new_tokens,
+                stop_ids,
+                image=image,
+                reset_cache=reset_cache,
+                add_bos=add_bos,
+            ),
+        )
 
-    def generate(self, prompt: str, max_new_tokens: int | None = 128,
-                 stop_ids: Iterable[int] | None = None, *,
-                 image,
-                 reset_cache: bool = True,
-                 add_bos: bool | None = None) -> str:
+    def generate(
+        self,
+        prompt: str,
+        max_new_tokens: int | None = 128,
+        stop_ids: Iterable[int] | None = None,
+        *,
+        image,
+        reset_cache: bool = True,
+        add_bos: bool | None = None,
+    ) -> str:
         """The completion of `prompt` about `image` (the new text only)."""
-        return "".join(self.stream(prompt, max_new_tokens, stop_ids, image=image,
-                                   reset_cache=reset_cache, add_bos=add_bos))
+        return "".join(
+            self.stream(
+                prompt,
+                max_new_tokens,
+                stop_ids,
+                image=image,
+                reset_cache=reset_cache,
+                add_bos=add_bos,
+            )
+        )

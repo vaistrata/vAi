@@ -30,7 +30,6 @@ def test_linear(m, k, n, has_bias, epilogue, split_size, tol, alt_m):
         lambda: nodes.LinearNode(
             in_dim=k,
             out_dim=n,
-            has_bias=has_bias,
             epilogue=getattr(pyvai.Epilogue, epilogue),
             split_size=split_size,
         ),
@@ -40,4 +39,38 @@ def test_linear(m, k, n, has_bias, epilogue, split_size, tol, alt_m):
         tol=tol,
         alt_inputs={"in0": (alt_m, k)} if alt_m else None,
         alt_tol=FP16 if alt_m and alt_m > 8 else None,
+    )
+
+
+# The residual joins after the epilogue (a following add) or before it.
+@pytest.mark.parametrize(
+    "m, order, tol",
+    [
+        pytest.param(4, "AFTER_EPILOGUE", FP32, id="slab_after"),
+        pytest.param(4, "BEFORE_EPILOGUE", FP32, id="slab_before"),
+        pytest.param(33, "AFTER_EPILOGUE", FP16, id="tile_after"),
+        pytest.param(33, "BEFORE_EPILOGUE", FP16, id="tile_before"),
+    ],
+)
+def test_linear_residual(m, order, tol):
+    k, n = 64, 48
+
+    def ref(in0, residual, weight, bias):
+        out = F.linear(in0, weight, bias)
+        if order == "BEFORE_EPILOGUE":
+            return F.relu(out + residual)
+        return F.relu(out) + residual
+
+    check_node(
+        lambda: nodes.LinearNode(
+            in_dim=k,
+            out_dim=n,
+            accept_residual=True,
+            residual_order=getattr(pyvai.ResidualOrder, order),
+            epilogue=pyvai.Epilogue.RELU,
+        ),
+        {"in0": (m, k), "residual": (m, n)},
+        ref,
+        params={"weight": normal((n, k), 1.0 / np.sqrt(k)), "bias": (n,)},
+        tol=tol,
     )

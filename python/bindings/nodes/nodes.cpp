@@ -26,7 +26,8 @@ void bindRegisteredNodes(nb::module_& m, const std::string& modelName)
 
 void bindNodes(nb::module_& m)
 {
-    // Epilogue and KVCacheCounter are argument types of nodes below: register them first.
+    // Epilogue, ResidualOrder and KVCacheCounter are argument types of nodes below:
+    // register them first.
     nb::enum_<vai::Epilogue>(m, "Epilogue")
         .value("NONE",      vai::Epilogue::None)
         .value("RELU",      vai::Epilogue::Relu)
@@ -34,6 +35,13 @@ void bindNodes(nb::module_& m)
         .value("GELU_TANH", vai::Epilogue::GeluTanh, "The tanh approximation (gelu_pytorch_tanh).")
         .value("SILU",      vai::Epilogue::Silu)
         .value("SIGMOID",   vai::Epilogue::Sigmoid);
+
+    nb::enum_<vai::ResidualOrder>(
+        m, "ResidualOrder", "Where a node adds its `residual` input, relative to the epilogue.")
+        .value("AFTER_EPILOGUE", vai::ResidualOrder::AfterEpilogue, "epilogue(x) + residual, a following add.")
+        .value("BEFORE_EPILOGUE",
+               vai::ResidualOrder::BeforeEpilogue,
+               "epilogue(x + residual), an add ahead of the activation.");
 
     bindKVCacheCounter(m);
 

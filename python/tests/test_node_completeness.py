@@ -1,6 +1,7 @@
 """Every node has a binding, is registered, and has a test.
 
-For each node header, vai/nodes/<name>.h or models/<model>/nodes/<name>.h:
+For each node header, vai/nodes/<name>.h or models/<impl>/<model>/nodes/<name>.h
+(<impl> is production or experimental):
 - its binding, python/bindings/nodes/<name>.cpp or
   python/bindings/models/<model>/nodes/<name>.cpp, exists;
 - every node class the binding names (a "<Name>Node" string) is registered, in
@@ -56,7 +57,7 @@ def _nodes():
             TESTS / "nodes",
         )
     ]
-    for model_dir in sorted(p.parent for p in (ROOT / "models").glob("*/nodes")):
+    for model_dir in sorted(p.parent for p in (ROOT / "models").glob("*/*/nodes")):
         model = model_dir.name
         groups.append(
             (

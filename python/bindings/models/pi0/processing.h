@@ -1,7 +1,7 @@
 #ifndef PYVAI_MODELS_PI0_PROCESSING_H
 #define PYVAI_MODELS_PI0_PROCESSING_H
 
-// Verbatim copy of sampleNoise() from examples/pi0/processing.h, bound as
+// Verbatim copy of sampleNoise() from models/production/pi0/processing.h, bound as
 // pi0_sample_noise. Re-copy when the source changes.
 
 #include <algorithm>

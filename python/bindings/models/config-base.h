@@ -83,22 +83,12 @@ inline void checkLayerConfig(const vai::TransformerLayerConfig& c, const std::st
     }
 }
 
-// per_layer edits one config down the stack, the way the Transformer group
-// applies it, so every layer is checked as it will be built.
 inline void checkTransformerConfig(const vai::TransformerConfig& t, const std::string& who,
                                    const std::string& path)
 {
     if (t.numLayers == 0)
         configError(who, path + ".num_layers must be >= 1");
-    if (!t.perLayer)
-        return checkLayerConfig(t.layerCfg, who, path + ".layer_cfg");
-
-    vai::TransformerLayerConfig c = t.layerCfg;
-    for (uint32_t i = 0; i < t.numLayers; ++i)
-    {
-        t.perLayer(i, c);
-        checkLayerConfig(c, who, path + ".layer_cfg_at(" + std::to_string(i) + ")");
-    }
+    checkLayerConfig(t.layerCfg, who, path + ".layer_cfg");
 }
 
 // `clampsContext`: the model sizes its KV cache by max_trained_context, so 0

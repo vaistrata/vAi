@@ -5,11 +5,10 @@ namespace pyvai {
 
 static void bindAdd(nb::module_& m)
 {
-    using C = vai::node::Add::Config;
-    bindNode<vai::node::Add>(m, "AddNode",
+    bindNode<vai::node::Add>(m,
+                             "AddNode",
                              "Element-wise out0 = in0 + in1. Both inputs share one shape and "
-                             "dtype; there is no broadcasting.",
-                             field("o_dtype", &C::oDtype));
+                             "dtype; there is no broadcasting.");
 }
 PYVAI_NODE_BINDING(bindAdd);
 
