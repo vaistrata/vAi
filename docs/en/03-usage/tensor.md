@@ -1,232 +1,698 @@
 # Tensor
 
-A Tensor is data that flows between nodes.
+`Tensor` is a data structure that stores and manages input data, weights, and intermediate results needed for inference.
 
-Most tensors are held in the [Slots of nodes](node.md#slot) and they move from the output slot of the previous node to the input slot of the next node, flowing through the graph. This tensor is usually created by the node itself, but users can also create it directly and put it into the model.
+Data is stored in Host memory used by the CPU or in Device buffers used for GPU computation. `Tensor` manages the data's Shape and references to memory. The internal `TensorData` manages the actual Host memory and Device buffers.
 
-A node's slot is `Node::slot()` and the tensor contained in that slot is `NodeSlot::getValueRef()`. `Node::operator[]` shortens these two calls into one, and accesses the tensor directly by the slot name.
-(see [Reading values and getting slots in Node](node.md#reading-values-and-getting-slots)).
+A `Tensor` is stored in a [Node slot](node.md#1-slots) and can be accessed through `NodeSlot::getValueRef()`. `Node::operator[]` also provides direct access to a `Tensor` by slot name.
 
 ```cpp
-linear.slot("out0")                 // NodeSlot& — The slot itself. Used for graph connections
-linear.slot("out0").getValueRef()   // Tensor&   — The tensor contained in that slot
-linear["out0"]                      // Tensor&   — Same as the line above
+linear.slot("out0")                 // NodeSlot&: Slot object
+linear.slot("out0").getValueRef()   // Tensor&: Tensor stored in the slot
+linear["out0"]                      // Tensor&: Direct access by slot name
 ```
 
-## Data and handle
+For slot structure and usage, see [Node](node.md#22-reading-values-and-accessing-slots).
 
-The inside consists of two classes.
+## 1. Data and handles
+
+`Tensor` consists internally of two classes: `Tensor` and `TensorData`. `Tensor` manages the data's Shape and Offset, while `TensorData` manages the actual data storage and memory state.
+
+The following code shows the main members of each class.
 
 ```cpp
-// The owner of the actual bytes. Shared by tensors.
 class TensorData
 {
-    std::vector<char> hostData_;    // Host Data
-    const Dtype dtype_;
-    vai::PooledBuffer buffer_;      // Device Buffer
+    HostBuffer hostData_;             // Host data (std::vector<char>)
+    bool hostUploaded_ = false;       // Host data's Device upload state
+    const Dtype dtype_;               // Data type
+    vai::PooledBuffer buffer_;        // Device buffer and responsibility for returning it
+
+    std::pair<NeuralNet*, uint64_t> lastSubmission_{nullptr, 0}; // Last GPU result submission
+    std::pair<NeuralNet*, uint64_t> hostSyncedAt_{nullptr, 0};   // Completed Host download
 };
 
 class Tensor
 {
-    std::shared_ptr<TensorData> data_;    // Copying only increases this reference
-    std::vector<uint32_t> shape_;
+    std::shared_ptr<TensorData> data_; // Shared data storage
+    std::vector<uint32_t> shape_;      // Tensor Shape
+    uint32_t baseOffset_ = 0;          // Starting data position (in elements)
 };
 ```
 
-The actual bytes and dtype are owned by `TensorData`. Bytes can be in host memory, a GPU buffer, or both. The `Tensor` handled by the user is a handle that points to `TensorData`, and the shape is held separately by each handle.
-Therefore, copying creates another handle that points to the same data, and the two handles can see the same data in different shapes.
+`Tensor` independently manages its **Shape (`shape_`) and Offset (`baseOffset_`)**. `TensorData` manages **Host data, the Device buffer, Dtype, and data transfer state**.
+
+`Tensor` references data storage through `std::shared_ptr<TensorData>`. Multiple `Tensor` objects can therefore share the same `TensorData`. Individual Tensors can have different Shapes and Offsets while referring to the same data storage.
 
 ```cpp
-Tensor a({M, N});               // fp32, M x N
-Tensor b = a;                   // Not a duplication, but another handle that points to the same TensorData
-Tensor c = a.reshape({M * N});  // Only c is 1-dimensional. For a, [M, N] remain the same, and the data is still one
+Tensor a({M, N});                // Fp32, Shape: [M, N]
+Tensor b = a;                    // Share the same TensorData as a
+Tensor c = a.reshape({M * N});   // Create a new Tensor with only the Shape changed
 ```
 
+In this example, `b` and `c` share the same `TensorData` as `a`. No Host data or Device buffer contents are copied.
 
-## State
+Changes to data in a shared `TensorData` are visible through all Tensors that reference it. Shape and Offset are managed independently by each Tensor, so changing one Tensor's Shape does not affect another's.
 
-A Tensor may or may not have a shape, host data, and a device buffer, respectively. That combination is the state of the Tensor.
+### 1.1 Shape, Dtype, Offset
 
-| State | Meaning | Confirmation |
+`Tensor` uses **Shape, Dtype, and Offset** to manage data structure and memory access ranges.
+
+- **Shape (`shape_`)**: Describes the Tensor's dimensions and their sizes. `numElements()` computes the total element count, and `numBytes()` multiplies it by the element size for the Dtype to return the total data size in bytes.
+- **Dtype (`dtype_`)**: Describes the type of data stored in the Tensor. It is set when `TensorData` is created and cannot be changed afterward. The currently supported data types are `Dtype::Fp32` and `Dtype::Fp16`.
+- **Offset (`baseOffset_`)**: Specifies where the Tensor starts accessing the shared data storage. It is measured in **elements, not bytes**. `byteOffset()` computes the byte position by multiplying the Offset by the element size.
+
+`baseOffset_` is used to reference a specific range within one Device buffer. It allows part of an existing buffer to be used without allocating separate memory or copying data.
+
+For example, use `view()` to reference three elements starting at the fourth element of a Device buffer containing eight Fp32 elements.
+
+```cpp
+Tensor original({8}, Dtype::Fp32);
+Tensor part = original.view({3}, 3);
+```
+
+Here, `part` has Shape `{3}` and `baseOffset_` of `3`. Since an Fp32 element is 4 bytes, data access starts at byte 12.
+
+`part` and `original` share the same `TensorData`. Calling `view()` therefore creates no new data storage and copies no data.
+
+`view()` sets the new Tensor's Shape and Offset. If a Device buffer is attached, it checks that the specified data range does not exceed the buffer size. It performs no separate bounds check on Host data.
+
+### 1.2 GPU buffer ownership
+
+`TensorData` manages its Device buffer through `PooledBuffer`. `PooledBuffer` holds an `eva::Buffer` that references the actual GPU buffer and a `std::shared_ptr` to the `BufferPool` that manages it.
+
+`PooledBuffer` is move-only so that **only one object is responsible for returning a given GPU buffer**. This prevents the same GPU buffer from being returned to `BufferPool` more than once.
+
+Copying a `Tensor` creates a new Tensor handle without copying `PooledBuffer` or GPU data. Multiple Tensors share the same `TensorData` and access its Device buffer through one `PooledBuffer`.
+
+When all Tensors release their references to a `TensorData`, its destructor runs. It calls `PooledBuffer::release()` to return the Device buffer to `BufferPool`.
+
+**A Device buffer returned to BufferPool is retained for reuse by later memory requests rather than freed immediately.** Tensor destruction and actual GPU memory deallocation are therefore separate processes.
+
+```mermaid
+flowchart TD
+    A["Tensor A<br/>Shape A, Offset A"] -->|shared_ptr| D["TensorData"]
+    B["Tensor B<br/>Shape B, Offset B"] -->|shared_ptr| D
+
+    D --> H["HostBuffer<br/>Host data"]
+    D --> P["PooledBuffer<br/>Responsibility for returning the Device buffer"]
+
+    P --> G["eva::Buffer<br/>GPU buffer handle"]
+    P --> O["BufferPool<br/>GPU buffer management and reuse"]
+
+    G -.->|Returned on release| O
+```
+
+For GPU buffer allocation, return, and reuse conditions, see [Tensor memory lifecycle](#8-typical-tensor-flows-and-lifecycles).
+
+## 2. State
+
+`Tensor` manages a **Shape** that defines the data layout, **Host data** used by the CPU, and a **Device buffer** used for GPU computation.
+
+Each component has an independent state, and which components are present depends on memory allocation and data transfers. The following functions report these states.
+
+| State | Meaning | Check |
 |---|---|---|
-| Empty Handle | No shape or data. Initial State of the Slot | `validShape() == false` |
-| Only Shapes | The shape and dtype have been determined, but there are no bytes yet. | `validShape() == true` |
-| Host Data | The bytes are in host memory | `hasHostData() == true` |
-| Device Buffer | The bytes are in a GPU buffer. Target read and written by the node's `run()` | `gpuBufferBound() == true` |
+| Empty handle | Initial state without `TensorData` | `Tensor()` or `dtype() == Dtype::None` |
+| Shape specified | Shape and dtype are set; data bytes may not yet exist | `validShape() == true` |
+| Host data | Holds data bytes accessible by the CPU | `hasHostData() == true` |
+| Device buffer | A buffer for GPU computation is attached | `gpuBufferBound() == true` |
+| GPU output tracking | Submission information for the last GPU result is registered | `lastSubmission().second != 0` |
 
-The latter two are not exclusive. Right after the upload, it can be on both sides, and `NeuralNet` uploads the weights and clears the host side.
+A `Tensor` can hold both Host data and a Device buffer. Host data may remain after a transfer to the Device buffer, and unnecessary Host data can be removed to reduce memory use.
 
-The states a Tensor goes through and the order in which it goes through them are different for each Tensor. The four paths are addressed in [Representative Tensor Flows And Lifecycles(#Representative-Tensor-Flows-And-Lifecycles).
+`NeuralNet` uses this approach when uploading weights. After recording commands that transfer weights to Device buffers, `NeuralNet::uploadModelParams()` calls `clearHostData(true)` to remove Host data and request that its memory capacity be released.
 
-## Creation
+For weight uploads and memory management, see [NeuralNet](neural-net.md).
 
-There are three ways to create a tensor.
+## 3. Construction
 
-### 1. By shape
+A `Tensor` can be constructed by specifying a Shape and Dtype, or from a Safetensors file or an existing Tensor.
+
+Depending on the construction method, it creates new data storage or shares an existing `TensorData`.
+
+### 3.1 Specifying a Shape
+
+A Tensor can be constructed with a Shape and Dtype.
 
 ```cpp
-Tensor x({M, N});                   // fp32 is basic
+Tensor x({M, N});                  // Default Dtype: Fp32
 Tensor y({H, W}, Dtype::Fp16);
+Tensor empty;                      // Empty Tensor without TensorData
 ```
 
-It starts with only the shape and dtype determined, with no data yet. **dtype cannot be changed after creation**. As it is an attribute attached to the data, if you need a different dtype, you need to create a new tensor.
+Specifying a Shape creates a `TensorData` object through `std::make_shared<TensorData>(dtype)`. At this point, Host data is empty and no Device buffer is allocated.
 
-The purpose is to fill in the data later and create the tensor in advance. Input data, table data, the output slot of a node, etc. are created in this way. The data is later filled in directly by the function in [Host data upload](#host-data-upload) or filled in by the GPU like a node output.
+**Constructing a Tensor object and allocating actual data memory are separate processes.** Host memory is allocated when data is set or read from a file. A Device buffer is prepared separately when the data is needed on the GPU.
 
-### 2. From safetensors
+Dtype is set when `TensorData` is created and cannot be changed afterward. A different Dtype requires a Tensor with a new `TensorData`. Shape, however, can be changed through operations such as `reshape()`.
 
-This method is used to upload weights. At this point, you need to pay attention to dtype.
+### 3.2 Construction from Safetensors
+
+A Tensor can be constructed by reading data stored in a Safetensors file. This is mainly used to load model weights.
 
 ```cpp
 SafetensorsParser parser(VAI_DATA_DIR "/ckpts/mnist/jroot/model.safetensors");
-Tensor w(parser["fc.weight"]);                  // The dtype as it is in the file
-Tensor w(parser["fc.weight"], Dtype::Fp16);     // Convert to fp16 and load
+
+Tensor w(parser["fc.weight"]);                // Construct using the file's Dtype
+Tensor half(parser["fc.weight"], Dtype::Fp16); // Convert to Fp16 during construction
 ```
 
-The shape is taken as recorded in the file, and it starts with the host data filled in. Given the second argument, it converts the dtype while loading. BF16 is not supported yet, so if it is not specified, it is resolved to fp32?? (Lossless)
+`Tensor(SafetensorRef, Dtype)` reads the Shape stored in the file, obtains the required Host memory, and loads the data. If the target Dtype differs from the file's data type, it converts the data during loading.
 
-In vAi, you need to explicitly specify the dtype of the tensor for each slot. It won't cast automatically, and if casting is needed, you need to explicitly insert a casting node.
-It is the user's responsibility to insert the right tensor if the node requires a specific dtype. If a different type is inserted, a runtime error may occur or the behavior may become undefined during execution.
+The supported data types are:
 
-Weights take their dtype from the tensor itself: a node reads the dtype of the weight it holds. Load weights at the net's `wDefaultDtype` and norm coefficients at fp32.
-
-```cpp
-linear["weight"] = Tensor(parser["fc.weight"], net.config().wDefaultDtype);  // the net's weight dtype
-linear["weight"] = Tensor(parser["fc.weight"]);   // the file's dtype, whatever it is
-```
-
-The shape is not specified like dtype, but the shape itself recorded in the file becomes the tensor's shape. That shape could be different from the shape that the node wants. In that case, you need to fix it on the host before putting it into the slot.
-(see [Host-only tensor calculation](#host-only-tensor-calculation)).
-
-The tensor created in this way is still in the [Host data](#state) state. Putting it into the slot does not mean that it goes directly to the GPU. Instead, at the preparation stage of the first forward, `NeuralNet` uploads it to the device buffer. (see [Weights in Representative tensor flows and lifecycles](#1-weights)).
-
-### 3. From an existing tensor
-
-Copying and assignment, `Tensor::reshape`, create a new tensor and share the data with the original.
-However, calculations that change the memory layout, like `Tensor::permute`, create new data.
-(see [Host-only tensor calculation](#host-only-tensor-calculation)).
-
-```cpp
-Tensor b = a;                    // New tensor — shares data with a
-Tensor c = a.reshape({M * N});   // New tensor — shares data with a, but has a different shape
-Tensor t = a.permute(1, 0);      // New tensor — owns newly rearranged data
-```
-
-## Host data upload
-
-There are two functions that upload data to a tensor with only a shape.`Tensor::setFloats()` receives a `std::vector<float>` and converts each element to the tensor's dtype before uploading it.
-`Tensor::setData<T>()` receives a raw pointer of an arbitrary type and copies the bytes as they are without conversion. However, the user needs to guarantee the following for `setData()`.
-
-- `sizeof(T)` needs to be the same as the size of an element of the tensor.
-- The pointer needs to point to valid data for as many elements as the tensor has.
-
-```cpp
-// Image Input — convert float values to the tensor's dtype and store them.
-std::vector<float> pixels(28 * 28);       // Pixels normalized to [0, 1]
-Tensor img({1, 28, 28}, Dtype::Fp16);
-img.setFloats(pixels);                    // Convert fp32 -> fp16
-
-// Token Input — memcpy without conversion. The bytes of the integer IDs are put in as they are.
-std::vector<int> tokenIds = tokenizer.encode(prompt);
-Tensor tokens({(uint32_t)tokenIds.size()});
-tokens.setData(tokenIds.data());          // sizeof(int) == size of an fp32 element
-```
-
-The uploaded data is still only in the host ([Host data](#state) State). The user's responsibility ends here, and `NeuralNet` automatically moves it to the GPU during the forward pass.
-
-## Host-only tensor calculation
-
-Sometimes, the shape or layout of the tensor included in the checkpoint could be different from what the node wants. In such cases, fix them using the following calculations while in the Host Data state, before being uploaded to the GPU.
-
-All four calculations leave the original as it is and return a new tensor. However, it varies by calculation whether the result tensor owns its own new data or shares data with the original. The last column of the table shows the distinction.
-
-| Calculation | Tasks | Data |
+| File data type | Default Tensor Dtype | Conversion |
 |---|---|---|
-| `Tensor::permute` | Axis Rearrangement (e.g., Transpose) | Owns new data |
-| `Tensor::split` | Cut the leading axis into multiple tensors | Each piece owns new data |
-| `Tensor::concat` | Concatenate along the leading axis | Owns new data |
-| `Tensor::reshape` |Same data in different shapes (same number of elements) | Shares with the original |
+| F32 | `Dtype::Fp32` | Converted according to the target Dtype |
+| F16 | `Dtype::Fp16` | Converted according to the target Dtype |
+| BF16 | `Dtype::Fp32` | Converted to Fp32, or to Fp16 if specified |
+
+BF16 is not a separate Tensor Dtype. Without a target Dtype, it is converted to Fp32 during loading.
+
+The loaded Tensor holds data in Host memory; no Device buffer has been allocated yet.
+
+When using weights, check the Shape required by the operation Node. If the file's data Shape differs from the required structure, it can be adjusted with operations such as `permute()` and `reshape()`. A weight's Dtype is set by its Tensor, and the Node reads the Dtype of the Tensor in the slot. The loaders of the provided models load weights at the net's `wDefaultDtype` and normalization coefficients at Fp32.
 
 ```cpp
-// As c_attn in HF GPT-2 is saved as [in, out], it needs to be transposed
-projQKV["weight"] = Tensor(parser["attn.c_attn.weight"], dt).permute(1, 0);
-
-// Divide the fused QKV into three
-auto [q, k, v] = Tensor(parser["attn.c_attn.weight"], dt).split(D, 2 * D);
-
-// To turn the two projections, SwiGLU: gate and up, into one GEMM, concatenate them.
-gateValue["weight"] = Tensor(parser["gate.weight"], dt).concat(Tensor(parser["up.weight"], dt));
+// weightDtype is the Dtype to load the weight at (e.g. net.config().wDefaultDtype)
+linear["weight"] = Tensor(parser["fc.weight"], weightDtype);
 ```
 
-`permute`, `split`, and `concat` operate only when host data is available. It is the node's task to fix the tensor after the device buffer has been attached. (e.g.: `Reshape`,
-`Permute`).
+Assigning a Tensor to a Node slot alone does not transfer data to a Device buffer. `NeuralNet` uploads weights in `persistent` slots to Device buffers while preparing the first run.
 
-## Reading output
+For weight upload details, see [NeuralNet](neural-net.md).
 
-Forward is asynchronous. If you call `Tensor::downloadToHost()` on the output tensor filled by `model(...)`, it waits for the GPU to complete and downloads the result to the host. Downloading occurs only once, on the first call.
+### 3.3 Construction from an existing Tensor
 
-`Tensor::getData<T>()` calls `downloadToHost()`, reinterprets the pointer of the host data as `const T*`, and returns it. As it does not convert the values, `T` should be the type of the values that are actually stored.
+A new Tensor can be constructed from an existing one. Depending on the operation, it shares the existing `TensorData` or creates new data storage.
+
+```cpp
+Tensor b = a;                    // Share the existing TensorData
+Tensor c = a.reshape({M * N});   // Change the Shape and share TensorData
+Tensor t = a.permute(1, 0);      // Create new Host data
+```
+
+`reshape()` and `view()` share the existing `TensorData`. They create no new data storage and copy neither Host data nor Device buffers.
+
+In contrast, `permute()`, `split()`, and `concat()` create new `TensorData` objects and copy Host data.
+
+Therefore, **whether constructing a new Tensor from an existing one copies data depends on the operation**.
+
+The behavior and memory costs of each operation are described in [Host-only Tensor operations](#6-host-only-tensor-operations).
+
+### 3.4 Copy and Move
+
+`Tensor` supports C++ copy and move semantics. Neither copies existing GPU data into a new Device buffer.
+
+```cpp
+Tensor a({4});
+
+Tensor b = a;            // Copy: share TensorData
+Tensor c = std::move(b); // Move: transfer Tensor handle state
+```
+
+**A copy creates a new Tensor handle that shares the existing `TensorData`.**
+
+Copying the `std::shared_ptr<TensorData>` increases the reference count. Shape and Offset are copied to the new Tensor, while Host data and the Device buffer remain in the shared storage.
+
+**A move transfers the Tensor's handle and state to a new Tensor.**
+
+The `std::shared_ptr`, Shape, and Offset are transferred without copying actual Host data or Device buffer contents. The source Tensor remains a valid object after the move, but its previous data and state must not be assumed to remain intact.
+
+`TensorData` internally holds a move-only `PooledBuffer`, so `TensorData` itself does not support default copying.
+
+Moving a `PooledBuffer` transfers the GPU buffer handle and ownership of the `BufferPool`. The source `PooledBuffer`'s buffer handle becomes empty; actual GPU data is neither moved nor copied.
+
+For copy and move ownership management and memory lifecycles, see [Tensor memory lifecycle](#8-typical-tensor-flows-and-lifecycles).
+
+## 4. Setting Host data
+
+`Tensor` can store data in Host memory through `setFloats()` and `setData<T>()`. The two functions differ in how they set data.
+
+- **`setFloats()`**: Accepts Fp32 data, converts it to the Tensor's Dtype, and stores it in Host memory.
+- **`setData<T>()`**: Copies the input data bytes into Host memory without Dtype conversion.
+
+The following example sets Host data with both functions.
+
+```cpp
+// Convert Fp32 input data to Fp16 and store it
+std::vector<float> pixels(28 * 28);
+Tensor img({1, 28, 28}, Dtype::Fp16);
+img.setFloats(pixels);
+
+// Store integer data without conversion
+std::vector<int32_t> tokenIds = {101, 102, 103};
+Tensor tokens({static_cast<uint32_t>(tokenIds.size())});
+tokens.setData(tokenIds.data());
+```
+
+When using `setData<T>()`, the input element size (`sizeof(T)`) must match the element size of the Tensor's Dtype. The input pointer must also reference valid memory from which all Tensor elements can be read.
+
+In this example, `tokenIds` is not converted from integers to Fp32. Its integer data bytes are stored unchanged in the Tensor's Host memory.
+
+Both functions call `hostData_.resize()` internally to obtain the required memory size. If the existing Host buffer has sufficient capacity, the data can be updated without further allocation.
+
+After setting data, the internal state changes as follows.
+
+- `hostUploaded_ = false`: Marks the new Host data as not yet uploaded to the Device buffer.
+- `lastSubmission_ = {nullptr, 0}`: Resets the previous GPU result submission information.
+
+This process neither frees the existing Device buffer nor allocates a new one.
+
+### 4.1 Setting data with Move
+
+`setFloats()` also provides an overload that accepts a moved `std::vector<float>`.
+
+```cpp
+std::vector<float> values = {1, 2, 3, 4};
+
+Tensor x({4});
+x.setFloats(std::move(values));
+```
+
+`setFloats(std::vector<float>&&)` moves the supplied vector into an internal temporary vector, then writes the data to the Tensor's Host storage.
+
+Therefore, this is not a zero-copy operation that transfers the input vector's memory directly to the Tensor. Data is copied or converted depending on the Tensor's Dtype.
+
+## 5. Host-to-Device data transfer
+
+Data stored in Host memory can be transferred to a Device buffer for GPU computation.
+
+`setFloats()` and `setData<T>()` only set Host data; they do not transfer it to a Device buffer. Actual data transfers are handled during `NeuralNet` execution preparation.
+
+`NeuralNet` uses different upload paths for input Tensors and weight Tensors according to their purpose.
+
+### 5.1 Input Tensor upload
+
+Ordinary input Tensors are transferred to Device buffers in `NeuralNet::prepareInputs()`.
+
+When an input Tensor has new Host data that needs uploading, the following steps run.
+
+1. Check whether the Tensor has a Device buffer attached.
+2. If not, obtain one through `BufferPool::requestBuffer()`.
+3. Copy Host data into a CPU-accessible Staging Buffer.
+4. Record `copyBuffer()` commands to transfer Staging Buffer data to the Device buffer.
+5. Call `markHostUploaded()` to update the Host data upload state.
+
+The Staging Buffer uses `HOST_VISIBLE | HOST_COHERENT` memory properties. The CPU writes data into it, and the GPU transfers that data to the Device buffer through the recorded copy commands.
+
+If a Device buffer is already attached, it can be reused. Changed input data therefore does not require a new GPU buffer on every update.
+
+Input Tensors also retain Host data after upload. Subsequent changes through `setFloats()` or `setData<T>()` can be transferred into the existing Device buffer.
+
+### 5.2 Weight Tensor upload
+
+`persistent` Tensors, such as weights, are transferred to Device buffers in `NeuralNet::uploadModelParams()`.
+
+This function checks Tensors in `persistent` slots and performs the following steps for those without an attached Device buffer.
+
+1. Obtain a Device buffer through `BufferPool::requestBuffer()`.
+2. If Host data exists, record transfer commands with `TensorUploader`.
+3. Call `clearHostData(true)` to remove Host data and request that its memory capacity be released.
+4. Attach the obtained Device buffer to the Tensor.
+
+`TensorUploader` transfers Host data to Device buffers through a Staging Buffer. Data larger than the Staging Buffer's capacity is transferred in multiple chunks.
+
+Unlike input uploads, weight uploads **remove the original Host data after transferring it to a Device buffer to reduce Host memory use**.
+
+However, `clearHostData(true)` is called after transfer commands are recorded. GPU transfer completion is guaranteed during `TensorUploader`'s `flush()`.
+
+### 5.3 Data transfer structure
+
+Data moves from Host to Device as follows.
+
+```mermaid
+flowchart LR
+    H["TensorData<br/>Host data"]
+    S["Staging Buffer<br/>HOST_VISIBLE"]
+    D["Device Buffer<br/>DEVICE_LOCAL"]
+    G["GPU computation"]
+
+    H -->|"CPU memcpy"| S
+    S -->|"GPU copyBuffer"| D
+    D --> G
+```
+
+Host-to-Device transfers incur CPU memory copy and GPU data transfer costs. If no Device buffer exists, GPU memory allocation can add further cost.
+
+**Device buffer allocation and data transfer are separate operations.** An existing Device buffer can be reused while only new Host data is transferred.
+
+For when input and weight uploads occur and when resources can be reused during repeated inference, see [Execution pipeline](execution-pipeline.md).
+
+## 6. Host-only Tensor operations
+
+`Tensor` provides operations for changing Shapes, rearranging data, splitting, and concatenation. These are mainly used after loading model weights to convert them into the data structure required by an operation Node.
+
+Each operation either shares the existing `TensorData` or creates new Host data storage.
+
+| Operation | Function | Data storage |
+|---|---|---|
+| `Tensor::reshape()` | Change Shape while preserving the element count | Shared with the source |
+| `Tensor::view()` | Reference a range of data with a specified Shape and Offset | Shared with the source |
+| `Tensor::permute()` | Change axis order and rearrange data | Creates new Host data |
+| `Tensor::split()` | Split a Tensor along the first axis | Creates new Host data for each segment |
+| `Tensor::concat()` | Join multiple Tensors along the first axis | Creates new Host data |
+
+### 6.1 Data sharing operations
+
+`reshape()` and `view()` create new Tensors that share the existing `TensorData`. They copy neither Host data nor Device buffers.
+
+**`reshape()`** changes a Tensor's Shape while preserving its total element count.
+
+```cpp
+Tensor a({2, 4});
+Tensor b = a.reshape({4, 2});
+```
+
+Here, `a` and `b` share the same data storage but have different Shapes.
+
+**`view()`** references a specified range starting at a particular position in the existing storage. It uses `baseOffset` to set the starting position, and does not require the total element count to match the source.
+
+```cpp
+Tensor original({8}, Dtype::Fp32);
+Tensor part = original.view({3}, 3);
+```
+
+`part` references three elements starting at the fourth element of the source storage. Since `baseOffset` is measured in elements, the starting position for Fp32 data is byte 12.
+
+If a Device buffer is attached, `view()` checks that the specified range does not exceed the buffer size. It performs no separate bounds check on Host data.
+
+Both operations share the existing `TensorData`, so changes to the shared data also affect other Tensors that reference it.
+
+### 6.2 Data copying operations
+
+`permute()`, `split()`, and `concat()` use existing Host data to create new Tensors and data storage.
+
+These operations **require Host data to exist and do not execute GPU data copy commands**.
+
+**`permute()`** rearranges data according to the specified axis order. The rearranged data is written to new Host storage.
+
+```cpp
+// Change the axis order of the weight array
+Tensor transposed =
+    Tensor(parser["attn.c_attn.weight"], dt).permute(1, 0);
+```
+
+**`split()`** divides data into multiple segments along the Tensor's first axis. Each segment has its own `TensorData` and Host storage.
+
+```cpp
+// Split the first axis into Q, K, and V segments
+Tensor qkv = Tensor(parser["attn.c_attn.weight"], dt);
+
+auto [q, k, v] = qkv.split(D, 2 * D);
+```
+
+**`concat()`** joins multiple Tensors along the first axis. The input Tensors must have matching Dtypes and sizes in the remaining dimensions.
+
+```cpp
+// Concatenate Tensors along the first axis
+Tensor combined =
+    Tensor(parser["gate.weight"], dt)
+        .concat(Tensor(parser["up.weight"], dt));
+```
+
+`split()` copies the divided data into new Host storage. In contrast, `view()` references a range of the existing storage without copying it.
+
+Therefore, **if independent data storage is unnecessary, `view()` can reduce memory allocation and copy costs**. Keep in mind that the source and result Tensors share the same storage.
+
+## 7. Reading output data
+
+GPU inference can still be running when the `NeuralNet` call returns. To use its results on the CPU, Device buffer data must be transferred into Host memory.
+
+`Tensor` provides `downloadToHost()` and `getData<T>()` for reading GPU results.
+
+### 7.1 downloadToHost()
+
+`downloadToHost()` copies GPU results from a Device buffer into Host memory.
+
+The download proceeds as follows.
+
+1. Check that the Tensor has an attached Device buffer and valid GPU submission information.
+2. Obtain a Readback Buffer from `BufferPool` to hold the GPU result.
+3. Copy Device buffer data into the Readback Buffer with `copyBuffer()` commands.
+4. Submit the GPU copy commands and wait for completion.
+5. Call `map()` and `invalidate()` on the Readback Buffer so the CPU can read the latest data.
+6. Copy the data into `TensorData::hostData_` and update the download state.
+
+The Readback Buffer uses `HOST_CACHED | HOST_VISIBLE` memory properties. The CPU reads its data after the GPU transfer finishes.
+
+This process incurs GPU data transfer, synchronization wait, and Host memory copy costs.
+
+### 7.2 getData<T>()
+
+`getData<T>()` brings GPU results into Host memory and returns a pointer to the data.
+
+It calls `downloadToHost()` internally, so a separate download call is not required beforehand.
 
 ```cpp
 Tensor out;
-net(inDict, {{"nextTokenId", &out}});
-uint32_t next = out.getData<uint32_t>()[0];   // From inside downloadToHost()
+
+model({{"x", inputTensor}}, {{"y", &out}});
+
+const float* values = out.getData<float>();
 ```
 
-As the output buffer is overwritten in place by the next forward, the result needs to be read before the next `model()` call. If you call `downloadToHost()` using a handle that has passed that point, the data has already been corrupted, and it will trigger an assert.
+`getData<T>()` returns Host data as `const T*` without Dtype conversion.
 
-You don't necessarily need to move the output to the host. You can pass the output tensor directly as the input to another `NeuralNet`, or pass it as the next input of the same `NeuralNet`, as in autoregressive generation.
-Input that already has a device buffer is read directly by the graph, resulting in a **zero-copy** connection that does not pass through the host. This method is used to concatenate multiple models.
+The template type `T` must therefore match the actual data storage format.
 
-## Representative tensor flows and lifecycles
+The returned pointer references `TensorData`'s Host storage. It is not an independent copy, so the pointer cannot continue to be used after the Host buffer is changed or freed.
 
-Even if they pass through the same states, the path they take differs depending on which tensor they are.
+**Use `downloadToHost()` and `getData<T>()` on Tensors with valid GPU output submission information.** They are not general accessors for ordinary Tensors that hold only Host data.
 
-### 1. Weights
+### 7.3 Avoiding duplicate downloads
 
-It begins at the host, is uploaded to the device, and then remains fixed.
+`TensorData` compares the last GPU output information with the Host download information to avoid unnecessary transfers.
 
+`downloadToHost()` compares `hostSyncedAt_` with `lastSubmission_`.
+
+If they match, that GPU result has already been copied into Host memory, so the existing Host data is reused. If they differ, a new download is performed.
+
+Repeatedly reading the same GPU result therefore does not transfer data from Device to Host each time.
+
+### 7.4 Host data and Device buffer synchronization state
+
+`TensorData` maintains the following state to manage Host data uploads and GPU result downloads.
+
+| State | Role | Updated when |
+|---|---|---|
+| `hostUploaded_` | Track whether Host data has been uploaded to Device | Set to `false` by a setter and `true` during input upload preparation |
+| `lastSubmission_` | Store the last GPU output submission information | Updated on GPU output submission and reset by a setter |
+| `hostSyncedAt_` | Identify the GPU result last downloaded to Host memory | Updated when `downloadToHost()` completes |
+
+These fields do not store Host data or Device buffers directly. They are bookkeeping information used to decide whether data transfers are needed.
+
+### 7.5 Using Device buffers directly
+
+GPU results do not always need to be downloaded into Host memory.
+
+A Tensor with an attached Device buffer can pass that buffer as input to another GPU operation. Using the existing Device buffer directly, without going through Host memory, reduces unnecessary transfers.
+
+However, when multiple operations use the same Device buffer, GPU execution order and resource lifetimes must be managed to prevent data from being overwritten.
+
+For GPU result passing and synchronization between executions, see [Execution pipeline](execution-pipeline.md).
+
+## 8. Typical Tensor flows and lifecycles
+
+How a `Tensor` uses Host memory and Device buffers depends on the purpose of its data. Inputs, weights, and operation results use the same `Tensor` structure, but their data is created, retained, and returned at different points.
+
+### 8.1 Weight Tensors
+
+Weight Tensors usually load data from Safetensors files into Host memory, then transfer it to Device buffers.
+
+```text
+Load a Safetensors file
+  -> Create Host data
+  -> Perform Host-only Tensor operations if needed
+  -> Assign the Tensor to a persistent slot
+  -> Obtain a Device buffer during first-run preparation
+  -> Record Host-to-Device transfer commands
+  -> Remove Host data
+  -> Retain the Device buffer
 ```
-safetensors Load (Host Data)
-  → Host-Only Tensor Calculation (Transpose, etc., if necessary)
-  → Put in the persistent slot
-  → At the preparation stage of the first forward, NeuralNet uploads it (Device Buffer)
+
+`NeuralNet::uploadModelParams()` checks Tensors stored in `persistent` slots and obtains buffers for those without an attached Device buffer.
+
+If Host data exists, it uses `TensorUploader` to transfer it to the Device buffer. It then calls `clearHostData(true)` to remove Host data and request that its memory capacity be released.
+
+Unlike ordinary intermediate results, Tensors in `persistent` slots are not reset during Command Buffer recording. Their Device buffers can therefore remain in use while references to their `TensorData` exist.
+
+Weights that already have Device buffers are not uploaded again by `uploadModelParams()`.
+
+For weight upload timing and execution preparation, see [Execution pipeline](execution-pipeline.md).
+
+### 8.2 Input Tensors
+
+Input Tensors store external data in Host memory and transfer it to Device buffers for use.
+
+If the Shape stays the same, the existing Tensor and Device buffer can be reused while only the input data is changed.
+
+```text
+Create a Tensor with a Shape and Dtype
+  -> Set Host data with setData() / setFloats()
+  -> Obtain a Device buffer on the first run
+  -> Transfer data from Host to Device
+  -> Set new Host data
+  -> Transfer the changed data to the existing Device buffer
 ```
 
-As the slot is `persistent`, the buffer won't be released after the forward is completed and remains on the GPU. Therefore, as long as `NeuralNet` is alive, you don't need to upload the weights again.
+`setData()` and `setFloats()` change Host data and reset the upload state. They do not release an already attached Device buffer.
 
-### 2. External input
+On the next run, `NeuralNet::prepareInputs()` transfers the changed Host data to the Device buffer. If the existing Device buffer has been retained, the data can be updated without additional GPU memory allocation.
 
-It starts at the host in the same way, but the values are newly filled in for each execution.
+Also, if the input Tensor's Shape, Device buffer, and Offset remain the same, the existing Command Buffer can be reused despite changed input values. The other re-recording conditions must remain unchanged as well.
 
-```
-Creation via Shape
-  → setData / setFloats (Host Data)
-  → model() call (uploaded in the slot of the input node)
-  → Fill the values again before the next call
-```
+For Command Buffer reuse conditions during repeated inference, see [Execution pipeline](execution-pipeline.md).
 
-Typically, instead of creating a new tensor, you change only the values with `setData` on the same handle and pass it again when the same shape is repeated, like in a decode loop. The efficiency might decrease if you create a new tensor and pass it through every time, because **command buffer re-recording would occur**.
+### 8.3 Intermediate result Tensors
 
-### 3. Node output
+The Shapes of intermediate result Tensors are generally determined in a Node's `prepare()`, and the required Device buffers are prepared in `NeuralNet::recordCommands()`.
 
-It is not a tensor that the user creates or passes through. It does not pass through the host, but is created directly inside the GPU, moves to the next node, and disappears after being used.
-
-```
-prepare() only creates the shape
-  → NeuralNet attaches a buffer from the buffer pool (Device Buffer).
-  → GPU fills
-  → To the next node's input slot (handle only is passed)
-  → The used buffer goes back to the pool and is reused.
+```text
+Determine the output Shape in Node::prepare()
+  -> Obtain a Device buffer from BufferPool
+  -> Pass the Tensor to a downstream Node's input slot
+  -> Record GPU compute commands
+  -> Clean up Tensor references no longer needed during recording
+  -> Return the buffer when the last TensorData reference is released
 ```
 
-### 4. forward output
+When an output Tensor has no attached Device buffer, `NeuralNet::recordCommands()` obtains one through `BufferPool::requestBuffer()`.
 
-It is the tensor that `model(...)` fills through the output argument. You can download it to the host and read it, or you can pass it directly as the input to a different forward.
+It then passes the output Tensor to connected input slots. This shares the same `TensorData` without copying data.
 
+After recording a Node's GPU commands, Tensor handles are reset except in `persistent` slots. If no other references remain, the `TensorData` is destroyed and its Device buffer is returned to `BufferPool`.
+
+**Device buffers returned to BufferPool are retained for reuse by later operations rather than freed immediately.**
+
+This allows multiple intermediate results to use the same GPU buffer at different times. Separate GPU memory is therefore not required for every intermediate result.
+
+### 8.4 Final output Tensors
+
+A final output Tensor holds GPU results and makes them accessible externally.
+
+`OutputNode` retains the Tensor received through its input slot in `cachedOutput_`. After submitting GPU commands, `NeuralNet::operator()` assigns that Tensor to the user's specified output Tensor.
+
+```text
+Submit GPU compute commands
+  -> Reference OutputNode's result Tensor
+  -> Assign the handle to the user's output Tensor
+  -> Return from the NeuralNet call
+        |
+        +-- Use on CPU
+        |    -> downloadToHost() / getData<T>()
+        |    -> Transfer data from Device to Host
+        |
+        +-- Use on GPU
+             -> Pass the existing Device buffer as input to the next operation
 ```
-model() returns
-  → Reading: use downloadToHost() / getData<T>() to wait for the GPU to complete and download the data (Host Data)
-  → Passing: directly to the input of a different forward (zero-copy without passing through the host)
-  (Either way, before the next forward overwrites the same buffer)
+
+GPU computation may still be incomplete when the `NeuralNet` call returns.
+
+To use results on the CPU, call `downloadToHost()` or `getData<T>()` to copy Device data into Host memory. This submits GPU transfer commands and waits for the copy to finish.
+
+If a GPU result is used as input to another operation, the existing Device buffer can be passed directly without downloading it to Host memory.
+
+**Copying an output Tensor does not create an independent copy of the GPU result.**
+
+```cpp
+Tensor saved = out;  // Share the same TensorData
 ```
+
+Reusing the same output storage during repeated inference can overwrite previous data with new results. To preserve a previous result, copy the data separately before that storage is updated.
+
+---
+
+### 8.5 Tensor destruction and Device buffer return
+
+`Tensor` shares ownership of data storage through `std::shared_ptr<TensorData>`.
+
+Destroying a Tensor object releases its reference to the `TensorData`. If another Tensor still references the same `TensorData`, the Host data and Device buffer remain.
+
+When the last reference is released, the `TensorData` destructor runs. It calls `PooledBuffer::release()` to return the Device buffer to `BufferPool`.
+
+```mermaid
+sequenceDiagram
+    participant T as Tensor
+    participant D as TensorData
+    participant P as PooledBuffer
+    participant B as BufferPool
+
+    T->>D: Release shared_ptr reference
+
+    alt Last reference released
+        D->>P: Call release()
+        P->>B: Return Device buffer
+        Note over B: Retain buffer for reuse
+    else Other references remain
+        Note over D: Retain Host data and Device buffer
+    end
+```
+
+Here, **Tensor object destruction, returning a buffer to BufferPool, and actual GPU memory deallocation are separate processes**.
+
+`PooledBuffer::release()` registers the Device buffer in the pool's free buffer list. It does not directly call `destroy()` on the GPU buffer.
+
+The Device buffer can therefore remain in `BufferPool` even after the last Tensor is destroyed. Returned buffers are reused for later memory requests.
+
+### 8.6 Device buffer reuse in BufferPool
+
+`BufferPool` retains returned Device buffers and checks whether an existing buffer can be reused when a new request arrives.
+
+`BufferPool::requestBuffer()` checks the following conditions.
+
+1. **Usage Flags**: The buffer must belong to the same usage flag group as the requested `usageFlags`.
+2. **Buffer Size**: Its size must be at least `minSize` and no greater than `maxSize`.
+3. **Memory Properties**: Its memory properties must include all requested `reqMemProps`.
+
+If a matching buffer exists, it is removed from the cache and returned as a new `PooledBuffer`. No new GPU buffer is created.
+
+If no buffer matches, `device_.createBuffer()` creates a new GPU buffer.
+
+Also, **a Device buffer currently used by another Tensor is not in BufferPool's free cache and cannot be lent out again**.
+
+`PooledBuffer` holds a `std::shared_ptr<BufferPool>`, so the `BufferPool` object also remains alive while the Device buffer is in use.
+
+When memory for returned buffers is ultimately freed depends on the pool's lifetime and the underlying GPU resource management.
+
+## 9. Performance and considerations
+
+Tensor construction, copying, moving, data transfers, and buffer returns incur different costs.
+
+The following table compares memory use and data copy costs for the main operations.
+
+| Operation | Host data copy | GPU data transfer | Main cost |
+|---|---|---|---|
+| `Tensor b = a` | None | None | Shape copy and shared reference count increase |
+| `Tensor b = std::move(a)` | None | None | Handle and ownership transfer |
+| `reshape()` / `view()` | None | None | Tensor handle creation and data sharing |
+| `permute()` / `split()` / `concat()` | Yes | None | Host memory allocation and data copy |
+| `setFloats()` | Copy or conversion | None | Host data write and memory reallocation if needed |
+| Host-to-Device upload | Copy to Staging Buffer | Yes | Data transfer and Device buffer allocation if needed |
+| `downloadToHost()` | Host copy after Readback | Yes | GPU transfer, synchronization wait, and Host memory copy |
+| `PooledBuffer::release()` | None | None | Buffer return to BufferPool |
+
+### 9.1 Reusing Tensors and Device buffers
+
+During repeated inference, retaining the same Tensor and Device buffer while updating only input data is beneficial.
+
+`setFloats()` or `setData<T>()` can set new Host data while retaining the existing Device buffer. Execution preparation then transfers the changed data to the Device buffer.
+
+This can reduce unnecessary GPU memory allocation. The existing Command Buffer can also be reused if input Shapes, Device buffers, and other recording conditions are unchanged.
+
+### 9.2 Tensor sharing and data changes
+
+Copying a `Tensor` or creating a new one with `reshape()` or `view()` shares the existing `TensorData`.
+
+Changes to data in shared storage therefore affect other Tensors that reference the same `TensorData`.
+
+In particular, copying a Tensor handle alone cannot preserve a previous GPU result. Independent results require copying data into separate memory.
+
+### 9.3 GPU resource lifetime management
+
+`TensorData` stores the last GPU output submission information in `lastSubmission_`. It includes a pointer to the `NeuralNet` object that produced the output.
+
+This pointer does not own the `NeuralNet`. The related GPU resource lifetimes and execution completion order must therefore be managed while the output Tensor is in use.
+
+For `NeuralNet` execution synchronization, Command Buffer reuse, and GPU resource management, see [Execution pipeline](execution-pipeline.md).

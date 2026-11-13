@@ -89,6 +89,3 @@ select = ["E4", "E7", "E9", "F", "B"]
 # These scripts put their own directory on sys.path, or answer --help, before
 # the heavy imports.
 "benchmarks/**" = ["E402"]
-# One `l` in a comprehension. Fix it with the next docs change: a PR touching
-# docs/ runs the docs check.
-"docs/tools/gen-node-docs.py" = ["E741"]

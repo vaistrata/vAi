@@ -1,6 +1,6 @@
 # GPT-2
 
-GPT-2 (Radford et al., 2019) is a decoder-only Transformer-based language model developed by OpenAI. Its architecture stacks pre-norm layers with causal self-attention and GELU feed-forward layers. The model predicts the next token by computing a probability distribution over a vocabulary of 50,257 tokens.
+GPT-2 (Radford et al., 2019) is a decoder-only transformer language model developed by OpenAI. It stacks pre-norm blocks with causal self-attention and GELU feed-forward layers. The model predicts the next token by computing a probability distribution over a vocabulary of 50,257 tokens.
 
 **References**: [Paper](https://cdn.openai.com/better-language-models/language_models_are_unsupervised_multitask_learners.pdf), [Checkpoint (HuggingFace)](https://huggingface.co/openai-community/gpt2), [Repository](https://github.com/openai/gpt-2)
 
@@ -12,102 +12,111 @@ namespace gpt2 = model::production::gpt2;
 auto modelCfg = gpt2::ModelConfig::_124M();
 
 gpt2::Net net({
-    .device       = device,
-    .defaultDtype = Dtype::Fp16,
-    .ioDtypeHint  = Dtype::Fp32,
+    .device        = device,
+    .wDefaultDtype = Dtype::Fp16,
+    .oDefaultDtype = Dtype::Fp32,
 }, modelCfg);
 ```
 
 ### NeuralNetConfig
 
-GPT-2 uses the defaults as they are; the loader reads every `LayerNorm`'s coefficients at fp32.
-See [NeuralNet](../03-usage/neural-net.md) for details.
+GPT-2 uses the defaults; the loader reads each `LayerNorm`'s coefficients at fp32.
+For details, see [NeuralNet](../03-usage/neural-net.md).
 
 ### ModelConfig
 
-| Factory | `name` | `embedDim` | `numHeads` | `numLayers` |
+| Factory | `variant` | `embedDim` | `numQHeads` | `numLayers` |
 |---|---|---|---|---|
 | `_124M()` | `"124M"` | 768 | 12 | 12 |
 | `_355M()` | `"355M"` | 1024 | 16 | 24 |
 | `_774M()` | `"774M"` | 1280 | 20 | 36 |
 | `_1_5B()` | `"1.5B"` | 1600 | 25 | 48 |
 
-`vocabSize` 50,257 and `maxTrainedContext` 1,024 are shared by all configurations.
+All sizes use `vocabSize` 50,257 and `maxTrainedContext` 1,024.
 
 ### RuntimeConfig
 
-This only determines how much KV cache to reserve. If omitted, it uses the `maxTrainedContext` value as is. If a value is specified, it allocates only that amount to save memory.
+This determines the dtype and the amount of KV cache to allocate. If `maxRuntimeContext` is omitted, it uses `maxTrainedContext`; specifying a value allocates only that amount to save memory.
 
 | Field | Default |
 |---|---|
-| `maxRuntimeContext` | `0` |
+| `kvCacheDtype` | `Dtype::Fp16` |
+| `maxRuntimeContext` | `uint32_t(-1)`: up to `maxTrainedContext` |
 
 ## vAi graph
 
-In vAi, the model is a DAG formed by connecting nodes with `-`. See the [Node](../03-usage/node.md) and [NodeGroup](../03-usage/node-group.md) documentation for details.
+In vAi, a model is a DAG built by connecting nodes with `-`. For details, see [Node](../03-usage/node.md) and [NodeGroup](../03-usage/node-group.md).
 
 *`Tq`: number of input tokens, `D`: embedding dimension, `H`: number of heads.*
 
 ### Model architecture
 
 ```cpp
-input("inTokenIds") - embedding - layers[0];
+input("inTokenIds") - embedding - decoder - lmHead - topkSampling - output("nextTokenId");
+```
+
+`decoder` is the shared [`Transformer`](../../../vai/groups/transformer.h) group. It connects the layers in order and ends with `finalNorm`.
+
+```cpp
 for (size_t i = 1; i < layers.size(); ++i)
     layers[i - 1] - layers[i];
-layers.back() - lastRowSlice - finalNorm - lmHead - topkSampling - output("nextTokenId");
+layers.back() - finalNorm;
 ```
 
 ### NodeGroup
 
-These are the [NodeGroups](../03-usage/node-group.md) defined to implement GPT-2.
-`TransformerLayer` has a nested structure containing `MultiHeadAttention` and `FeedForward`.
+GPT-2 uses these [node groups](../03-usage/node-group.md). All of them are [shared groups](../../../vai/groups/).
+`Transformer` stacks `TransformerLayer` groups, and each `TransformerLayer` contains nested `MultiHeadAttention` and `FeedForward` groups.
 
 #### TransformerLayer
 
 ```cpp
-input - norm1 - "in0"/mhAttn - norm2 - "in0"/ffn;
-input         - "residual"/mhAttn         - "residual"/ffn;
+input - norm1 -    mhAttn - lastRow - gate/"then" - norm2 -    ffn;
+input - "residual"/mhAttn - lastRow - gate/"then" - "residual"/ffn;
 ```
 
-Instead of using a separate `Add`, the final projection of each sublayer accepts the residual through `acceptResidual` and adds it inside the kernel.
+The final projection in each sublayer accepts the residual through `acceptResidual` and adds it within the kernel, without a separate `Add`.
+`lastRow` and `gate` are `optional` members created by the configuration, and an absent one drops out of the connection. GPT-2 creates `lastRow` only in the last layer, so only the last row, which determines the next token, reaches the FFN.
 
 #### MultiHeadAttention
 
-Q, K, and V are computed with a single `{D, 3D}` projection and then split into three pieces along the head axis.
+Q, K, and V are computed with a single `{D, 3D}` projection, then split into three slices along the head axis.
 
 ```cpp
-projQKV - splitHeads - perQKV - sliceQ - "Q"/attn - mergeOut - projOut;
-                     perQKV - sliceK - "K"/attn;
-                     perQKV - sliceV - "V"/attn;
+projQKV - splitHeads - perQKV - sliceQ - normQ - ropeQ - "Q"/attn;
+perQKV - sliceK - normK - ropeK - "K"/attn;
+perQKV - sliceV                 - "V"/attn - mergeOut - projOut;
 ```
 
-Because `projOut` has `acceptResidual = true`, it accepts the block residual as `residual` and adds it to the projection result.
+`normQ`, `normK`, `ropeQ`, and `ropeK` are `optional` members too. GPT-2 uses neither QK normalization nor RoPE, so none of the four is created.
+
+With `acceptResidual = true`, `projOut` receives the block's residual through `residual` and adds it to the projection result.
 
 #### FeedForward
 
-This group connects two `Linear`s. GELU is attached as the epilogue of the first `Linear` rather than implemented as a separate node, so it is processed inside the GEMM.
+This group connects two `Linear` nodes. GELU is attached as an epilogue to the first `Linear` and runs within GEMM, without a separate node.
 
 ```cpp
 fc1 - fc2;   // 768 -> 3072 -> 768
 ```
 
-`fc2` also has `acceptResidual = true` and accepts the block residual as `residual`.
+`fc2` also sets `acceptResidual = true` and receives the block's residual through `residual`.
 
 ### Nodes used
 
-[`TokenEmbedding`](../06-nodes.md#tokenembedding) ·
-[`LayerNorm`](../06-nodes.md#layernorm) ·
-[`Linear`](../06-nodes.md#linear) ·
-[`Reshape`](../06-nodes.md#reshape) ·
-[`Permute`](../06-nodes.md#permute) ·
-[`Attention`](../06-nodes.md#attention) ·
-[`Identity`](../06-nodes.md#identity) ·
-[`Slice`](../06-nodes.md#slice) ·
+[`TokenEmbedding`](../06-nodes.md#tokenembedding),
+[`LayerNorm`](../06-nodes.md#layernorm),
+[`Linear`](../06-nodes.md#linear),
+[`Reshape`](../06-nodes.md#reshape),
+[`Permute`](../06-nodes.md#permute),
+[`Attention`](../06-nodes.md#attention),
+[`Identity`](../06-nodes.md#identity),
+[`Slice`](../06-nodes.md#slice),
 [`TopKSampling`](../06-nodes.md#topksampling)
 
-## Checkpoint
+## Checkpoints
 
-Checkpoints are placed in a folder for each size (`ModelConfig::variant`) under `data/ckpts/gpt2/openai/`, and the tokenizer in `data/tokenizers/gpt2/`.
+Place checkpoints in size-specific folders (`ModelConfig::variant`) under `data/ckpts/gpt2/openai/`, with the tokenizer in `data/tokenizers/gpt2/`.
 All four sizes share `tokenizer.json`.
 
 ```
@@ -122,7 +131,7 @@ data/
     └── tokenizer.json
 ```
 
-Download them from the corresponding HuggingFace repository and use them as is without a separate conversion. The weights are licensed under the MIT License.
+Download the files from the corresponding HuggingFace repository and use them without conversion. The weights are licensed under MIT.
 
 ```bash
 mkdir -p data/ckpts/gpt2/openai/124M data/tokenizers/gpt2
@@ -131,27 +140,27 @@ curl -L -o data/ckpts/gpt2/openai/124M/model.safetensors \
   https://huggingface.co/openai-community/gpt2/resolve/main/model.safetensors
 ```
 
-Download `model.safetensors` and `tokenizer.json` directly from the **Files and versions** tab of the HuggingFace repository, or use the commands above.
+Download `model.safetensors` and `tokenizer.json` directly from the HuggingFace repository's **Files and versions** tab or use the commands above.
 
-### Weight loading
+### Loading weights
 
-The code that maps checkpoints to graph slots is in [`models/production/gpt2/openai-weights.h`](../../../models/production/gpt2/openai-weights.h).
-Only one line is needed at the call site. The specialization assembles the path (`VAI_DATA_DIR "/ckpts/gpt2/openai/" + modelCfg.variant`),
-so only the size needs to be set. For how the distribution-name tag works, see [`distribution-name-weights.h` in Writing custom models](../05-contributing-models.md#distribution-name-weightsh).
+The code that maps checkpoint tensors to graph slots is in [`models/production/gpt2/openai-weights.h`](../../../models/production/gpt2/openai-weights.h).
+Loading takes one line at the call site. The specialization constructs the path (`VAI_DATA_DIR "/ckpts/gpt2/openai/" + modelCfg.variant`),
+so only the size needs to be selected. For distribution tags, see [`distribution-weights.h` in Writing custom models](../contributing/models.md#distribution-weightsh).
 
 ```cpp
 loadWeights<"openai">(net);
 ```
 
-## Execution
+## Running
 
-### Folder structure
+### Directory structure
 
 ```
 models/production/gpt2/
-├── net.h                         Model definition and NodeGroup definitions
-├── openai-weights.h              Mapping for OpenAI (HuggingFace `openai-community/*`) checkpoints
-├── demo.cpp                      demo-gpt2: complete one prompt + timing
+├── net.h                         Model and NodeGroup definitions
+├── openai-weights.h              OpenAI (HuggingFace `openai-community/*`) checkpoint mapping
+├── demo.cpp                      demo-gpt2: complete one prompt and measure timing
 └── CMakeLists.txt
 
 data/
@@ -172,12 +181,11 @@ cmake --build build --config RelWithDebInfo
 ./build/bin/demo-gpt2
 ```
 
-The model continues the sentence in `prompt` to generate a new sentence. It measures the `prefill` and `decode` times separately and prints them together with the generated sentence.
+The demo generates text that continues the text in `prompt`. It measures `prefill` and `decode` times separately and prints them with the generated text.
 
 ## Benchmark summary
 
-These results compare llama.cpp (Vulkan) and vAi using a **512-token prompt**. See [`benchmarks/gpt2/README.md`](../../../benchmarks/gpt2/README.md) for the complete results by GPU and prompt length,
-the measurement environment and conditions, and reproduction instructions.
+These results compare llama.cpp (Vulkan) and vAi with a **512-token prompt**. For full results by GPU and prompt length, measurement environments and conditions, and reproduction instructions, see [`benchmarks/gpt2/README.md`](../../../benchmarks/gpt2/README.md).
 
 | | | 890M (Strix Point) | 8060S (Strix Halo) | UHD Graphics (TGL GT1) | RTX 3060 Laptop | RTX 5070 | RTX 4090 | RTX 5090 |
 |---|---|---:|---:|---:|---:|---:|---:|---:|

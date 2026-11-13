@@ -2,6 +2,7 @@
 !.gitignore
 !.gitmodules
 !README.md
+!CONTRIBUTING.md
 !LICENSE
 !.clang-format
 !.clang-format-ignore

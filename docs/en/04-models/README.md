@@ -1,22 +1,22 @@
 # Supported models
 
-These are models implemented with vAi.
+These models are implemented in vAi.
 
 ```
 models/<impl>/<model>/
 ├── net.h                        Model and NodeGroup definitions
-├── <distribution-name>-weights.h Distribution checkpoint to graph slot mapping (loadWeights<"distribution-name">)
-├── nodes/                        Dedicated model nodes (if any)
-├── shaders/                      Kernels for dedicated nodes (if any)
-├── demo.cpp                      demo-<model> - model inference and inference timing
+├── <distribution>-weights.h     Distribution checkpoint -> graph slot mapping (loadWeights<"distribution">)
+├── nodes/                       Model-specific nodes (if any)
+├── shaders/                     Kernels for model-specific nodes (if any)
+├── demo.cpp                     demo-<model> - model inference and timing
 └── CMakeLists.txt
 
-data/ckpts/<model>/<distribution-name>/   Checkpoints
-data/tokenizers/<model>/                  Tokenizer
-data/images/                              Input images
+data/ckpts/<model>/<distribution>/   Checkpoints
+data/tokenizers/<model>/             Tokenizer
+data/images/                         Input images
 ```
 
-## Weight loading
+## Loading weights
 
 ```cpp
 // GPT-2 example
@@ -25,23 +25,22 @@ data/images/                              Input images
 
 namespace gpt2 = model::production::gpt2;
 
-gpt2::Net net({ .device = device, .defaultDtype = Dtype::Fp16 },
+gpt2::Net net({ .device = device, .wDefaultDtype = Dtype::Fp16 },
               gpt2::ModelConfig::_124M());
 
 loadWeights<"openai">(net);
 ```
 
-[`vai/engine/weights.h`](../../../vai/engine/weights.h) only declares `loadWeights<Name, Model>`, and each model provides a specialization for each distribution name.
+[`vai/engine/weights.h`](../../../vai/engine/weights.h) only declares `loadWeights<Name, Model>`; each model provides specializations for its distributions.
 
-See [Writing custom models](../05-contributing-models.md) for information on writing a new model.
+For new models, see [Writing custom models](../contributing/models.md).
 
-## List
+## Model list
 
 ### Vision
 
-| Model | Model size |
+| Model | Model sizes |
 |---|---|
-| [YOLOv8](yolov8.md) | NANO(n), SMALL(s), MEDIUM(m), LARGE(l), XLARGE(x) |
 | [YOLOX](yolox.md) | SMALL(s), MEDIUM(m), LARGE(l), XLARGE(x) |
 
 ### LLM
@@ -51,19 +50,11 @@ See [Writing custom models](../05-contributing-models.md) for information on wri
 | [GPT-2](gpt2.md) | 124M, 355M, 774M, 1.5B |
 | [Llama 3](llama3.md) | 3.2-1B, 3.2-3B |
 
-## Aggregate benchmark
-
-### Vision
-
-Measured with vAi, at **640x640, FP16**.
-
-| Model | Metric | 890M (Strix Point) | 8060S (Strix Halo) | RTX 5070 Ti | RX 9070 XT |
-|---|---|---:|---:|---:|---:|
-| YOLOv8n | Latency (ms) | 3.238 | 0.759 | 0.616 | 0.657 |
+## Combined benchmarks
 
 ### LLM
 
-Measured with vAi, using a **512-token prompt**.
+vAi measurements with a **512-token prompt**.
 
 | Model | Metric | 890M (Strix Point) | 8060S (Strix Halo) | UHD Graphics (TGL GT1) | RTX 3060 Laptop | RTX 5070 | RTX 4090 | RTX 5090 |
 |---|---|---:|---:|---:|---:|---:|---:|---:|
@@ -74,4 +65,4 @@ Measured with vAi, using a **512-token prompt**.
 | Llama 3 3.2-3B | prefill (t/s) | - | 1,726 | - | - | 9,091 | 17,219 | 21,013 |
 |  | decode (t/s) | - | 33.87 | - | - | 87.74 | 128.0 | 194.0 |
 
-Results against other frameworks are available in the [YOLOv8 benchmark summary](yolov8.md#benchmark-summary), [YOLOX benchmark summary](yolox.md#benchmark-summary), [GPT-2 benchmark summary](gpt2.md#benchmark-summary), and [Llama 3 benchmark summary](llama3.md#benchmark-summary). See [`benchmarks/`](../../../benchmarks/) for the measurement environment and conditions, and reproduction instructions.
+Comparisons with other frameworks are in the benchmark summaries for [YOLOX](yolox.md#benchmark-summary), [GPT-2](gpt2.md#benchmark-summary), and [Llama 3](llama3.md#benchmark-summary). For measurement environments, conditions, and reproduction instructions, see [`benchmarks/`](../../../benchmarks/).

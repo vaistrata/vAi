@@ -10,7 +10,7 @@ YOLOPAFPN 넥, 회귀와 분류를 분리한 anchor-free 검출 헤드로 이루
 [Paper](https://arxiv.org/abs/2107.08430),
 [Official checkpoints](https://github.com/Megvii-BaseDetection/YOLOX/releases/tag/0.1.1rc0)
 
-## Configuration
+## 설정
 
 ```cpp
 namespace yolox = model::experimental::yolox;
@@ -18,8 +18,8 @@ namespace yolox = model::experimental::yolox;
 auto cfg = yolox::getConfigCOCO(yolox::Tier::LARGE);
 
 yolox::Net net({
-    .device       = device,
-    .defaultDtype = Dtype::Fp16,
+    .device        = device,
+    .wDefaultDtype = Dtype::Fp16,
 }, cfg, {
     .imageSize     = 640,
     .confThreshold = 0.25f,
@@ -29,7 +29,7 @@ yolox::Net net({
 
 ### NeuralNetConfig
 
-YOLOX는 기본값을 그대로 씁니다. conv 가중치와 BN 파라미터 모두 `defaultDtype`(fp16)으로
+YOLOX는 기본값을 그대로 씁니다. conv 가중치와 BN 파라미터 모두 `wDefaultDtype`(fp16)으로
 저장됩니다. BN의 `scale`·`bias`를 가중치 로더가 CPU에서 계산하므로 별도 정밀도 설정이 없습니다.
 세부사항은 [vAi 사용법 > NeuralNet](../03-usage/neural-net.md) 참조.
 
@@ -168,7 +168,6 @@ YOLOX에 필요한 연산입니다. [`models/experimental/yolox/nodes/`](../../.
 [`Convolution`](../06-nodes.md#convolution),
 [`NearestUpsample`](../06-nodes.md#nearestupsample),
 [`Concat`](../06-nodes.md#concat),
-[`Add`](../06-nodes.md#add),
 [`Identity`](../06-nodes.md#identity)
 
 ## 체크포인트
@@ -208,7 +207,7 @@ python models/experimental/yolox/megvii-weights-convertor.py small large    # ti
 
 각 `model.pth` 옆에 `model.safetensors`가 생깁니다.
 
-### Load Weight
+### 가중치 로딩
 
 체크포인트를 그래프 슬롯에 매핑하는 코드는
 [`models/experimental/yolox/megvii-weights.h`](../../../models/experimental/yolox/megvii-weights.h)에 있습니다.
@@ -218,7 +217,7 @@ python models/experimental/yolox/megvii-weights-convertor.py small large    # ti
 loadWeights<"megvii">(net);
 ```
 
-경로는 `model.cfg.tier`로 특수화가 조립하므로(`VAI_DATA_DIR "/yolox/yolox_<tier 글자>.safetensors"`)
+경로는 `net.cfg.tier`로 특수화가 조립하므로(`VAI_DATA_DIR "/ckpts/yolox/megvii/" + tierName(net.cfg.tier)`)
 부르는 쪽은 tier만 정하면 됩니다. 배포명 태그의 원리는 [제공 모델 > 가중치 로딩](README.md#가중치-로딩) 참조.
 
 공식 state dict의 `backbone.backbone`, `backbone`, `head` 키를 각각 백본, 넥, 헤드의 멤버로 매핑합니다.

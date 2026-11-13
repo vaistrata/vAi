@@ -1,6 +1,6 @@
 site_name: vAi                                  # 탭 제목 · 좌상단 로고 옆 이름
 site_description: 그래프 DSL 기반 Vulkan 추론 엔진   # <meta description> — 검색엔진·SNS 미리보기
-repo_url: https://github.com/OWNER/vAi          # 우상단 저장소 링크 (OWNER 확정 필요)
+repo_url: https://github.com/vaistrata/vAi      # 우상단 저장소 링크
 repo_name: vAi                                  # 그 링크에 보일 텍스트
 edit_uri: edit/master/docs/                     # "이 페이지 편집" 버튼이 향할 경로
 
@@ -15,9 +15,8 @@ theme:
     - navigation.top                            # "맨 위로" 버튼
     - navigation.indexes                        # 섹션 제목 자체에 페이지를 붙일 수 있게 (nav 참조)
     - content.code.copy                         # 코드블록 복사 버튼
-    # content.action.edit 은 켜지 않는다 — 페이지마다 GitHub 편집 화면으로 가는
-    # 연필 버튼이 붙는데, repo_url 이 아직 OWNER placeholder 라서 없는 주소로
-    # 간다. repo_url 이 확정되고 외부 기여를 받을 때 다시 켤 것.
+    # content.action.edit 은 아직 켜지 않는다 — 페이지마다 GitHub 편집 화면으로
+    # 가는 연필 버튼이 붙는다. 외부 기여를 받을 준비가 되면 켤 것.
     - search.suggest                            # 검색어 자동완성
   # 팔레트는 한 벌뿐이다 — website/DESIGN.md 는 다크 캔버스 전용이고
   # 라이트 팔레트를 "Known Gap" 으로 남겨 두었다(브랜드 잉크색 ember 가
@@ -51,13 +50,16 @@ nav:
       - 프로파일링: ko/03-usage/profiling.md
   - 제공 모델:
       - ko/04-models/README.md
-      - YOLOv8: ko/04-models/yolov8.md
       - YOLOX: ko/04-models/yolox.md
       - GPT-2: ko/04-models/gpt2.md
       - Llama 3: ko/04-models/llama3.md
-  - 커스텀 모델 작성: ko/05-contributing-models.md
   - 제공 노드들: ko/06-nodes.md
-  - 커스텀 노드와 커널 작성: ko/07-contributing-nodes.md
+  - 기여하기:
+      - ko/contributing/README.md               # 기여 절차와 자동 검사
+      - 커스텀 모델 작성: ko/contributing/models.md
+      - 커스텀 노드와 커널 작성: ko/contributing/nodes.md
+      - 커스텀 그룹 작성: ko/contributing/groups.md
+  - Vulkan 기본 개념: ko/09-vulkan-objects.md
 
 # docs/ 아래 파일은 nav 에 없어도 페이지가 만들어지고 검색에도 걸린다.
 # 문서는 전부 공개하고, 숨길 것만 적는다 (.gitignore 문법).
@@ -129,13 +131,16 @@ plugins:
                 - Profiling: en/03-usage/profiling.md
             - Supported models:
                 - en/04-models/README.md
-                - YOLOv8: en/04-models/yolov8.md
                 - YOLOX: en/04-models/yolox.md
                 - GPT-2: en/04-models/gpt2.md
                 - Llama 3: en/04-models/llama3.md
-            - Writing custom models: en/05-contributing-models.md
             - Built-in nodes: en/06-nodes.md
-            - Writing custom nodes and kernels: en/07-contributing-nodes.md
+            - Contributing:
+                - en/contributing/README.md
+                - Writing custom models: en/contributing/models.md
+                - Writing custom nodes and kernels: en/contributing/nodes.md
+                - Writing custom groups: en/contributing/groups.md
+            - Vulkan basic concepts: en/09-vulkan-objects.md
 
 # 빌드마다 6장을 헤더 스탬프에서 다시 만든다.
 hooks:

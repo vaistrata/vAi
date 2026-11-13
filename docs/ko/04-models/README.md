@@ -25,7 +25,7 @@ data/images/                      입력 이미지
 
 namespace gpt2 = model::production::gpt2;
 
-gpt2::Net net({ .device = device, .defaultDtype = Dtype::Fp16 },
+gpt2::Net net({ .device = device, .wDefaultDtype = Dtype::Fp16 },
               gpt2::ModelConfig::_124M());
 
 loadWeights<"openai">(net);
@@ -33,7 +33,7 @@ loadWeights<"openai">(net);
 
 [`vai/engine/weights.h`](../../../vai/engine/weights.h)가 `loadWeights<Name, Model>`를 선언만 해두고 각 모델이 배포명별 특수화를 제공합니다.
 
-새로운 모델 작성은 [커스텀 모델 작성](../05-contributing-models.md) 참조.
+새로운 모델 작성은 [커스텀 모델 작성](../contributing/models.md) 참조.
 
 ## 목록
 
@@ -41,7 +41,6 @@ loadWeights<"openai">(net);
 
 | 모델 | 모델 크기 |
 |---|---|
-| [YOLOv8](yolov8.md) | NANO(n), SMALL(s), MEDIUM(m), LARGE(l), XLARGE(x) |
 | [YOLOX](yolox.md) | SMALL(s), MEDIUM(m), LARGE(l), XLARGE(x) |
 
 ### LLM
@@ -52,14 +51,6 @@ loadWeights<"openai">(net);
 | [Llama 3](llama3.md) | 3.2-1B, 3.2-3B |
 
 ## 통합 벤치마크
-
-### 비전
-
-vAi 측정값, **640x640 · FP16** 기준.
-
-| 모델 | 지표 | 890M (Strix Point) | 8060S (Strix Halo) | RTX 5070 Ti | RX 9070 XT |
-|---|---|---:|---:|---:|---:|
-| YOLOv8n | 지연 (ms) | 3.238 | 0.759 | 0.616 | 0.657 |
 
 ### LLM
 
@@ -74,4 +65,4 @@ vAi 측정값, **prompt 512 토큰** 기준.
 | Llama 3 3.2-3B | prefill (t/s) | - | 1,726 | - | - | 9,091 | 17,219 | 21,013 |
 |  | decode (t/s) | - | 33.87 | - | - | 87.74 | 128.0 | 194.0 |
 
-다른 프레임워크 대비 결과는 [YOLOv8의 벤치마크 요약](yolov8.md#벤치마크-요약), [YOLOX의 벤치마크 요약](yolox.md#벤치마크-요약), [GPT-2의 벤치마크 요약](gpt2.md#벤치마크-요약), [Llama 3의 벤치마크 요약](llama3.md#벤치마크-요약)에 있습니다. 측정 환경과 조건, 재현 방법은 [`benchmarks/`](../../../benchmarks/) 참조.
+다른 프레임워크 대비 결과는 [YOLOX의 벤치마크 요약](yolox.md#벤치마크-요약), [GPT-2의 벤치마크 요약](gpt2.md#벤치마크-요약), [Llama 3의 벤치마크 요약](llama3.md#벤치마크-요약)에 있습니다. 측정 환경과 조건, 재현 방법은 [`benchmarks/`](../../../benchmarks/) 참조.

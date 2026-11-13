@@ -7,7 +7,7 @@ vAi는 각 노드의 **GPU 실행 시간**을 측정할 수 있습니다. 노드
 프로파일링은 노드에 태그를 하나라도 달면 활성화됩니다. 반대로 태그를 하나도 달지 않으면 프로파일링으로 인한 추가 비용도 없습니다.
 
 ```cpp
-net.layers[i].mhAttn.attn.setProfileTag("Attn");
+net.decoder.layers[i].mhAttn.attn.setProfileTag("Attn");
 ```
 
 
@@ -16,10 +16,10 @@ net.layers[i].mhAttn.attn.setProfileTag("Attn");
 같은 태그를 단 노드들의 시간은 하나로 합산됩니다.
 
 ```cpp
-for (uint32_t i = 0; i < net.modelCfg.numLayers; ++i)
+for (uint32_t i = 0; i < net.modelCfg.languageCfg.numLayers; ++i)
 {
-    net.layers[i].norm1.setProfileTag("LayerNorm");
-    net.layers[i].norm2.setProfileTag("LayerNorm");
+    net.decoder.layers[i].norm1.setProfileTag("LayerNorm");
+    net.decoder.layers[i].norm2.setProfileTag("LayerNorm");
 }
 ```
 
@@ -98,8 +98,8 @@ net.printProfile();          // decode 구간만 출력
 ```cpp
 net.clearProfileTags();
 
-net.layers[0].ffn.fc1.setProfileTag("fc1");
-net.layers[0].ffn.fc2.setProfileTag("fc2");
+net.decoder.layers[0].ffn.fc1.setProfileTag("fc1");
+net.decoder.layers[0].ffn.fc2.setProfileTag("fc2");
 ```
 
 특정 노드의 태그만 제거하려면 빈 문자열을 줍니다.

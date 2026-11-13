@@ -1,6 +1,6 @@
 # Llama 3
 
-Llama 3 (Grattafiori et al., 2024) is a decoder-only Transformer-based language model developed by Meta. Its architecture stacks pre-norm layers with GQA self-attention, SwiGLU, and feed-forward layers. It uses RMSNorm for normalization and RoPE for positional information, with no bias terms. The model predicts the next token by computing a probability distribution over a vocabulary of 128,256 tokens.
+Llama 3 (Grattafiori et al., 2024) is a decoder-only transformer language model developed by Meta. It stacks pre-norm blocks with GQA self-attention and SwiGLU feed-forward layers. It uses RMSNorm for normalization and RoPE for positional information, with no bias. The model predicts the next token by computing a probability distribution over a vocabulary of 128,256 tokens.
 
 **References**: [Paper](https://arxiv.org/abs/2407.21783), [Checkpoint (HuggingFace)](https://huggingface.co/meta-llama/Llama-3.2-1B-Instruct), [Repository](https://github.com/meta-llama/llama-models)
 
@@ -12,9 +12,9 @@ namespace llama3 = model::production::llama3;
 auto modelCfg = llama3::ModelConfig::_3_2_1B();
 
 llama3::Net net({
-    .device       = device,
-    .defaultDtype = Dtype::Fp16,
-    .ioDtypeHint  = Dtype::Fp32,
+    .device        = device,
+    .wDefaultDtype = Dtype::Fp16,
+    .oDefaultDtype = Dtype::Fp32,
 }, modelCfg, {
     .maxRuntimeContext = 4096,
 });
@@ -22,96 +22,106 @@ llama3::Net net({
 
 ### NeuralNetConfig
 
-Llama 3 uses the defaults as they are; the loader reads every `RmsNorm`'s scale at fp32.
-See [NeuralNet](../03-usage/neural-net.md) for details.
+Llama 3 uses the defaults; the loader reads each `RmsNorm`'s scale at fp32.
+For details, see [NeuralNet](../03-usage/neural-net.md).
 
 ### ModelConfig
 
-| Factory | `name` | `embedDim` | `ffnHiddenDim` | `numHeads` | `numKVHeads` | `numLayers` |
+| Factory | `variant` | `embedDim` | `ffnHiddenDim` | `numQHeads` | `numKVHeads` | `numLayers` |
 |---|---|---|---|---|---|---|
 | `_3_2_1B()` | `"3.2-1B"` | 2048 | 8192 | 32 | 8 | 16 |
 | `_3_2_3B()` | `"3.2-3B"` | 3072 | 8192 | 24 | 8 | 28 |
 
-`vocabSize` 128,256 and `maxTrainedContext` 131,072 are shared by both sizes. Both sizes also use the same value for `ropeConfig` (`ropeCommon(32.0f)`). The `factor` value of 32 is the RoPE frequency scaling factor for the Llama 3 family.
+Both sizes use `vocabSize` 128,256 and `maxTrainedContext` 131,072. They also share the same `ropeCfg` value (`rope(32.0f)`). The `factor` of 32 is the RoPE frequency scaling factor for the Llama 3 family.
 
 ### RuntimeConfig
 
-This only determines how much KV cache to reserve. If omitted, it uses the `maxTrainedContext` value as is; if a value is specified, it allocates only that amount to save memory. Reserving the full training context of 131,072 would require too much memory, so the demos and benchmarks reduce it to 4,096 (the same value as `n_ctx` in the llama.cpp benchmark).
+This determines the dtype and the amount of KV cache to allocate, and the unit in which a prompt is fed. If `maxRuntimeContext` is omitted, it uses `maxTrainedContext`; specifying a value allocates only that amount to save memory. Allocating the full trained context of 131,072 requires too much memory, so the demo and benchmarks reduce it to 4,096 (the same value as `n_ctx` in the llama.cpp benchmark).
 
 | Field | Default |
 |---|---|
-| `maxRuntimeContext` | `0` |
+| `kvCacheDtype` | `Dtype::Fp16` |
+| `maxRuntimeContext` | `uint32_t(-1)`: up to `maxTrainedContext` |
+| `prefillChunk` | `0`: the whole prompt in one pass |
 
 ## vAi graph
 
-In vAi, the model is a DAG formed by connecting nodes with `-`. See the [Node](../03-usage/node.md) and [NodeGroup](../03-usage/node-group.md) documentation for details.
+In vAi, a model is a DAG built by connecting nodes with `-`. For details, see [Node](../03-usage/node.md) and [NodeGroup](../03-usage/node-group.md).
 
 *`Tq`: number of input tokens, `D`: embedding dimension, `H`: number of query heads, `Hkv`: number of KV heads.*
 
 ### Model architecture
 
 ```cpp
-input("inTokenIds") - embedding - layers[0];
+input("inTokenIds") - embedding - decoder - lmHead - topkSampling - output("nextTokenId");
+```
+
+`decoder` is the shared [`Transformer`](../../../vai/groups/transformer.h) group. It connects the layers in order and ends with `finalNorm`.
+
+```cpp
 for (size_t i = 1; i < layers.size(); ++i)
     layers[i - 1] - layers[i];
-layers.back() - lastRowSlice - finalNorm - lmHead - topkSampling - output("nextTokenId");
+layers.back() - finalNorm;
 ```
 
 ### NodeGroup
 
-These are the [NodeGroups](../03-usage/node-group.md) defined to implement Llama 3.
-`TransformerLayer` has a nested structure containing `MultiHeadAttention` and `GatedFeedForward`.
+Llama 3 uses these [node groups](../03-usage/node-group.md). All of them are [shared groups](../../../vai/groups/).
+`Transformer` stacks `TransformerLayer` groups, and each `TransformerLayer` contains nested `MultiHeadAttention` and `GatedFeedForward` groups.
 
 #### TransformerLayer
 
 ```cpp
-input - norm1 - "in0"/mhAttn - norm2 - "in0"/ffn;
-input         - "residual"/mhAttn         - "residual"/ffn;
+input - norm1 -    mhAttn - lastRow - gate/"then" - norm2 -    ffn;
+input - "residual"/mhAttn - lastRow - gate/"then" - "residual"/ffn;
 ```
 
-Instead of using a separate `Add`, the final projection of each sublayer accepts the residual through `acceptResidual` and adds it inside the kernel.
+The final projection in each sublayer accepts the residual through `acceptResidual` and adds it within the kernel, without a separate `Add`.
+`lastRow` and `gate` are `optional` members created by the configuration, and an absent one drops out of the connection. Llama 3 creates `lastRow` only in the last layer, so only the last row, which determines the next token, reaches the FFN. `gate` is created in the last layer when `prefillChunk` is set; it closes for a chunk that produces no token and skips the computation from the FFN on.
 
 #### MultiHeadAttention
 
-Because GQA is used, K and V are projected to fewer heads than the queries (`H == 32`, `Hkv == 8`). RoPE is applied only to Q and K, while V passes through unchanged.
+With GQA, K and V are projected into fewer heads than the queries (`H == 32`, `Hkv == 8`). RoPE applies only to Q and K; V passes through unchanged.
 
 ```cpp
-input - projQ - splitQ - perQ - ropeQ - "Q"/attn - mergeOut - projOut;
-input - projK - splitK - perK - ropeK - "K"/attn;
-input - projV - splitV - perV         - "V"/attn;
+input - projQ - splitQ - normQ - perQ - ropeQ - "Q"/attn;
+input - projK - splitK - normK - perK - ropeK - "K"/attn;
+input - projV - splitV         - perV         - "V"/attn - mergeOut - projOut;
 ```
 
-Because `projOut` has `acceptResidual = true`, it accepts the block residual as `residual` and adds it to the projection result.
+`normQ` and `normK` are `optional` members created only for models with QK normalization, so Llama 3 does not create them.
 
-`Rope` shares the KV cache token counter, so even during a decode step, it rotates using the accumulated absolute position rather than the offset within the current forward.
+With `acceptResidual = true`, `projOut` receives the block's residual through `residual` and adds it to the projection result.
+
+`Rope` shares the KV cache token counter, so rotation uses the cumulative absolute position even during decode steps, rather than the offset within the current forward pass.
 
 #### GatedFeedForward
 
-`gate` and `value` read the same input and differ only in their weights, so a single `Linear` computes both at once with twice the width. `GatedMul` applies SiLU to the first half and multiplies it by the second half.
+Since `gate` and `value` read the same input and differ only in their weights, a single `Linear` computes both at twice the width. `GatedMul` applies SiLU to the first half and multiplies it by the second half.
 
 ```cpp
 gateValue - gatedMul - out;   // 2048 -> 16384 -> 8192 -> 2048
 ```
 
-`out` also has `acceptResidual = true` and accepts the block residual as `residual`.
+`out` also sets `acceptResidual = true` and receives the block's residual through `residual`.
 
 ### Nodes used
 
-[`TokenEmbedding`](../06-nodes.md#tokenembedding) ·
-[`RmsNorm`](../06-nodes.md#rmsnorm) ·
-[`Linear`](../06-nodes.md#linear) ·
-[`Reshape`](../06-nodes.md#reshape) ·
-[`Permute`](../06-nodes.md#permute) ·
-[`Rope`](../06-nodes.md#rope) ·
-[`Attention`](../06-nodes.md#attention) ·
-[`GatedMul`](../06-nodes.md#gatedmul) ·
-[`Identity`](../06-nodes.md#identity) ·
-[`Slice`](../06-nodes.md#slice) ·
+[`TokenEmbedding`](../06-nodes.md#tokenembedding),
+[`RmsNorm`](../06-nodes.md#rmsnorm),
+[`Linear`](../06-nodes.md#linear),
+[`Reshape`](../06-nodes.md#reshape),
+[`Permute`](../06-nodes.md#permute),
+[`Rope`](../06-nodes.md#rope),
+[`Attention`](../06-nodes.md#attention),
+[`GatedMul`](../06-nodes.md#gatedmul),
+[`Identity`](../06-nodes.md#identity),
+[`Slice`](../06-nodes.md#slice),
 [`TopKSampling`](../06-nodes.md#topksampling)
 
-## Checkpoint
+## Checkpoints
 
-Checkpoints are placed in a folder for each size (`ModelConfig::variant`) under `data/ckpts/llama3/meta/`, and the tokenizer in `data/tokenizers/llama3/`.
+Place checkpoints in size-specific folders (`ModelConfig::variant`) under `data/ckpts/llama3/meta/`, with the tokenizer in `data/tokenizers/llama3/`.
 Both sizes share `tokenizer.json`.
 
 ```
@@ -126,7 +136,7 @@ data/
     └── tokenizer.json
 ```
 
-Download the files from the corresponding HuggingFace repository and use them as is without a separate conversion. The weights are licensed under the [Llama 3.2 Community License](https://github.com/meta-llama/llama-models/blob/main/models/llama3_2/LICENSE).
+Download the files from the corresponding HuggingFace repository and use them without conversion. The weights are subject to the [Llama 3.2 Community License](https://github.com/meta-llama/llama-models/blob/main/models/llama3_2/LICENSE).
 
 ```bash
 mkdir -p data/ckpts/llama3/meta/3.2-1B data/tokenizers/llama3
@@ -135,28 +145,28 @@ curl -L -o data/ckpts/llama3/meta/3.2-1B/model.safetensors \
   https://huggingface.co/unsloth/Llama-3.2-1B-Instruct/resolve/main/model.safetensors
 ```
 
-Download `model.safetensors` and `tokenizer.json` directly from the **Files and versions** tab of the HuggingFace repository, or use the commands above.
+Download `model.safetensors` and `tokenizer.json` directly from the HuggingFace repository's **Files and versions** tab or use the commands above.
 
-> The original `meta-llama/*` repository is gated and requires approval and a token. The commands above use an [unsloth mirror](https://huggingface.co/unsloth/Llama-3.2-1B-Instruct) containing the same tensors. The license remains the same when the files are downloaded from the mirror. **An Instruct checkpoint trained with chat tokens is required**.
+> The original `meta-llama/*` repositories are gated and require approval and a token. The commands above use an [unsloth mirror](https://huggingface.co/unsloth/Llama-3.2-1B-Instruct) containing the same tensors. The same license applies to mirror downloads. **An Instruct checkpoint trained on chat tokens is required**.
 
-### Weight loading
+### Loading weights
 
-The code that maps checkpoints to graph slots is in [`models/production/llama3/meta-weights.h`](../../../models/production/llama3/meta-weights.h).
-Only one line is needed at the call site. The specialization assembles the path (`VAI_DATA_DIR "/ckpts/llama3/meta/" + modelCfg.variant`), so only the size needs to be set. For how the distribution-name tag works, see [`distribution-name-weights.h` in Writing custom models](../05-contributing-models.md#distribution-name-weightsh).
+The code that maps checkpoint tensors to graph slots is in [`models/production/llama3/meta-weights.h`](../../../models/production/llama3/meta-weights.h).
+Loading takes one line at the call site. The specialization constructs the path (`VAI_DATA_DIR "/ckpts/llama3/meta/" + modelCfg.variant`), so only the size needs to be selected. For distribution tags, see [`distribution-weights.h` in Writing custom models](../contributing/models.md#distribution-weightsh).
 
 ```cpp
 loadWeights<"meta">(net);
 ```
 
-## Execution
+## Running
 
-### Folder structure
+### Directory structure
 
 ```
 models/production/llama3/
-├── net.h                         Model definition and NodeGroup definitions
-├── meta-weights.h                Mapping for Meta (HuggingFace `meta-llama/*`) checkpoints
-├── demo.cpp                      demo-llama3: complete one prompt + timing
+├── net.h                         Model and NodeGroup definitions
+├── meta-weights.h                Meta (HuggingFace `meta-llama/*`) checkpoint mapping
+├── demo.cpp                      demo-llama3, complete one prompt and measure timing
 └── CMakeLists.txt
 
 examples/chat-llama3/
@@ -184,7 +194,7 @@ cmake --build build --config RelWithDebInfo
 ./build/bin/demo-llama3
 ```
 
-[`demo.cpp`](../../../models/production/llama3/demo.cpp) continues the sentence in `prompt` to generate a new sentence. It measures the `prefill` and `decode` times separately and prints them together with the generated sentence.
+The demo generates text that continues the text in `prompt` in [`demo.cpp`](../../../models/production/llama3/demo.cpp). It measures `prefill` and `decode` times separately and prints them with the generated text.
 
 ### chat-llama3
 
@@ -192,11 +202,11 @@ cmake --build build --config RelWithDebInfo
 ./build/bin/chat-llama3
 ```
 
-This is the multi-turn conversation in [`main.cpp`](../../../examples/chat-llama3/main.cpp). The conversation history remains in the KV cache, and the conversation ends when an empty line is entered or the cache fills up.
+This runs a multi-turn conversation from [`main.cpp`](../../../examples/chat-llama3/main.cpp). Conversation history stays in the KV cache, and the session ends on an empty line or when the cache is full.
 
 ## Benchmark summary
 
-These results compare llama.cpp (Vulkan) and vAi using a **512-token prompt**. See [`benchmarks/llama3/README.md`](../../../benchmarks/llama3/README.md) for the complete results by GPU and prompt length, the measurement environment and conditions, and reproduction instructions.
+These results compare llama.cpp (Vulkan) and vAi with a **512-token prompt**. For full results by GPU and prompt length, measurement environments and conditions, and reproduction instructions, see [`benchmarks/llama3/README.md`](../../../benchmarks/llama3/README.md).
 
 **Llama 3.2-1B**
 
