@@ -9,8 +9,7 @@
 | [Activation](#activation) | Applies an element-wise activation. | `activation.comp` |
 | [Add](#add) | element-wise addition for residual connections | `add.comp` |
 | [Argmax](#argmax) | Row-wise argmax / greedy sampling | `argmax.comp` |
-| [Attention](#attention) | fused KV cache append + causal attention (GQA), split between three kernels | `attention-fa-cm.comp`, `attention-fa.comp`, `attention-fa-reduce.comp`, `attention.comp` |
-| [BatchNorm](#batchnorm) | batch normalization (inference mode) | `batchnorm.comp` |
+| [Attention](#attention) | fused KV cache append + causal attention (GQA), split between three kernels | `attention-fa-intel.comp`, `attention-fa-cm.comp`, `attention-fa.comp`, `attention-fa-reduce.comp`, `attention.comp` |
 | [Concat](#concat) | join inputs along one axis | `concat.comp` |
 | [Convolution](#convolution) | 2D convolution with device-selected direct, implicit, or Winograd plans | `conv-k1s1-gemm-cm.comp`, `conv-k1s1-gemm.comp`, `conv-k3s2-gemm-cm.comp`, `conv-k3s1-implicit-gemm-cm.comp`, `conv-k3s1-implicit-gemm.comp`, `conv-implicit-gemm.comp`, `conv-implicit-gemm-cm.comp`, `conv-k3s2-gemm.comp`, `cm-transform.comp`, `conv-k3s1-winograd-filter-transform.comp`, `conv-k3s1-winograd-input.comp`, `conv-k3s1-winograd-output.comp`, `bn-reduce.comp`, `conv-k3s1-winograd-gemm.comp`, `conv-k3s1-winograd-gemm-cm.comp` |
 | [CyclicTableReader](#cyclictablereader) | read successive table rows, wrapping at the end | `cyclic-table-reader.comp` |
@@ -63,7 +62,6 @@ Applies an element-wise activation.
 |---|---|---|---|
 | `epilogue` | `vai::Epilogue` | `vai::Epilogue::None` |  |
 | `inPlace` | `bool` | `false` |  |
-| `oDtype` | `vai::Dtype` | `vai::Dtype::None` | None: oDefaultDtype |
 
 **동작 및 제약**
 
@@ -94,12 +92,6 @@ element-wise addition for residual connections
 | `in0` | input |  |
 | `in1` | input |  |
 | `out0` | output |  |
-
-**Config**
-
-| 필드 | 타입 | 기본값 | 설명 |
-|---|---|---|---|
-| `oDtype` | `vai::Dtype` | `vai::Dtype::None` | None: oDefaultDtype |
 
 **동작 및 제약**
 
@@ -172,9 +164,8 @@ fused KV cache append + causal attention (GQA), split between three kernels
 | `numQHeads` | `uint32_t` | — |  |
 | `numKVHeads` | `uint32_t` | `0` | for GQA (Hkv < numQHeads); 0 → Hkv = numQHeads |
 | `kvCacheSize` | `uint32_t` | `0` | tokens the cache holds; 0 = no cache at all |
-| `windowSize` | `uint32_t` | `0` | sliding-window span (0 = attend the whole prefix) |
-| `kvCacheDtype` | `vai::Dtype` | `vai::Dtype::Fp16` | K / V cache; required |
-| `oDtype` | `vai::Dtype` | `vai::Dtype::None` | None: oDefaultDtype |
+| `kvCacheDtype` | `vai::Dtype` | `vai::Dtype::None` | K / V cache; required when kvCacheSize > 0 |
+| `kvCacheRing` | `bool` | `false` | the cache keeps the last kvCacheSize positions, rounded up to kvRingAlign |
 
 **동작 및 제약**
 
@@ -238,48 +229,6 @@ from kvCacheCount per forward.
 
 ---
 
-## BatchNorm
-
-batch normalization (inference mode)
-
-소스: [`vai/nodes/batch-norm.h`](../../vai/nodes/batch-norm.h)
-
-**시그니처**
-
-- 입력: in0 [C, H, W]
-- 출력: γ[c] * (in0 - μ[c]) * rsqrt(σ²[c] + eps) + β[c]
-
-**슬롯**
-
-| 슬롯 | 종류 | 비고 |
-|---|---|---|
-| `in0` | input |  |
-| `out0` | output |  |
-| `beta` | persistent |  |
-| `gamma` | persistent |  |
-| `mean` | persistent |  |
-| `variance` | persistent |  |
-
-**Config**
-
-| 필드 | 타입 | 기본값 | 설명 |
-|---|---|---|---|
-| `channels` | `uint32_t` | — |  |
-| `eps` | `float` | `1e-5f` |  |
-| `wDtype` | `vai::Dtype` | `vai::Dtype::None` |  |
-| `oDtype` | `vai::Dtype` | `vai::Dtype::None` | None: oDefaultDtype |
-
-**동작 및 제약**
-
-gamma, beta, mean, and variance are one-dimensional tensors of length C. This is
-inference-only normalization; stored statistics are not updated.
-
-**커널**
-
-- `vai/shaders/batchnorm.comp`
-
----
-
 ## Concat
 
 join inputs along one axis
@@ -305,7 +254,6 @@ join inputs along one axis
 | `axis` | `int` | `0` | negative counts from the end |
 | `inputCount` | `uint32_t` | `2` |  |
 | `allowPartialInputs` | `bool` | `false` |  |
-| `oDtype` | `vai::Dtype` | `vai::Dtype::None` | None: oDefaultDtype |
 
 **동작 및 제약**
 
@@ -365,8 +313,6 @@ Off, every input is required, so a recording that cannot supply one drops this n
 | `acceptResidual` | `bool` | `false` | input "residual" |
 | `residualOrder` | `vai::ResidualOrder` | `vai::ResidualOrder::AfterEpilogue` |  |
 | `epilogue` | `vai::Epilogue` | `vai::Epilogue::None` |  |
-| `wDtype` | `vai::Dtype` | `vai::Dtype::None` | conv weight; None: wDefaultDtype |
-| `oDtype` | `vai::Dtype` | `vai::Dtype::None` | None: oDefaultDtype |
 
 **동작 및 제약**
 
@@ -408,7 +354,7 @@ read successive table rows, wrapping at the end
 **시그니처**
 
 - 입력: in0 [*] only scheduling: the node runs when it is fed
-- 파라미터: table [numRows, ...] rows read in cyclic order, at tableDtype
+- 파라미터: table [numRows, ...] rows read in cyclic order, at the loader's dtype
 - 출력: out0 table's shape without the leading axis, at oDtype
 
 **슬롯**
@@ -424,8 +370,6 @@ read successive table rows, wrapping at the end
 | 필드 | 타입 | 기본값 | 설명 |
 |---|---|---|---|
 | `numRows` | `uint32_t` | — | number of rows in the table |
-| `tableDtype` | `vai::Dtype` | `vai::Dtype::Fp32` | None: wDefaultDtype |
-| `oDtype` | `vai::Dtype` | `vai::Dtype::None` | None: oDefaultDtype |
 
 **동작 및 제약**
 
@@ -447,7 +391,7 @@ element-wise affine, O = scale * in0 + shift
 
 **시그니처**
 
-- 입력: in0 [..., D] scale broadcast to in0's shape (right-aligned, size-1 axes broadcast); absent without hasScale (scale 1) shift likewise; absent without hasShift (shift 0)
+- 입력: in0 [..., D] scale broadcast to in0's shape (right-aligned, size-1 axes broadcast); scale 1 when absent shift likewise; shift 0 when absent
 - 출력: out0 in0's shape
 
 **슬롯**
@@ -461,17 +405,14 @@ element-wise affine, O = scale * in0 + shift
 
 | 필드 | 타입 | 기본값 | 설명 |
 |---|---|---|---|
-| `hasScale` | `bool` | `true` |  |
-| `hasShift` | `bool` | `true` |  |
-| `scaleAsInput` | `bool` | `true` | input instead of persistent |
-| `shiftAsInput` | `bool` | `true` |  |
-| `wDtype` | `vai::Dtype` | `vai::Dtype::None` | parameters; None: wDefaultDtype |
-| `oDtype` | `vai::Dtype` | `vai::Dtype::None` | None: oDefaultDtype |
+| `scaleAsInput` | `bool` | `false` | input instead of persistent |
+| `shiftAsInput` | `bool` | `false` |  |
 
 **동작 및 제약**
 
 scale / shift are inputs under scaleAsInput / shiftAsInput, otherwise
-parameters at wDtype. Each may broadcast over any axes as long as the axes it keeps
+parameters at the loader's dtype. Each applies when present: filled by the
+loader, or wired; at least one has to be. Each may broadcast over any axes as long as the axes it keeps
 are adjacent, e.g. [1, D] over [T, D], or [C, 1, 1] over [C, H, W].
 
 An add is shift alone, a multiply scale alone, and a gated residual x + g * y
@@ -567,7 +508,6 @@ element-wise multiply with one operand activated (GLU gating)
 | 필드 | 타입 | 기본값 | 설명 |
 |---|---|---|---|
 | `activation` | `vai::Epilogue` | `vai::Epilogue::Silu` |  |
-| `oDtype` | `vai::Dtype` | `vai::Dtype::None` | None: oDefaultDtype |
 
 **동작 및 제약**
 
@@ -735,9 +675,8 @@ layer normalization over the feature axis, single kernel
 | 필드 | 타입 | 기본값 | 설명 |
 |---|---|---|---|
 | `eps` | `float` | `1e-5f` |  |
-| `hasBeta` | `bool` | `true` |  |
-| `wDtype` | `vai::Dtype` | `vai::Dtype::Fp32` | gamma / beta; the statistic is fp32 regardless |
-| `oDtype` | `vai::Dtype` | `vai::Dtype::None` | None: oDefaultDtype |
+| `coeffsAsInputs` | `bool` | `false` | scale / shift are inputs, not parameters |
+| `acceptResidual` | `bool` | `false` | input "residual", added to the output |
 
 **동작 및 제약**
 
@@ -785,7 +724,7 @@ O = I · Wᵀ, split between two output decompositions
 | `in0` | input |  |
 | `residual` | input | 옵션에 따라 존재 |
 | `out0` | output |  |
-| `bias` | persistent | 옵션에 따라 존재 |
+| `bias` | persistent |  |
 | `weight` | persistent |  |
 | `partial` | temporary |  |
 
@@ -795,13 +734,10 @@ O = I · Wᵀ, split between two output decompositions
 |---|---|---|---|
 | `inDim` | `uint32_t` | — |  |
 | `outDim` | `uint32_t` | — |  |
-| `hasBias` | `bool` | `false` |  |
 | `acceptResidual` | `bool` | `false` | input "residual" |
 | `residualOrder` | `vai::ResidualOrder` | `vai::ResidualOrder::AfterEpilogue` |  |
 | `epilogue` | `vai::Epilogue` | `vai::Epilogue::None` |  |
 | `scalarScale` | `float` | `1.0f` | s, right after the epilogue |
-| `wDtype` | `vai::Dtype` | `vai::Dtype::None` |  |
-| `oDtype` | `vai::Dtype` | `vai::Dtype::None` | None: oDefaultDtype |
 | `splitSize` | `uint32_t` | `0` | split-K: K length per split (0: ggml auto heuristic) |
 
 **동작 및 제약**
@@ -836,9 +772,10 @@ O = s · epilogue(I · Wᵀ + bias + R)      residualOrder BeforeEpilogue
 
 s is Config::scalarScale (e.g. dt of an Euler step x + dt · v), 1 by default.
 
-"bias" (wDtype) is a parameter and "residual" R (oDtype) an input. Each is
+"bias" (its own dtype) is a parameter and "residual" R (oDtype) an input. Each is
 [M, N] or rows that repeat over M: [N], or one image's position table under
-a batch.
+a batch. The "bias" slot always exists; the bias applies only when the
+weight loader filled it.
 
 **커널**
 
@@ -870,12 +807,6 @@ Element-wise multiplication
 | `in1` | input |  |
 | `out0` | output |  |
 
-**Config**
-
-| 필드 | 타입 | 기본값 | 설명 |
-|---|---|---|---|
-| `oDtype` | `vai::Dtype` | `vai::Dtype::None` | None: oDefaultDtype |
-
 **동작 및 제약**
 
 Inputs must have identical shapes and dtypes.
@@ -903,12 +834,6 @@ Replicates CHW pixels by an integer scale factor.
 |---|---|---|
 | `in0` | input |  |
 | `out0` | output |  |
-
-**Config**
-
-| 필드 | 타입 | 기본값 | 설명 |
-|---|---|---|---|
-| `oDtype` | `vai::Dtype` | `vai::Dtype::None` | None: oDefaultDtype |
 
 **동작 및 제약**
 
@@ -938,12 +863,6 @@ Permutes the axes of a tensor of any rank.
 |---|---|---|
 | `in0` | input |  |
 | `out0` | output |  |
-
-**Config**
-
-| 필드 | 타입 | 기본값 | 설명 |
-|---|---|---|---|
-| `oDtype` | `vai::Dtype` | `vai::Dtype::None` | None: oDefaultDtype |
 
 **동작 및 제약**
 
@@ -988,7 +907,6 @@ The rank is a specialization constant, so the pool holds one pipeline per rank.
 | `ceilMode` | `bool` | `false` | a last window that would start in the right padding is dropped |
 | `countIncludePad` | `bool` | `true` | Avg: padding counts in the divisor, as PyTorch's default |
 | `channelsLast` | `bool` | `false` |  |
-| `oDtype` | `vai::Dtype` | `vai::Dtype::None` | None: oDefaultDtype |
 
 **동작 및 제약**
 
@@ -1052,19 +970,17 @@ RMS normalization over the feature axis, single kernel
 | 필드 | 타입 | 기본값 | 설명 |
 |---|---|---|---|
 | `eps` | `float` | `1e-5f` |  |
-| `hasScale` | `bool` | `true` |  |
-| `hasShift` | `bool` | `false` |  |
 | `coeffsAsInputs` | `bool` | `false` | scale / shift are inputs, not parameters |
-| `wDtype` | `vai::Dtype` | `vai::Dtype::Fp32` | persistent scale / shift; None: wDefaultDtype |
-| `oDtype` | `vai::Dtype` | `vai::Dtype::None` | None: oDefaultDtype |
+| `acceptResidual` | `bool` | `false` | input "residual", added to the output |
 
 **동작 및 제약**
 
-scale / shift   [D] (or [1, D] as an input), present per Config::hasScale /
-hasShift; parameters, or inputs computed upstream under
+scale / shift   [D] (or [1, D] as an input), each applied when present: a
+parameter the loader filled, or an input wired upstream under
 Config::coeffsAsInputs (e.g. pi0.5's adaRMS)
+residual       [..., D] as in0, an input under Config::acceptResidual
 
-O[i, j] = I[i, j] * rsqrt(mean(I[i, :]^2) + eps) (* scale[j]) (+ shift[j])
+O[i, j] = I[i, j] * rsqrt(mean(I[i, :]^2) + eps) (* scale[j]) (+ shift[j]) (+ residual[i, j])
 
 The row statistic is a 1-pass sum of squares accumulated in fp32 regardless
 of I/O dtypes. The workgroup size depends on D, so the pipeline is requested in
@@ -1102,7 +1018,6 @@ rotary position embedding (half-split rotation)
 |---|---|---|---|
 | `cfg` | `RopeConfig` | — | frequencies; describe the whole model |
 | `headDim` | `uint32_t` | — | Dh, must be even |
-| `oDtype` | `vai::Dtype` | `vai::Dtype::None` | None: oDefaultDtype |
 
 **동작 및 제약**
 
@@ -1180,7 +1095,6 @@ Take a run of consecutive indices along one axis
 | `axis` | `uint32_t` | `0` | the axis to cut; 0 takes a contiguous block |
 | `start` | `int64_t` | — | first index on the axis; negative counts from the end |
 | `count` | `uint32_t` | `1` | how many consecutive indices to take |
-| `oDtype` | `vai::Dtype` | `vai::Dtype::None` | None: oDefaultDtype |
 
 **동작 및 제약**
 
@@ -1225,7 +1139,6 @@ sinusoidal embedding of a timestep the node counts down itself
 | `minPeriod` | `float` | — | the fastest sinusoid, in units of t |
 | `maxPeriod` | `float` | — | ... and the slowest |
 | `numSteps` | `uint32_t` | — | runs before t is back at 1 |
-| `oDtype` | `vai::Dtype` | `vai::Dtype::None` | None: oDefaultDtype |
 
 **동작 및 제약**
 
@@ -1271,8 +1184,6 @@ token embedding, optionally fused with positional embedding
 | `embedDim` | `uint32_t` | — |  |
 | `posTableSize` | `uint32_t` | `0` | learned positional table rows; 0 = token only |
 | `scale` | `float` | `1.0f` | multiplies the looked-up embedding |
-| `wDtype` | `vai::Dtype` | `vai::Dtype::None` |  |
-| `oDtype` | `vai::Dtype` | `vai::Dtype::None` | None: oDefaultDtype |
 
 **동작 및 제약**
 
