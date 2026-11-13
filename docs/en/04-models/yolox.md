@@ -63,10 +63,10 @@ These settings specify the input resolution and postprocessing thresholds. The t
 
 In vAi, a model is a DAG built by connecting nodes with `-`. For details, see [Using vAi > Node](../03-usage/node.md) and [NodeGroup](../03-usage/node-group.md).
 
-The dedicated `node::FocusConv` handles the Focus stem; the built-in
-[`Convolution`](../06-nodes.md#convolution) handles the remaining convolutions. For Conv-BN-SiLU blocks,
-the weight loader computes BN `scale` and `bias` on the CPU and fills those slots,
-and the node uses the filled slots and SiLU. The detection head uses biased 1x1 convolutions for prediction.
+The model-specific `node::FocusConv` handles the stem's Focus operation, while the remaining convolutions use the built-in
+[`Convolution`](../06-nodes.md#convolution). For Conv-BN-SiLU blocks,
+the weight loader computes BN `scale` and `bias` on the CPU and fills those slots, and the node uses
+the filled slots and the SiLU option. Predictions in the detection head use 1x1 convolutions with bias.
 
 *`H` and `W`: input resolution, `N`: number of detection positions across all scales (8,400 at 640x640).*
 
@@ -87,10 +87,10 @@ for (const char* scale : {"p3", "p4", "p5"})
 detector - output("out0");  // [N, 5 + numClasses]
 ```
 
-The output has shape `[8400, 85]`. Each row contains `cx, cy, width, height, objectness, class[0..79]`.
-Box coordinates are in pixels after grid and stride decoding; objectness and class values are probabilities after sigmoid.
+The output has shape `[8400, 85]`. Each row contains `cx, cy, width, height, objectness, class[0..79]`,
+with box coordinates in pixels after applying the grid and stride. Objectness and class values are probabilities after sigmoid.
 NMS runs outside the graph in postprocessing ([`models/experimental/yolox/processing.h`](../../../models/experimental/yolox/processing.h)).
-The output contains the same values as the comparison frameworks' batch-1 output, `[1, 8400, 85]`.
+The output contains the same values as the batch-one output `[1, 8400, 85]` of the comparison frameworks.
 
 ### NodeGroup
 
@@ -100,14 +100,14 @@ and `DetectionDecoder`, with `FocusModule`, `Bottleneck`, `CSPLayer`,
 
 #### FocusModule
 
-The official Focus splits even and odd rows and columns, stacks them along the channel axis, and applies a 3x3 convolution.
-vAi performs this in one `node::FocusConv`. It computes Conv-BN-SiLU directly from the original input without creating
-an intermediate Focus tensor, mapping `[C, H, W]` to `[Co, H/2, W/2]`.
+The official Focus operation splits the input into even and odd rows and columns, concatenates them along the channel axis, and applies a 3x3 conv.
+vAi handles this with a single `node::FocusConv`. It computes Conv-BN-SiLU directly from the original input
+without creating an intermediate Focus tensor, converting `[C, H, W]` to `[Co, H/2, W/2]`.
 
 #### Bottleneck
 
-This block connects a 1x1 convolution to a 3x3 convolution. If `shortcut` is enabled and the input and output channel counts match,
-the second convolution adds the input as its `residual`.
+This block connects a 1x1 conv and a 3x3 conv. When `shortcut` is enabled and the input and output channel counts match,
+the second conv adds the input as its `residual`.
 
 ```cpp
 input - conv1 - conv2;
@@ -130,8 +130,8 @@ concat - conv3;
 
 #### SPPBottleneck
 
-Three consecutive 5x5 pooling operations compute the official SPP's parallel 5x5, 9x9, and 13x13 max pooling.
-The dedicated `node::SPPF` handles pooling and concatenates the four tensors, including the input, in one kernel.
+The official SPP's parallel 5x5, 9x9, and 13x13 max pooling is computed as three consecutive 5x5 pooling operations.
+The model-specific `node::SPPF` handles the pooling and concatenation of all four tensors, including the input, in one kernel.
 
 ```cpp
 conv1 - sppf - conv2;
@@ -146,19 +146,19 @@ conv1 - sppf - conv2;
 | `Head` | A 1x1 stem per scale followed by two branches, regression/objectness and classification (two 3x3 convs + 1x1 pred) | `in_p3..5` -> `regobj_p3..5` `[5, Hₚ, Wₚ]`, `cls_p3..5` `[numClasses, Hₚ, Wₚ]` |
 | `DetectionDecoder` | Reads all three scales' outputs directly and applies grid/stride decoding and sigmoid | `regobj_p3..5`, `cls_p3..5` -> `out0` `[N, 5 + numClasses]` |
 
-A single five-channel convolution computes the four regression channels and one objectness channel.
-`node::Decode` reads `regobj` and `cls` directly, avoiding a `[85, Hₚ, Wₚ]` concatenation buffer for each scale.
+A single five-channel conv computes the four regression channels and one objectness channel.
+`node::Decode` reads `regobj` and `cls` directly, so it does not need a `[85, Hₚ, Wₚ]` concatenation buffer for each scale.
 
 ### Model-specific nodes
 
-These YOLOX-specific operations live in [`models/experimental/yolox/nodes/`](../../../models/experimental/yolox/nodes/) and
+These operations are needed for YOLOX. Their implementations are in [`models/experimental/yolox/nodes/`](../../../models/experimental/yolox/nodes/) and
 [`shaders/`](../../../models/experimental/yolox/shaders/).
 
 | Node | Description | Kernel |
 |---|---|---|
-| `node::FocusConv` | Fused Focus and stem Conv-BN-SiLU | `focus-conv.comp`, `focus-conv-cm.comp` |
-| `node::SPPF` | Three-stage max pooling and concatenation in one kernel | `sppf.comp` |
-| `node::Decode` | Decodes regression/objectness and class outputs to `[N, 5 + numClasses]` | `decode.comp` |
+| `node::FocusConv` | Fuses Focus and the stem's Conv-BN-SiLU | `focus-conv.comp`, `focus-conv-cm.comp` |
+| `node::SPPF` | Three stages of max pooling and concatenation in one kernel | `sppf.comp` |
+| `node::Decode` | Decodes regression/objectness and class outputs into `[N, 5 + numClasses]` | `decode.comp` |
 
 The FP16 cooperative-matrix path in `node::FocusConv` transforms the weights once at initialization
 using `focus-conv-transform.comp`.
@@ -173,7 +173,7 @@ using `focus-conv-transform.comp`.
 
 ## Checkpoints
 
-Each tier has its own folder under `data/ckpts/yolox/megvii/`.
+Place each tier's checkpoint in its own folder under `data/ckpts/yolox/megvii/`.
 The demo input image is in `data/images/`.
 
 ```text
@@ -181,10 +181,10 @@ data/
 ├── ckpts/yolox/megvii/
 │   ├── large/
 │   │   ├── model.pth             Megvii original
-│   │   └── model.safetensors     conversion result: file read by the loader
+│   │   └── model.safetensors     Conversion output: the file read by the loader
 │   └── ...
 └── images/
-    └── dog.jpg                   demo input
+    └── dog.jpg                   Demo input
 ```
 
 Download the `.pth` files distributed by Megvii, then convert them to `.safetensors`.
@@ -202,17 +202,17 @@ curl -L -o data/ckpts/yolox/megvii/large/model.pth \
 
 ```bash
 pip install torch safetensors
-python models/experimental/yolox/megvii-weights-convertor.py        # all available tiers
-python models/experimental/yolox/megvii-weights-convertor.py small large    # selected tiers
+python models/experimental/yolox/megvii-weights-convertor.py                # all available files
+python models/experimental/yolox/megvii-weights-convertor.py small large    # select tiers
 ```
 
 This creates `model.safetensors` next to each `model.pth`.
 
 ### Load Weight
 
-The mapping from checkpoint keys to graph slots is in
+The code that maps checkpoint tensors to graph slots is in
 [`models/experimental/yolox/megvii-weights.h`](../../../models/experimental/yolox/megvii-weights.h).
-The caller needs one line:
+Loading takes one line at the call site.
 
 ```cpp
 loadWeights<"megvii">(net);
@@ -221,9 +221,9 @@ loadWeights<"megvii">(net);
 The specialization constructs the path from `model.cfg.tier` (`VAI_DATA_DIR "/yolox/yolox_<tier letter>.safetensors"`),
 so the caller only selects the tier. For distribution tags, see [Supported models > Loading weights](README.md#loading-weights).
 
-The official state dict's `backbone.backbone`, `backbone`, and `head` keys map to the backbone, neck, and head members.
-Convolution weights and BN parameters are read at the net's `wDefaultDtype`. The regression and objectness weights and biases
-are combined in `regObjPred`.
+The official state dict keys `backbone.backbone`, `backbone`, and `head` map to the backbone, neck, and head members, respectively.
+Conv weights and BN parameters are read at the net's `wDefaultDtype`, while the head's regression and objectness weights and biases
+are combined into `regObjPred`.
 
 ## Running
 
@@ -232,12 +232,12 @@ are combined in `regObjPred`.
 ```text
 models/experimental/yolox/
 ├── net.h                       Model and NodeGroup definitions
-├── nodes/                      dedicated nodes (FocusConv, SPPF, Decode)
-├── shaders/                    kernels for dedicated nodes
+├── nodes/                      Model-specific nodes (FocusConv, SPPF, Decode)
+├── shaders/                    Kernels for model-specific nodes
 ├── megvii-weights.h             Megvii checkpoint mapping
-├── megvii-weights-convertor.py  .pth -> .safetensors conversion
-├── demo.cpp                    demo-yolox: detection and timing for one image
-├── processing.h                preprocessing and postprocessing (letterbox, NMS)
+├── megvii-weights-convertor.py   .pth -> .safetensors conversion
+├── demo.cpp                    demo-yolox: detect objects in one image and measure timing
+├── processing.h                Preprocessing and postprocessing (letterbox, NMS)
 └── CMakeLists.txt
 
 data/
@@ -257,7 +257,7 @@ cmake --build build --config RelWithDebInfo --target demo-yolox
 ./build/bin/demo-yolox
 ```
 
-The demo detects objects in `data/images/dog.jpg` using the LARGE tier and fp16, and prints profiles by kernel type.
+The demo runs detection on `data/images/dog.jpg` with the LARGE tier and fp16, then prints a profile by kernel type.
 Change the tier and inference settings at the top of [`demo.cpp`](../../../models/experimental/yolox/demo.cpp).
 
 Preprocessing converts the RGB image loader's output to BGR CHW, places it from the top-left corner while preserving its aspect ratio,
