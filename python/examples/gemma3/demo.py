@@ -89,7 +89,9 @@ def main():
         max_runtime_context=args.max_runtime_context,
     )
     if args.image_path and not gemma.has_vision:
-        raise SystemExit(f"--image_path goes with a VLM preset; {args.preset} has no vision tower")
+        raise SystemExit(
+            f"--image_path goes with a VLM preset; {args.preset} has no vision encoder"
+        )
     gemma.set_profile_tags()
     gemma.load_weights(args.weights_dir)
     gemma.load_tokenizer(args.tokenizer_path)

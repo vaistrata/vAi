@@ -94,14 +94,14 @@ class Gemma3(_CausalLM):
 
     def preprocess(self, images) -> Tensor:
         """One image or a sequence of them (file paths or HWC uint8 RGB
-        arrays), squashed to the vision tower's square as Gemma3ImageProcessor
+        arrays), squashed to the vision encoder's square as Gemma3ImageProcessor
         does and scaled to [-1, 1]: the [B, 3, S, S] float Tensor prefill
         takes. A Tensor passes through."""
         if isinstance(images, Tensor):
             return images
         if not self.has_vision:
             raise ValueError(
-                f"Gemma3.preprocess: the {self.config.variant} checkpoint has no vision tower"
+                f"Gemma3.preprocess: the {self.config.variant} checkpoint has no vision encoder"
             )
         if isinstance(images, (str, os.PathLike, np.ndarray)):
             images = [images]
