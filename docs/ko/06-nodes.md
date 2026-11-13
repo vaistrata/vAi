@@ -21,7 +21,7 @@
 | [Identity](#identity) | Pass-through node (no computation) | — |
 | [IndexCopy](#indexcopy) | write source slices at listed indices, as torch.index_copy | `index-copy.comp` |
 | [LayerNorm](#layernorm) | layer normalization over the feature axis, single kernel | `layer-norm.comp` |
-| [Linear](#linear) | O = I · Wᵀ, split between two output decompositions | `linear-pack-intel.comp`, `linear-slab.comp`, `linear-tile-intel.comp`, `linear-cm.comp`, `linear-tile.comp`, `linear-reduce.comp` |
+| [Linear](#linear) | O = I · Wᵀ, split between two output decompositions | `linear-pack-intel.comp`, `linear-slab.comp`, `linear-tile-intel.comp`, `linear-cm-nv.comp`, `linear-cm.comp`, `linear-tile.comp`, `linear-reduce.comp` |
 | [Mul](#mul) | Element-wise multiplication | `mul.comp` |
 | [NearestUpsample](#nearestupsample) | Replicates CHW pixels by an integer scale factor. | `upsample.comp` |
 | [Permute](#permute) | Permutes the axes of a tensor of any rank. | `permute.comp` |
@@ -738,7 +738,7 @@ O = I · Wᵀ, split between two output decompositions
 | `residualOrder` | `vai::ResidualOrder` | `vai::ResidualOrder::AfterEpilogue` |  |
 | `epilogue` | `vai::Epilogue` | `vai::Epilogue::None` |  |
 | `scalarScale` | `float` | `1.0f` | s, right after the epilogue |
-| `splitSize` | `uint32_t` | `0` | split-K: K length per split (0: ggml auto heuristic) |
+| `splitSize` | `uint32_t` | `0` | split-K: K length per split (0: the vendor's count per shape) |
 
 **동작 및 제약**
 
@@ -749,9 +749,10 @@ vai naming: O [M, N], I [M, K] (M = flattened batch), W [N, K]
 so K is split across its threads and reduced; bias / epilogue are fused
 in-kernel. See useSlabPath().
 - tile (M > 8): a workgroup owns a wgM x wgN tile. Two kernels share the
-frame, chosen per device in ggmlMulmmTileParams(): scalar
+frame, chosen per device in selectLinearTile(): scalar
 (linear-tile, each thread accumulates its own outputs) and
-cooperative-matrix (linear-cm, subgroup MMA tiles).
+cooperative-matrix (linear-cm, subgroup MMA tiles; NVIDIA's Fill tiles
+run linear-cm-nv, which masks the K tail per k-block).
 - Intel (useIntelTile; every M, slab included): linear-tile-intel, a port of
 OpenVINO's fully_connected_gpu_bf_tiled, reading W packed once on the GPU
 (packWeightIntel); its tile choice is intelTileParams(), its split
@@ -761,7 +762,7 @@ Everything below applies to every tile kernel:
 The tile params are selected per output shape in prepare(); when a shape
 change selects a different tile, the pipeline is re-requested from the pool.
 
-Split-K (splitSize option; 0 selects the ggml heuristic per shape)
+Split-K (splitSize option; 0 selects the vendor's rule per shape)
 accumulates partials P[splitCount, M, N] (oDtype) in a temporary buffer
 and folds them in a second pass (linear-reduce); bias / epilogue / the
 residual live in that reduce pass, so requesting them without splitting still
@@ -782,6 +783,7 @@ weight loader filled it.
 - `vai/shaders/linear-pack-intel.comp`
 - `vai/shaders/linear-slab.comp`
 - `vai/shaders/linear-tile-intel.comp`
+- `vai/shaders/linear-cm-nv.comp`
 - `vai/shaders/linear-cm.comp`
 - `vai/shaders/linear-tile.comp`
 - `vai/shaders/linear-reduce.comp`
