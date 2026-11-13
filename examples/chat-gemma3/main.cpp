@@ -185,7 +185,7 @@ void chat(gemma3::Net& net, const utils::Tokenizer& tokenizer)
 int main()
 {
     // Load model
-    auto modelCfg = gemma3::ModelConfig::_4B();
+    auto modelCfg = gemma3::ModelConfig::get("4B");
     printf("Loading Gemma-%s model...\n", modelCfg.variant);
     gemma3::Net net(
         {

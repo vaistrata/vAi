@@ -16,11 +16,11 @@ using namespace vai::utils;
 using namespace gemma3_bench;
 namespace gemma3 = model::production::gemma3;
 
-struct SizeOption { const char* name; gemma3::ModelConfig (*config)(); };
+struct SizeOption { const char* name; };
 
 static constexpr SizeOption modelSizes[] = {
-    { "4B", &gemma3::ModelConfig::_4B },
-    { "1B", &gemma3::ModelConfig::_1B },
+    { "4B" },
+    { "1B" },
 };
 
 inline std::vector<int> makePrompt(
@@ -109,7 +109,7 @@ int main(int argc, char** argv)
 
     srand(seed);
 
-    gemma3::ModelConfig modelCfg = size->config();
+    gemma3::ModelConfig modelCfg = gemma3::ModelConfig::get(size->name);
 
     const bool hasVision = modelCfg.vision.has_value();
 
