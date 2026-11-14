@@ -8,7 +8,7 @@
  so the merge back to [B, Tq, Hq*Dh] is a reshape and needs no permute pass; this
  also matches the llama.cpp flash-attention store layout the FA path ports.
 
- - O (typeO), the Q / K / V inputs (typeI) and the K / V cache (typeCache)
+ - O (typeO), Q (typeI), the K / V inputs (typeKV) and the K / V cache (typeCache)
    are fp32 or fp16, accessed through same-binding buffer aliases. Cache writes
    are element-owned (one lane per element), so they are race-free.
  - one thread per output head-dim element; dispatch (Dh, Tq, B*Hq).
@@ -42,9 +42,10 @@
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
 layout(constant_id = 0) const uint kvCacheRing = 0;   // 1: the cache keeps the last Tmax positions, p at row p % Tmax
-layout(constant_id = 1) const uint typeI      = 0;    // Q / K / V input dtype
+layout(constant_id = 1) const uint typeI      = 0;    // Q input dtype
 layout(constant_id = 2) const uint typeCache  = 0;    // K / V cache dtype
 layout(constant_id = 3) const uint kvCaching  = 1;    // 0: skip the append; the cache bindings are null
+layout(constant_id = 4) const uint typeKV     = 0;    // K / V input dtype
 layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0;  // O (output) dtype
 
 layout(set = 0, binding = 0) buffer O_BUF_F32      { float bufferO_f32[]; };   // attention O [B, Tq, Hq, Dh]
@@ -97,8 +98,8 @@ uint cacheRow(uint p)
 }
 
 float readQ(uint i)      { return (typeI == DTYPE_F32) ? bufferQ_f32[i] : float(bufferQ_f16[i]); }
-float readK(uint i)      { return (typeI == DTYPE_F32) ? bufferK_f32[i] : float(bufferK_f16[i]); }
-float readV(uint i)      { return (typeI == DTYPE_F32) ? bufferV_f32[i] : float(bufferV_f16[i]); }
+float readK(uint i)      { return (typeKV == DTYPE_F32) ? bufferK_f32[i] : float(bufferK_f16[i]); }
+float readV(uint i)      { return (typeKV == DTYPE_F32) ? bufferV_f32[i] : float(bufferV_f16[i]); }
 float readKCache(uint i) { return (typeCache == DTYPE_F32) ? bufferKCache_f32[i] : float(bufferKCache_f16[i]); }
 float readVCache(uint i) { return (typeCache == DTYPE_F32) ? bufferVCache_f32[i] : float(bufferVCache_f16[i]); }
 void writeO(uint i, float v)      { if (typeO == DTYPE_F32) bufferO_f32[i] = v; else bufferO_f16[i] = float16_t(v); }

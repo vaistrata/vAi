@@ -1,28 +1,26 @@
 /*=============================================================================
- attention-fa.comp: flash-attention scalar path, separate Q/K/V,
-     GQA (ported from the ggml/llama.cpp Vulkan flash_attn.comp scalar kernel)
+ attention-fa.comp: flash-attention scalar path, separate Q/K/V, GQA
+     (ported from the ggml/llama.cpp Vulkan flash_attn.comp scalar kernel)
 
      1) append the new K / V tokens to the K / V cache (fused)
      2) O[nq, h, dh] = sum_j softmax(Q[h, nq] · K(h/groupSize, j) * scale)[j] * V(h/groupSize, j, dh)
 
-     O is token-major [B, Tq, Hq, Dh]; O (typeO), the Q / K / V inputs (typeI)
-     and the K / V cache (typeCache) are fp32 or fp16 via same-binding vec4 buffer
-     aliases. Softmax state accumulates in fp32; the O accumulator follows
-     accF16.
+     O is token-major [B, Tq, Hq, Dh]; O (typeO), Q (typeI), the K / V inputs
+     (typeKV) and the cache (typeCache) are fp32 or fp16 through same-binding
+     vec4 aliases. Softmax state is fp32; the O accumulator follows accF16.
 
- Decomposition (wgRows / wgKv / dhSplit / rowGroups = ggml Br / Bc / D_split
- / row_split): one workgroup owns a wgRows-row Q tile of one head; rowGroups
- row-groups split the rows, dhSplit adjacent lanes split the head dim, and
- the remaining lanes stripe the wgKv tile columns. Each thread runs an
- independent online softmax over its own stripe; stripes merge once in the
- epilogue (subgroupShuffleXor, + a shared stage when rowGroups == 1).
+ Decomposition (wgRows / wgKv / dhSplit / rowGroups = ggml Br / Bc / D_split /
+ row_split): a workgroup owns a wgRows-row Q tile of one head; rowGroups split
+ the rows, dhSplit adjacent lanes split the head dim, and the rest stripe the
+ wgKv columns. Each thread runs its own online softmax over its stripe; the
+ stripes merge once in the epilogue (subgroupShuffleXor, + shared when
+ rowGroups == 1).
 
- The KV sweep covers ONE global token range: position j reads cache[j] when
- j < cached, else input[j - cached]; causality is a single compare (no mask
- tensor). The KV-head-leader workgroup appends its rows' new tokens.
-
- The K / V inputs carry Tkv rows (0 = the cache alone), aligned with the Tq
- queries at their ends; Tkv > Tq rows append a grid of tiles apart.
+ The KV sweep covers one global token range: key j reads cache[j] when
+ j < cached, else input[j - cached]; causality is one compare. The K / V inputs
+ carry Tkv rows (0 = the cache alone), aligned with the Tq queries at their
+ ends. Split 0 of the KV-head leader appends the grid's own new rows; the rows
+ past them are appended by every split (splitsAppendExtraKv).
 
  The mask's span bounds a query from below (keyStart, a sliding window): the
  bound joins the causal compare, and the sweep skips the tiles below the whole
@@ -33,21 +31,22 @@
  holds Tmax to a multiple of wgKv, so a tile never wraps: its rows sit one
  shift apart from its positions.
 
- GQA-packed decode (push gqaRatio > 1): the tile rows become the groupSize query
- heads sharing one KV head, so the sweep runs once per group; dispatch
- flips to one workgroup per (token, KV head).
+ GQA-packed decode (gqaRatio > 1): the tile rows are the groupSize query heads
+ of one KV head, so the sweep runs once per group; one workgroup per
+ (token, KV head).
 
- Split-K (push kCount > 1): the keys the tile reaches (cache and new) are cut
- into kCount spans of wgKv-aligned length, derived here from kvCacheCount —
- the host cannot supply it, as the cache grows under one recorded command
- buffer. Split s sweeps span s, and split 0 owns the append. A span past the
- tile's keys leaves that split empty, which the reduce absorbs. Partials
- (bindings 7/8) are folded by attention-fa-reduce.comp.
+ Split-K (kCount > 1): the keys the tile reaches are cut into kCount
+ wgKv-aligned spans, derived from kvCacheCount (the cache grows under one
+ recorded command buffer); a windowed sweep cuts them from the window start
+ (spanOrigin). A split with no keys writes an empty partial, or leaves early
+ with skipEmptySplits. attention-fa-reduce.comp folds the partials
+ (bindings 7/8); on Intel or without subgroup arithmetic,
+ attention-fa-reduce-intel.comp.
 
- Requirements (host-gated): Dh % 8 == 0, 16 <= Dh <= 256; wgSize a multiple
- of sgSize (forced on the pipeline); rowGroups > 1 implies wgSize ==
- rowGroups * sgSize; wgKv a multiple of wgSize / dhSplit / rowGroups; Dh/4 a
- multiple of dhSplit; shared-memory budget = ggmlFAScalarShmemSupport.
+ Requirements (host-gated): Dh % 8 == 0, 16 <= Dh <= 256; wgSize a multiple of
+ sgSize (forced); rowGroups > 1 implies wgSize == rowGroups * sgSize; wgKv a
+ multiple of wgSize / dhSplit / rowGroups; Dh/4 a multiple of dhSplit; shared
+ memory per tileFitsSharedMemory.
 
  Dispatch (host): (ceil(Tq / wgRows) * kCount, Hq, B);
                   GQA-packed: (Tq * kCount, Hkv, B)
@@ -71,21 +70,24 @@ layout(constant_id = 0) const uint wgSize       = 128;  // threads per workgroup
 layout(constant_id = 1) const uint wgRows       = 4;    // Q rows per workgroup tile
 layout(constant_id = 2) const uint wgKv         = 32;   // KV columns per tile iteration
 layout(constant_id = 3) const uint Dh           = 64;   // head dim
-layout(constant_id = 4) const uint dhSplit      = 8;    // adjacent lanes splitting the head dim
+layout(constant_id = 4) const uint dhSplit      = 8;    // adjacent lanes that split the head dim, Dh / dhSplit each (= ggml D_split)
 layout(constant_id = 5) const uint rowGroups    = 1;    // row-groups per workgroup (1 or 4)
 layout(constant_id = 6) const uint sgSize       = 32;   // forced subgroup size (0 = don't force; shared-tree epilogue)
-layout(constant_id = 7) const uint shmemStaging = 0;    // stage K/V tiles through shared memory
-layout(constant_id = 8) const uint stagingF16   = 0;    // f16 shared staging (= upstream FLOAT_TYPE on fp16 devices; acc stays fp32)
-layout(constant_id = 9) const uint limitShmem   = 0;    // vec4s of dead shared to cap occupancy (= ggml LIMIT_OCCUPANCY_SHMEM; AMD)
+layout(constant_id = 7) const uint shmemStaging = 0;    // stage K/V tiles through shared memory (Q always is)
+layout(constant_id = 8) const uint stagingF16   = 0;    // the shared Q and K/V tiles are f16 (= upstream FLOAT_TYPE on fp16 devices; acc stays fp32)
+layout(constant_id = 9) const uint limitShmem   = 0;    // unused shared memory, in vec4s, that caps occupancy (AMD; = ggml LIMIT_OCCUPANCY_SHMEM)
 // f16 O accumulator registers + epilogue exchange; softmax state stays fp32.
 // The packed exchange also sidesteps the broken f16vec4 shuffle upstream
 // works around on old AMD Windows drivers (OLD_AMD_WINDOWS).
-layout(constant_id = 10) const uint accF16 = 0;
-layout(constant_id = 12) const uint kvCacheRing = 0;   // 1: the cache keeps the last Tmax positions, p at row p % Tmax
-layout(constant_id = 13) const uint typeI      = 0;    // Q / K / V input dtype
-layout(constant_id = 14) const uint typeCache  = 0;    // K / V cache dtype
-layout(constant_id = 15) const uint kvCaching  = 1;    // 0: skip the append; the cache bindings are null
-layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0;  // O (output) dtype
+layout(constant_id = 10) const uint accF16            = 0;
+layout(constant_id = 12) const uint kvCacheRing       = 0;    // 1: the cache keeps the last Tmax positions, p at row p % Tmax
+layout(constant_id = 13) const uint typeI             = 0;    // Q input dtype
+layout(constant_id = 14) const uint typeCache         = 0;    // K / V cache dtype
+layout(constant_id = 15) const uint kvCaching         = 1;    // 0: skip the append; the cache bindings are null
+layout(constant_id = 16) const uint typeKV            = 0;    // K / V input dtype
+layout(constant_id = 17) const uint skipEmptySplits   = 0;    // a split with no keys marks its partial empty and returns
+layout(constant_id = 22) const uint splitsAppendExtraKv = 0;  // every split's workgroups append the K / V rows past the grid's own (Tkv > Tq)
+layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0;    // O (output) dtype
 
 // All indices below are in vec4 units (Dh % 4 == 0 is host-guaranteed).
 // Aliases carry the tightest memory qualifier: read-write aliases would block
@@ -154,15 +156,21 @@ uint cacheRow(uint p)
 // token-major row.
 uint outRow(uint tq, uint hq) { return (gl_WorkGroupID.z * Tq + tq) * Hq + hq; }
 
+// Split origin: the first key the tile's oldest row t may read (the mask's span), aligned down to wgKv; 0 without a span.
+uint spanOrigin(uint t)
+{
+    return keyStart(keyPos(t)) & ~(wgKv - 1u);
+}
+
 vec4 readQ4(uint i) { return (typeI == DTYPE_F32) ? bufferQ_f32[i] : vec4(bufferQ_f16[i]); }
 // Direct-to-f16 staging readers: f16 sources copy without a f32 roundtrip.
 f16vec4 readQ4h(uint i) { return (typeI == DTYPE_F32) ? f16vec4(bufferQ_f32[i]) : bufferQ_f16[i]; }
-f16vec4 readK4h(uint i) { return (typeI == DTYPE_F32) ? f16vec4(bufferK_f32[i]) : bufferK_f16[i]; }
-f16vec4 readV4h(uint i) { return (typeI == DTYPE_F32) ? f16vec4(bufferV_f32[i]) : bufferV_f16[i]; }
+f16vec4 readK4h(uint i) { return (typeKV == DTYPE_F32) ? f16vec4(bufferK_f32[i]) : bufferK_f16[i]; }
+f16vec4 readV4h(uint i) { return (typeKV == DTYPE_F32) ? f16vec4(bufferV_f32[i]) : bufferV_f16[i]; }
 f16vec4 readKCache4h(uint i) { return (typeCache == DTYPE_F32) ? f16vec4(bufferKCache_f32[i]) : bufferKCache_f16[i]; }
 f16vec4 readVCache4h(uint i) { return (typeCache == DTYPE_F32) ? f16vec4(bufferVCache_f32[i]) : bufferVCache_f16[i]; }
-vec4 readK4(uint i) { return (typeI == DTYPE_F32) ? bufferK_f32[i] : vec4(bufferK_f16[i]); }
-vec4 readV4(uint i) { return (typeI == DTYPE_F32) ? bufferV_f32[i] : vec4(bufferV_f16[i]); }
+vec4 readK4(uint i) { return (typeKV == DTYPE_F32) ? bufferK_f32[i] : vec4(bufferK_f16[i]); }
+vec4 readV4(uint i) { return (typeKV == DTYPE_F32) ? bufferV_f32[i] : vec4(bufferV_f16[i]); }
 vec4 readKCache4(uint i) { return (typeCache == DTYPE_F32) ? bufferKCache_f32[i] : vec4(bufferKCache_f16[i]); }
 vec4 readVCache4(uint i) { return (typeCache == DTYPE_F32) ? bufferVCache_f32[i] : vec4(bufferVCache_f16[i]); }
 void writeO4(uint i, vec4 v) { if (typeO == DTYPE_F32) bufferO_f32[i] = v; else bufferO_f16[i] = f16vec4(v); }
@@ -171,12 +179,12 @@ void writeVCache4(uint i, vec4 v) { if (typeCache == DTYPE_F32) bufferVCacheW_f3
 // Append copies without the f32 roundtrip when both ends are f16 (spec-folded).
 void copyKToCache(uint dst, uint src)
 {
-    if (typeI != DTYPE_F32 && typeCache != DTYPE_F32) bufferKCacheW_f16[dst] = bufferK_f16[src];
+    if (typeKV != DTYPE_F32 && typeCache != DTYPE_F32) bufferKCacheW_f16[dst] = bufferK_f16[src];
     else writeKCache4(dst, readK4(src));
 }
 void copyVToCache(uint dst, uint src)
 {
-    if (typeI != DTYPE_F32 && typeCache != DTYPE_F32) bufferVCacheW_f16[dst] = bufferV_f16[src];
+    if (typeKV != DTYPE_F32 && typeCache != DTYPE_F32) bufferVCacheW_f16[dst] = bufferV_f16[src];
     else writeVCache4(dst, readV4(src));
 }
 
@@ -212,6 +220,74 @@ shared float s_red[RED_ENTRIES];
 shared vec4 s_redv4[(accF16 == 0u) ? RED_ENTRIES : 1u];         // acc exchange (fp32)
 shared f16vec4 s_redv4h[(accF16 != 0u) ? RED_ENTRIES : 1u];     // acc exchange (accF16, = upstream tmpshv4)
 shared vec4 s_occupancy[(limitShmem > 0u) ? limitShmem : 1u];   // = ggml occupancy_limiter
+
+// The K or V (isV) source of the staging below; isV is a constant at every call.
+f16vec4 readKvCache4h(bool isV, uint i) { return isV ? readVCache4h(i) : readKCache4h(i); }
+f16vec4 readKv4h(bool isV, uint i)      { return isV ? readV4h(i) : readK4h(i); }
+vec4 readKvCache4(bool isV, uint i)     { return isV ? readVCache4(i) : readKCache4(i); }
+vec4 readKv4(bool isV, uint i)          { return isV ? readV4(i) : readK4(i); }
+
+// K or V tile to shared (shmemStaging): full tiles copy from one hoisted source, the boundary tile
+// selects / zero-fills per element. Keep the `idx = idx0 + tid` idiom ([[unroll]] batching; the Q / append
+// loops intentionally keep the runtime-bound form).
+void stageKvTile(bool isV, uint jBase, bool fullCache, bool fullInput, uint inputEnd,
+                 uint cacheBase, uint kvInputBase, uint tid)
+{
+    if (fullCache)
+    {
+        [[unroll]] for (uint idx0 = 0u; idx0 < wgKv * DH4; idx0 += wgSize)
+        {
+            uint idx = idx0 + tid;
+            if (idx0 + wgSize <= wgKv * DH4 || idx < wgKv * DH4)
+            {
+                uint c = idx / DH4, d = idx % DH4;
+                uint g = cacheBase + jBase * DH4 + idx;
+                if (stagingF16 != 0u) s_kv16[c * SHMEM_STRIDE + d] = readKvCache4h(isV, g);
+                else s_kv32[c * SHMEM_STRIDE + d] = readKvCache4(isV, g);
+            }
+        }
+    }
+    else if (fullInput)
+    {
+        [[unroll]] for (uint idx0 = 0u; idx0 < wgKv * DH4; idx0 += wgSize)
+        {
+            uint idx = idx0 + tid;
+            if (idx0 + wgSize <= wgKv * DH4 || idx < wgKv * DH4)
+            {
+                uint c = idx / DH4, d = idx % DH4;
+                uint g = kvInputBase + (min(jBase + c, inputEnd - 1u) - kvCacheCount) * DH4 + d;
+                if (stagingF16 != 0u) s_kv16[c * SHMEM_STRIDE + d] = readKv4h(isV, g);
+                else s_kv32[c * SHMEM_STRIDE + d] = readKv4(isV, g);
+            }
+        }
+    }
+    else
+    {
+        [[unroll]] for (uint idx0 = 0u; idx0 < wgKv * DH4; idx0 += wgSize)
+        {
+            uint idx = idx0 + tid;
+            if (idx0 + wgSize <= wgKv * DH4 || idx < wgKv * DH4)
+            {
+                uint c = idx / DH4, d = idx % DH4;
+                uint j = jBase + c;
+                if (stagingF16 != 0u)
+                {
+                    f16vec4 v = f16vec4(0.0);
+                    if (j < kvCacheCount) v = readKvCache4h(isV, cacheBase + j * DH4 + d);
+                    else if (j < inputEnd)    v = readKv4h(isV, kvInputBase + (j - kvCacheCount) * DH4 + d);
+                    s_kv16[c * SHMEM_STRIDE + d] = v;
+                }
+                else
+                {
+                    vec4 v = vec4(0.0);
+                    if (j < kvCacheCount) v = readKvCache4(isV, cacheBase + j * DH4 + d);
+                    else if (j < inputEnd)    v = readKv4(isV, kvInputBase + (j - kvCacheCount) * DH4 + d);
+                    s_kv32[c * SHMEM_STRIDE + d] = v;
+                }
+            }
+        }
+    }
+}
 
 // Tile-local row -> (query head, query token); rows past the valid range are
 // zero-filled / skipped. Non-packed: rows are Q tokens of head wgY. Packed:
@@ -294,8 +370,32 @@ void main()
             }
         }
     }
-    // Tkv > Tq: the rows past the grid's own, a whole grid of tiles apart.
-    if (Tkv > Tq && kvCaching != 0u && split == 0u && (packed || wgY % groupSize == 0u))
+    // Tkv > Tq: the rows past the grid's own, written by every split's Q tiles (splitsAppendExtraKv) or
+    // by split 0's.
+    if (splitsAppendExtraKv != 0u)
+    {
+        if (Tkv > Tq && kvCaching != 0u && (packed || wgY % groupSize == 0u))
+        {
+            const uint tileRows = packed ? 1u : wgRows;
+            const uint gridRows = packed ? Tq : (Tq + wgRows - 1u) / wgRows * wgRows;
+            const uint writers  = gl_NumWorkGroups.x;   // this head's Q tiles x splits
+            for (uint first = gridRows + gl_WorkGroupID.x * tileRows; first < Tkv; first += writers * tileRows)
+            {
+                for (uint idx = tid; idx < tileRows * DH4; idx += wgSize)
+                {
+                    uint tok = first + idx / DH4, d = idx % DH4;
+                    if (tok < Tkv)
+                    {
+                        uint src = kvInputBase + tok * DH4 + d;
+                        uint dst = kvCacheBase + cacheRow(kvCacheCount + tok) * DH4 + d;
+                        copyKToCache(dst, src);
+                        copyVToCache(dst, src);
+                    }
+                }
+            }
+        }
+    }
+    else if (Tkv > Tq && kvCaching != 0u && split == 0u && (packed || wgY % groupSize == 0u))
     {
         const uint tileRows = packed ? 1u : wgRows;
         const uint gridRows = packed ? Tq : (Tq + wgRows - 1u) / wgRows * wgRows;
@@ -341,9 +441,25 @@ void main()
         // host: the command buffer outlives the cache length it was recorded at.
         const uint lastRowTok = packed ? qTile : min(Tq, qTile * wgRows + wgRows) - 1u;
         const uint tileEnd   = kvCacheCount + keyEnd(lastRowTok);
-        const uint splitSpan = (((tileEnd + kCount - 1u) / kCount) + wgKv - 1u) & ~(wgKv - 1u);
-        const uint spanStart = min(split * splitSpan, tileEnd);
+        const uint lo        = spanOrigin(ROW_TOK(0u));   // spanned sweeps cut their splits from the span's start
+        const uint splitSpan = ((((tileEnd - lo) + kCount - 1u) / kCount) + wgKv - 1u) & ~(wgKv - 1u);
+        const uint spanStart = min(lo + split * splitSpan, tileEnd);
         const uint sweepEnd  = min(tileEnd, spanStart + splitSpan);
+
+        // skipEmptySplits: a span with no keys marks its partial slots empty (m = -1e30, l = -1) and
+        // leaves. The busy splits are a prefix that the reduce folds alone. Workgroup-uniform; the
+        // barriers left are all past it.
+        if (skipEmptySplits != 0u && spanStart >= sweepEnd)
+        {
+            for (uint row = tid; row < wgRows; row += wgSize)
+                if (ROW_VALID(row))
+                {
+                    const uint rowIdx = outRow(ROW_TOK(row), ROW_HEAD(row));
+                    partialML[(rowIdx * kCount + split) * 2u]      = -1e30;
+                    partialML[(rowIdx * kCount + split) * 2u + 1u] = -1.0;
+                }
+            return;
+        }
 
         // Spanned sweeps start at the bound of the tile's OLDEST row, so the
         // start stays workgroup-uniform (the tile loop carries barriers) and no
@@ -379,67 +495,11 @@ void main()
             // takes the per-element path.
             const bool fullCache = jBase + wgKv <= kvCacheCount;
             const bool fullInput = jBase >= kvCacheCount;
-            // (a) K tile to shared (optional): full tiles copy from one hoisted
-            // source, the boundary tile selects/zero-fills per element. Keep the
-            // `idx = idx0 + tid` idiom ([[unroll]] batching; the Q/append loops
-            // above intentionally keep the runtime-bound form).
+            // (a) K tile to shared (optional; stageKvTile).
             if (shmemStaging != 0u)
             {
                 barrier();   // previous tile's V reads done with s_kv
-                if (fullCache)
-                {
-                    [[unroll]] for (uint idx0 = 0u; idx0 < wgKv * DH4; idx0 += wgSize)
-                    {
-                        uint idx = idx0 + tid;
-                        if (idx0 + wgSize <= wgKv * DH4 || idx < wgKv * DH4)
-                        {
-                            uint c = idx / DH4, d = idx % DH4;
-                            uint g = cacheBase + jBase * DH4 + idx;
-                            if (stagingF16 != 0u) s_kv16[c * SHMEM_STRIDE + d] = readKCache4h(g);
-                            else s_kv32[c * SHMEM_STRIDE + d] = readKCache4(g);
-                        }
-                    }
-                }
-                else if (fullInput)
-                {
-                    [[unroll]] for (uint idx0 = 0u; idx0 < wgKv * DH4; idx0 += wgSize)
-                    {
-                        uint idx = idx0 + tid;
-                        if (idx0 + wgSize <= wgKv * DH4 || idx < wgKv * DH4)
-                        {
-                            uint c = idx / DH4, d = idx % DH4;
-                            uint g = kvInputBase + (min(jBase + c, inputEnd - 1u) - kvCacheCount) * DH4 + d;
-                            if (stagingF16 != 0u) s_kv16[c * SHMEM_STRIDE + d] = readK4h(g);
-                            else s_kv32[c * SHMEM_STRIDE + d] = readK4(g);
-                        }
-                    }
-                }
-                else
-                {
-                    [[unroll]] for (uint idx0 = 0u; idx0 < wgKv * DH4; idx0 += wgSize)
-                    {
-                        uint idx = idx0 + tid;
-                        if (idx0 + wgSize <= wgKv * DH4 || idx < wgKv * DH4)
-                        {
-                            uint c = idx / DH4, d = idx % DH4;
-                            uint j = jBase + c;
-                            if (stagingF16 != 0u)
-                            {
-                                f16vec4 v = f16vec4(0.0);
-                                if (j < kvCacheCount) v = readKCache4h(cacheBase + j * DH4 + d);
-                                else if (j < inputEnd)    v = readK4h(kvInputBase + (j - kvCacheCount) * DH4 + d);
-                                s_kv16[c * SHMEM_STRIDE + d] = v;
-                            }
-                            else
-                            {
-                                vec4 v = vec4(0.0);
-                                if (j < kvCacheCount) v = readKCache4(cacheBase + j * DH4 + d);
-                                else if (j < inputEnd)    v = readK4(kvInputBase + (j - kvCacheCount) * DH4 + d);
-                                s_kv32[c * SHMEM_STRIDE + d] = v;
-                            }
-                        }
-                    }
-                }
+                stageKvTile(false, jBase, fullCache, fullInput, inputEnd, cacheBase, kvInputBase, tid);
                 barrier();
             }
 
@@ -555,60 +615,7 @@ void main()
             if (shmemStaging != 0u)
             {
                 barrier();   // qk reads done with s_kv (K)
-                if (fullCache)
-                {
-                    [[unroll]] for (uint idx0 = 0u; idx0 < wgKv * DH4; idx0 += wgSize)
-                    {
-                        uint idx = idx0 + tid;
-                        if (idx0 + wgSize <= wgKv * DH4 || idx < wgKv * DH4)
-                        {
-                            uint c = idx / DH4, d = idx % DH4;
-                            uint g = cacheBase + jBase * DH4 + idx;
-                            if (stagingF16 != 0u) s_kv16[c * SHMEM_STRIDE + d] = readVCache4h(g);
-                            else s_kv32[c * SHMEM_STRIDE + d] = readVCache4(g);
-                        }
-                    }
-                }
-                else if (fullInput)
-                {
-                    [[unroll]] for (uint idx0 = 0u; idx0 < wgKv * DH4; idx0 += wgSize)
-                    {
-                        uint idx = idx0 + tid;
-                        if (idx0 + wgSize <= wgKv * DH4 || idx < wgKv * DH4)
-                        {
-                            uint c = idx / DH4, d = idx % DH4;
-                            uint g = kvInputBase + (min(jBase + c, inputEnd - 1u) - kvCacheCount) * DH4 + d;
-                            if (stagingF16 != 0u) s_kv16[c * SHMEM_STRIDE + d] = readV4h(g);
-                            else s_kv32[c * SHMEM_STRIDE + d] = readV4(g);
-                        }
-                    }
-                }
-                else
-                {
-                    [[unroll]] for (uint idx0 = 0u; idx0 < wgKv * DH4; idx0 += wgSize)
-                    {
-                        uint idx = idx0 + tid;
-                        if (idx0 + wgSize <= wgKv * DH4 || idx < wgKv * DH4)
-                        {
-                            uint c = idx / DH4, d = idx % DH4;
-                            uint j = jBase + c;
-                            if (stagingF16 != 0u)
-                            {
-                                f16vec4 v = f16vec4(0.0);
-                                if (j < kvCacheCount) v = readVCache4h(cacheBase + j * DH4 + d);
-                                else if (j < inputEnd)    v = readV4h(kvInputBase + (j - kvCacheCount) * DH4 + d);
-                                s_kv16[c * SHMEM_STRIDE + d] = v;
-                            }
-                            else
-                            {
-                                vec4 v = vec4(0.0);
-                                if (j < kvCacheCount) v = readVCache4(cacheBase + j * DH4 + d);
-                                else if (j < inputEnd)    v = readV4(kvInputBase + (j - kvCacheCount) * DH4 + d);
-                                s_kv32[c * SHMEM_STRIDE + d] = v;
-                            }
-                        }
-                    }
-                }
+                stageKvTile(true, jBase, fullCache, fullInput, inputEnd, cacheBase, kvInputBase, tid);
                 barrier();
             }
 
@@ -853,7 +860,8 @@ void main()
     if (kCount > 1u)
     {
         // Split partials: unnormalized acc + per-row (m, l) for the reduce
-        // pass; empty splits naturally write (m=-1e30, l=0, acc=0).
+        // pass; empty splits naturally write (m=-1e30, l=0, acc=0) (skipEmptySplits:
+        // the ones past the keys left above with l = -1).
         [[unroll]] for (uint r = 0u; r < ROWS_PER_THREAD; ++r)
         {
             uint row = rowBase + r;

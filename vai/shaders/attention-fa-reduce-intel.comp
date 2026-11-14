@@ -1,0 +1,100 @@
+/*=============================================================================
+ attention-fa-reduce-intel.comp: split-K (FlashDecoding) reduce on Intel, and
+     on devices without subgroup arithmetic (it uses none)
+     (ported from the ggml/llama.cpp Vulkan flash_attn_split_k_reduce.comp)
+
+     The reduce the Intel paths were verified with, kept apart from
+     attention-fa-reduce.comp, which the other vendors' tuning moved on.
+     Every split's acc is folded, so the FA kernels' skipEmptySplits has to
+     stay off (the host keeps it off there and asserts it).
+
+     One workgroup per (output row, head-dim block); the splits' partial
+     states (m_k, l_k, acc_k) merge as
+         mMax = max_k m_k
+         L    = sum_k exp(m_k - mMax) * l_k
+         O[d] = sum_k exp(m_k - mMax) * acc_k[d] / L
+     Empty splits carry (m=-1e30, l=0, acc=0) and contribute nothing;
+     QK_MAX_OFFSET is baked into every split's m identically, so it cancels.
+
+ mMax and L reduce through a shared tree, and exp(m - mMax) is recomputed in
+ the O loop instead of cached per split — nothing caps the split count.
+ NOTE (vs llama.cpp): ggml keeps the partials in-place in an extended dst
+ buffer; vai stores them in two temporaries with the (m, l) pair layout.
+
+ Dispatch (host): (B * Tq * Hq, ceil(Dh / blockSize), 1)
+=============================================================================*/
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_control_flow_attributes : enable
+#include "common/spec_constants.h"
+
+layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;   // = blockSize (same SpecId)
+
+layout(constant_id = 0) const uint blockSize = 32;          // = ggml BLOCK_SIZE (device subgroup size)
+layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0;  // O (output) dtype
+
+layout(set = 0, binding = 0) buffer O_BUF_F32 { float bufferO_f32[]; };   // attention O [B, Tq, Hq, Dh]
+layout(set = 0, binding = 0) buffer O_BUF_F16 { float16_t bufferO_f16[]; };
+layout(set = 0, binding = 1) buffer PO_BUF    { float partialO[];  };     // [B*Tq*Hq, kCount, Dh]
+layout(set = 0, binding = 2) buffer PML_BUF   { float partialML[]; };     // [B*Tq*Hq, kCount, (m, l)]
+
+layout(push_constant) uniform PushConstants {
+    uint Dh;
+    uint kCount;
+};
+
+void writeO(uint i, float v) { if (typeO == DTYPE_F32) bufferO_f32[i] = v; else bufferO_f16[i] = float16_t(v); }
+
+#define NEG_INF  uintBitsToFloat(0xFF800000u)
+#define FLT_MAX  uintBitsToFloat(0x7F7FFFFFu)
+
+shared float s_red[blockSize];   // = ggml tmpsh
+
+void main()
+{
+    const uint row = gl_WorkGroupID.x;   // qTok * Hq + qHead
+    const uint tid = gl_LocalInvocationID.x;
+    const uint mlBase = row * kCount * 2u;
+
+    // Row max across splits.
+    float mMax = NEG_INF;
+    for (uint k = tid; k < kCount; k += blockSize)
+        mMax = max(mMax, partialML[mlBase + k * 2u]);
+
+    s_red[tid] = mMax;
+    barrier();
+    [[unroll]] for (uint s = blockSize / 2u; s > 0u; s >>= 1u)
+    {
+        if (tid < s) { mMax = max(mMax, s_red[tid + s]); s_red[tid] = mMax; }
+        barrier();
+    }
+    mMax = s_red[0];
+    barrier();
+
+    // L = sum_k exp(m_k - mMax) * l_k.
+    float L = 0.0;
+    for (uint k = tid; k < kCount; k += blockSize)
+        L += exp(partialML[mlBase + k * 2u] - mMax) * partialML[mlBase + k * 2u + 1u];
+
+    s_red[tid] = L;
+    barrier();
+    [[unroll]] for (uint s = blockSize / 2u; s > 0u; s >>= 1u)
+    {
+        if (tid < s) { L += s_red[tid + s]; s_red[tid] = L; }
+        barrier();
+    }
+    L = s_red[0];
+    L = (L == 0.0) ? 0.0 : (1.0 / L);
+
+    // Fold the splits' acc for my head-dim column.
+    uint d = tid + gl_WorkGroupID.y * blockSize;
+    if (d < Dh)
+    {
+        float o = 0.0;
+        [[unroll]] for (uint k = 0u; k < kCount; ++k)
+            o += exp(partialML[mlBase + k * 2u] - mMax) * partialO[(row * kCount + k) * Dh + d];
+
+        writeO(row * Dh + d, clamp(o * L, -FLT_MAX, FLT_MAX));
+    }
+}

@@ -114,6 +114,21 @@ struct Net : public vai::NeuralNet
 
         causalMask = vai::createCausalMask(device(), 1);
         decoder.setCausalMask(causalMask);
+
+        // K / V reach the attention in f16 (the cache's dtype); its precision was verified on NVIDIA / AMD.
+        // Intel keeps them in Q's dtype: f16 K / V have not been tested there.
+        if (vai::node::Attention::allowsDifferentKvDtype(device()))
+        {
+            for (auto& layer : decoder.layers)
+            {
+                auto& mha = layer.mhAttn;
+                if (mha.ropeK)
+                    mha.ropeK->setODtype(runtimeCfg.kvCacheDtype, dtypeKey());
+                else
+                    mha.perK.setODtype(runtimeCfg.kvCacheDtype, dtypeKey());
+                mha.perV.setODtype(runtimeCfg.kvCacheDtype, dtypeKey());
+            }
+        }
     }
 
     uint32_t tokensSoFar_ = 0;
