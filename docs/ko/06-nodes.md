@@ -9,7 +9,7 @@
 | [Activation](#activation) | Applies an element-wise activation. | `activation.comp` |
 | [Add](#add) | element-wise addition for residual connections | `add.comp` |
 | [Argmax](#argmax) | Row-wise argmax / greedy sampling | `argmax.comp` |
-| [Attention](#attention) | fused KV cache append + causal attention (GQA), split between three kernels | `attention-fa-intel.comp`, `attention-fa-cm-intel.comp`, `attention-fa-cm.comp`, `attention-fa.comp`, `attention-fa-reduce.comp`, `attention.comp` |
+| [Attention](#attention) | fused KV cache append + causal attention (GQA), split between four paths | `attention-fa-intel.comp`, `attention-fa-cm-intel.comp`, `attention-fa-cm.comp`, `attention-fa.comp`, `attention-fa-reduce-intel.comp`, `attention-fa-reduce.comp`, `attention.comp` |
 | [Concat](#concat) | join inputs along one axis | `concat.comp` |
 | [Convolution](#convolution) | 2D convolution with device-selected direct, implicit, or Winograd plans | `conv-k1s1-gemm-cm.comp`, `conv-k1s1-gemm.comp`, `conv-k3s2-gemm-cm.comp`, `conv-k3s1-implicit-gemm-cm.comp`, `conv-k3s1-implicit-gemm.comp`, `conv-implicit-gemm.comp`, `conv-implicit-gemm-cm.comp`, `conv-k3s2-gemm.comp`, `cm-transform.comp`, `conv-k3s1-winograd-filter-transform.comp`, `conv-k3s1-winograd-input.comp`, `conv-k3s1-winograd-output.comp`, `bn-reduce.comp`, `conv-k3s1-winograd-gemm.comp`, `conv-k3s1-winograd-gemm-cm.comp` |
 | [CyclicTableReader](#cyclictablereader) | read successive table rows, wrapping at the end | `cyclic-table-reader.comp` |
@@ -134,7 +134,7 @@ in0[m, :]. Output elements are raw uint32 values, not fp32 numeric values.
 
 ## Attention
 
-fused KV cache append + causal attention (GQA), split between three kernels
+fused KV cache append + causal attention (GQA), split between four paths
 
 소스: [`vai/nodes/attention.h`](../../vai/nodes/attention.h)
 
@@ -174,18 +174,23 @@ so every count below stays per-sequence.
 
 Q, K, V arrive as three separate buffers (so callers can transform Q/K but
 not V in between — e.g. RoPE). Supports GQA (numKVHeads < numQHeads).
+Q and the K / V inputs may differ in dtype (typeI / typeKV): a net may
+feed K / V in the cache dtype (llama3 / gemma3 do). On Intel K / V must
+come in Q's dtype (asserted).
 
 - coopmat FA (attention-fa-cm): subgroup-MMA flash attention,
-fixed 16x64 tile; prefill and GQA-packed decode on cm-capable devices.
+fixed 16x64 tile; prefill and GQA-packed decode on cm-capable devices,
+and the only FA tile past Dh 256 (384 / 512 on NVIDIA / AMD).
 - scalar FA (attention-fa): flash attention with per-(shape,
-vendor) tuned tiles; everything the cm gates reject.
+vendor) tuned tiles, Dh <= 256; everything the cm gates reject.
 - Intel FA (attention-fa-intel): Intel parts without a coopmat path;
 a 16-row tile packs one KV group's heads, subgroup-broadcast products.
 - naive (attention): the unconditional fallback — unfamiliar
 devices degrade instead of crashing. See supportsFlashAttention().
 
 Intel's coopmat tiles (Xe2 / Xe3) run attention-fa-cm-intel, the kernel
-Intel was verified with; attention-fa-cm moved on for the other vendors.
+Intel was verified with, under the tuning it was verified with; the other
+vendors' tuning moved attention-fa-cm on.
 
 The path and tuning are selected per (shape, device) in prepare(); a tuning
 change re-requests the pipeline from the pool. Every path leaves the KV
@@ -209,18 +214,23 @@ reaches the keys up to its own mask end shifted by Tkv - Tq (e.g. a decoder
 over its encoder's output, Tq queries on Tkv keys).
 With a cache, K / V may stay unwired (Tkv = 0): the dispatch attends the
 cache alone and appends nothing, and the model keeps the counter at the
-rows held.
+rows held (prepare() asserts it is not 0, except on Intel: an empty cache
+leaves no key).
 
 No mask (setCausalMask never called) binds the mask null: every query
 attends every key it reaches.
 
-Split-K (decode): when the grid would underfill the GPU, the cache sweep is
-split into kCount segments accumulating partials (partialO/partialML) that
-a second pass (attention-fa-reduce) folds with the online-
-softmax merge. kCount is the dispatch grid, so it holds for the whole
-recording and is derived from occupancy alone; where the segments fall
-follows the cache, which grows under a recording, so the kernel derives that
-from kvCacheCount per forward.
+Split-K: when the grid would underfill the GPU, the keys a tile reaches (the
+cache and the new rows) are cut into kCount spans accumulating partials
+(partialO/partialML) that a second pass (attention-fa-reduce;
+attention-fa-reduce-intel on Intel or without subgroup arithmetic) folds with
+the online-softmax merge.
+kCount is the dispatch grid, so it holds for the whole recording: the
+vendor's tuner takes it from the grid's occupancy, the cache capacity and
+the keys prepare() sees. Where the spans fall follows the cache, which grows
+under a recording, so the kernel derives that from kvCacheCount per forward.
+The coopmat kernel's appendBeforeSweep cuts the cache alone and leaves the
+new token to the last split.
 
 **커널**
 
@@ -228,6 +238,7 @@ from kvCacheCount per forward.
 - `vai/shaders/attention-fa-cm-intel.comp`
 - `vai/shaders/attention-fa-cm.comp`
 - `vai/shaders/attention-fa.comp`
+- `vai/shaders/attention-fa-reduce-intel.comp`
 - `vai/shaders/attention-fa-reduce.comp`
 - `vai/shaders/attention.comp`
 

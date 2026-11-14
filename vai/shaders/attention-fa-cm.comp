@@ -2,41 +2,39 @@
  attention-fa-cm.comp: flash-attention cooperative-matrix path
      (GEMM structure ported from the ggml/llama.cpp Vulkan flash_attn_cm1.comp)
 
-     Shares the scalar FA kernel's frame — token-major O [B, Tq, Hq, Dh], unified
-     global-coordinate KV sweep, fused append, counter causality — with the
-     Q·K / P·V inner products as 16x16x16 subgroup coopMatMulAdd. Covers
-     prefill and GQA-packed small-batch decode, with split-K.
+     The scalar FA kernel's frame (token-major O [B, Tq, Hq, Dh], one
+     global-coordinate KV sweep, fused append, counter causality) with the Q.K
+     and P.V products as 16x16x16 subgroup coopMatMulAdd. Prefill and
+     GQA-packed small-batch decode, with split-K.
 
- Decomposition (fixed: wgRows = 16, wgKv = 64, 4 subgroups). Per tile:
-   GEMM1   subgroup sg owns KV columns [sg*16, +16): S^T = K * Q^T (K the A
-           operand as stored, Q^T by a ColumnMajor load). S and P live
-           TRANSPOSED in shared ([Bc][Br/4]) so the softmax exchange moves
-           whole vec4s.
-   softmax subgroup sg owns Q rows [sg*4, +4): exact row max per tile
-           (subgroupMax), online rescale, P staged to shared as f16.
-   GEMM2   subgroup sg owns head-dim chunks {sg, sg+4, ...}: PV = P * V,
-           f32 accumulate and drain through s_s (= upstream f32acc O_TYPE),
-           pulled into acc registers with the row rescale (accF16).
+ Per tile (wgRows = 16, wgKv = 64, 4 subgroups):
+   GEMM1   subgroup sg owns KV columns [sg*16, +16): S^T = K * Q^T. S and P
+           live transposed in shared ([Bc][Br/4]), so the softmax moves vec4s.
+   softmax subgroup sg owns Q rows [sg*4, +4): row max per tile and online
+           rescale, in log2 units; P staged to shared as f16.
+   GEMM2   subgroup sg owns head-dim chunks {sg, sg+4, ...}: P * V in f32,
+           drained through s_s into the acc registers with the row rescale
+           (pvDrainParts: unstaged, one head-dim part at a time).
+           persistentOAcc keeps O in the coopmat accumulators across tiles
+           instead, rescaled only when a row max jumps.
 
- K/V staging follows the host vendor policy (shmemStaging). Staged pipelines
- copy full tiles, in KV_PARTS head-dim parts, from one hoisted source; only
- the boundary tile selects/zero-fills per element. Unstaged pipelines
- coopMatLoad f16 tiles straight from global (f32-source and padded-Dh tiles
- stage instead) and stage the boundary/tail tile, in the small SMALL_KV buffer
- where that holds (Dh % 16 == 0, no appendBeforeSweep). Excluded positions
- (segment end / causal) hold -inf in S: exp gives exact 0.
+ K/V staging (shmemStaging): staged pipelines copy full tiles in KV_PARTS
+ head-dim parts of 128 dims or stagedPartDims (16-byte loads with kvWideLoads; prefetchV issues the V loads
+ before GEMM1) and select / zero-fill only the boundary tile. Unstaged pipelines
+ coopMatLoad f16 tiles straight from global (f32 sources and padded Dh stage;
+ directLoadPaddedDh loads padded input tiles direct) and stage the boundary tile, in
+ SMALL_KV where it fits. Excluded positions
+ hold -inf in S, so exp gives exact 0.
 
- Requirements (host-gated): 16x16x16 f16/f16 subgroup coopmat shapes with
- f32 (GEMM1) and f16 (GEMM2) accumulators — no f16-acc shape, no cm path, as
- upstream (+ the ggmlCoopmatAllowedAttention vendor screen and the Turing
- demotion); shared memory per ggmlFACmShmemSupport; effective rows > 1;
- packed mode needs gqaRatio <= wgRows; wgSize == 4 * sgSize (forced).
+ Split-K: spans of the keys the tile reaches, derived from kvCacheCount (the
+ cache grows under one recording); with skipEmptySplits a split with no keys
+ leaves early. appendBeforeSweep keeps the new token on the last split, which
+ appends it and reads it back; the cache's last partial tile goes with it, so
+ the other splits sweep whole tiles alone and none reads a row being appended.
 
- Split-K spans cut the keys the tile reaches and are derived here from
- kvCacheCount (see the scalar kernel): the host cannot supply them, as the
- cache grows under one recording. appendBeforeSweep keeps the new token on
- the LAST split, which appends it and reads it back: there the spans cut the
- cache and the last one runs on through the new keys.
+ A tile that runs past the end of its one source (the tail) is staged like a
+ whole one: the rows past the end load the last valid row again, and the
+ exclusion compare, which every tail takes, leaves them -inf in S and 0 in P.
 
  The mask's span bounds a query from below (keyStart, a sliding window); the
  bound joins the exclusion compare and lifts the sweep's start, and a ring
@@ -44,9 +42,14 @@
  the scalar kernel).
 
  The K / V inputs carry Tkv rows (0 = the cache alone), aligned with the Tq
- queries at their ends; Tkv > Tq rows append a grid of tiles apart (see the
- scalar kernel). A tile all of a subgroup's rows see whole skips the per-row
- exclusion; only the tiles that cut a row's range compare per element.
+ queries at their ends; the rows past the grid's own are appended by every
+ split (splitsAppendExtraKv). A tile that every row of a subgroup sees whole
+ skips the per-row exclusion.
+
+ Requirements (host-gated, coopmatFlashAttentionTile): 16x16x16 f16 subgroup
+ coopmat shapes with both f32 and f16 accumulators; shared memory per
+ tileFitsSharedMemory; more than one row up to Dh 256; packed mode needs gqaRatio <= wgRows;
+ wgSize == 4 * sgSize (forced).
 
  Dispatch (host): (ceil(Tq / wgRows) * kCount, Hq, B);
                   GQA-packed: (Tq * kCount, Hkv, B)
@@ -63,8 +66,6 @@
 #extension GL_KHR_cooperative_matrix : require
 #include "common/spec_constants.h"
 
-#define HOIST 0
-
 layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;   // = wgSize (same SpecId)
 
 layout(constant_id = 0) const uint wgSize       = 128;  // threads per workgroup (= 4 * sgSize)
@@ -72,16 +73,25 @@ layout(constant_id = 1) const uint wgRows       = 16;   // Q rows per workgroup 
 layout(constant_id = 2) const uint wgKv         = 64;   // KV columns per tile (= 4 * MAT)
 layout(constant_id = 3) const uint Dh           = 64;   // head dim
 layout(constant_id = 6) const uint sgSize       = 32;   // device subgroup size (forced on the pipeline)
-layout(constant_id = 7) const uint shmemStaging = 0;    // stage K/V tiles through shared f16 (NVIDIA; = upstream SHMEM_STAGING)
-layout(constant_id = 10) const uint accF16      = 0;    // tile-to-tile O accumulator registers in f16 (= upstream O_TYPE Of[]; the rescale+drain runs f16 too)
+layout(constant_id = 7) const uint shmemStaging = 0;    // stage K/V tiles through shared f16 (the vendor's choice; = upstream SHMEM_STAGING)
 // appendBeforeSweep: the sweep reads the CACHE as its single source (the last
 // split appends first, memoryBarrierBuffer for visibility) — tile classes
 // collapse to full-vs-tail, folding the boundary/full-input code out.
 layout(constant_id = 11) const uint appendBeforeSweep  = 0;
-layout(constant_id = 12) const uint kvCacheRing = 0;   // 1: the cache keeps the last Tmax positions, p at row p % Tmax
-layout(constant_id = 13) const uint typeI      = 0;    // Q / K / V input dtype
-layout(constant_id = 14) const uint typeCache  = 0;    // K / V cache dtype
-layout(constant_id = 15) const uint kvCaching  = 1;    // 0: skip the append; the cache bindings are null
+layout(constant_id = 12) const uint kvCacheRing = 0;        // 1: the cache keeps the last Tmax positions, p at row p % Tmax
+layout(constant_id = 13) const uint typeI      = 0;         // Q input dtype
+layout(constant_id = 14) const uint typeCache  = 0;         // K / V cache dtype
+layout(constant_id = 15) const uint kvCaching  = 1;         // 0: skip the append; the cache bindings are null
+layout(constant_id = 16) const uint typeKV     = 0;         // K / V input dtype
+layout(constant_id = 17) const uint skipEmptySplits = 0;    // a split with no keys marks its partial empty and returns
+layout(constant_id = 18) const uint persistentOAcc = 0;     // staged, f32 O: O stays in the coopmat accumulators across key tiles
+layout(constant_id = 19) const uint kvWideLoads = 0;        // staged: one-source f16 K/V tiles go to shared 16 bytes per load (a uvec4), not 8
+layout(constant_id = 21) const uint prefetchV = 0;          // kvWideLoads: a full f16 tile's V part 0 loads before GEMM1
+layout(constant_id = 22) const uint splitsAppendExtraKv = 0;   // every split's workgroups append the K / V rows past the grid's own (Tkv > Tq)
+layout(constant_id = 24) const uint pvDrainParts = 0;       // unstaged: P.V drains through s_s in this many head-dim parts (0 / 1: whole)
+layout(constant_id = 25) const uint directLoadPaddedDh = 0; // unstaged, Dh % 16 != 0: full f16 input tiles load K / V direct; the pad past Dh reads the next row (x Q's zero pad)
+layout(constant_id = 28) const uint smallKvVChunks = 0;     // unstaged: V head-dim chunks the small K/V buffer (SMALL_KV) holds per GEMM2 pass (0: one per subgroup)
+layout(constant_id = 29) const uint stagedPartDims = 0;     // staged: head dims per K / V part (0: 128)
 layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0;  // O (output) dtype
 
 // All indices below are in vec4 units (Dh % 4 == 0 is host-guaranteed).
@@ -105,6 +115,11 @@ layout(set = 0, binding = 5) readonly buffer VCACHE_BUF_F32 { vec4 bufferVCache_
 layout(set = 0, binding = 5) readonly buffer VCACHE_BUF_F16 { f16vec4 bufferVCache_f16[]; };
 layout(set = 0, binding = 5) writeonly buffer VCACHE_W_F32  { vec4 bufferVCacheW_f32[]; };
 layout(set = 0, binding = 5) writeonly buffer VCACHE_W_F16  { f16vec4 bufferVCacheW_f16[]; };
+// 16-byte views of the f16 K/V sources (kvWideLoads).
+layout(set = 0, binding = 2) readonly buffer K_BUF_U4      { uvec4 bufferK_u4[]; };
+layout(set = 0, binding = 3) readonly buffer V_BUF_U4      { uvec4 bufferV_u4[]; };
+layout(set = 0, binding = 4) readonly buffer KCACHE_BUF_U4 { uvec4 bufferKCache_u4[]; };
+layout(set = 0, binding = 5) readonly buffer VCACHE_BUF_U4 { uvec4 bufferVCache_u4[]; };
 //////////////////////////////////////////////////////////////////////////////
 layout(set = 0, binding = 6) uniform UB { uint kvCacheCount; };
 //////////////////////////////////////////////////////////////////////////////
@@ -150,14 +165,20 @@ uint cacheRow(uint p)
 // token-major row.
 uint outRow(uint tq, uint hq) { return (gl_WorkGroupID.z * Tq + tq) * Hq + hq; }
 
+// Split origin: the first key the tile's oldest row t may read (the mask's span), aligned down to wgKv; 0 without a span.
+uint spanOrigin(uint t)
+{
+    return keyStart(keyPos(t)) & ~(wgKv - 1u);
+}
+
 vec4 readQ4(uint i) { return (typeI == DTYPE_F32) ? bufferQ_f32[i] : vec4(bufferQ_f16[i]); }
 // Direct-to-f16 staging readers: f16 sources copy without a f32 roundtrip.
-f16vec4 readK4h(uint i) { return (typeI == DTYPE_F32) ? f16vec4(bufferK_f32[i]) : bufferK_f16[i]; }
-f16vec4 readV4h(uint i) { return (typeI == DTYPE_F32) ? f16vec4(bufferV_f32[i]) : bufferV_f16[i]; }
+f16vec4 readK4h(uint i) { return (typeKV == DTYPE_F32) ? f16vec4(bufferK_f32[i]) : bufferK_f16[i]; }
+f16vec4 readV4h(uint i) { return (typeKV == DTYPE_F32) ? f16vec4(bufferV_f32[i]) : bufferV_f16[i]; }
 f16vec4 readKCache4h(uint i) { return (typeCache == DTYPE_F32) ? f16vec4(bufferKCache_f32[i]) : bufferKCache_f16[i]; }
 f16vec4 readVCache4h(uint i) { return (typeCache == DTYPE_F32) ? f16vec4(bufferVCache_f32[i]) : bufferVCache_f16[i]; }
-vec4 readK4(uint i) { return (typeI == DTYPE_F32) ? bufferK_f32[i] : vec4(bufferK_f16[i]); }
-vec4 readV4(uint i) { return (typeI == DTYPE_F32) ? bufferV_f32[i] : vec4(bufferV_f16[i]); }
+vec4 readK4(uint i) { return (typeKV == DTYPE_F32) ? bufferK_f32[i] : vec4(bufferK_f16[i]); }
+vec4 readV4(uint i) { return (typeKV == DTYPE_F32) ? bufferV_f32[i] : vec4(bufferV_f16[i]); }
 void writeO4(uint i, vec4 v) { if (typeO == DTYPE_F32) bufferO_f32[i] = v; else bufferO_f16[i] = f16vec4(v); }
 void writeKCache4(uint i, vec4 v) { if (typeCache == DTYPE_F32) bufferKCacheW_f32[i] = v; else bufferKCacheW_f16[i] = f16vec4(v); }
 void writeVCache4(uint i, vec4 v) { if (typeCache == DTYPE_F32) bufferVCacheW_f32[i] = v; else bufferVCacheW_f16[i] = f16vec4(v); }
@@ -175,43 +196,62 @@ const uint PV4_PER_LANE  = (DH4_PAD + sgSize - 1u) / sgSize;  // acc vec4 stripe
 
 // Shared staging, vec4 elements; +2 vec4 padding keeps coopMatLoad off bank conflicts.
 const uint Q_STRIDE  = DH4_PAD + 2u;   // f16vec4
-// Staged tiles take the head dim in KV_PARTS: at Dh 256 the whole K/V tile
-// outgrows the budget beside Q/S/P/PV, its halves fit (the host budget
-// mirrors this; nested selects, as glslc -O rejects && between spec constants).
-const uint KV_PARTS    = (shmemStaging != 0u) ? ((Dh == 256u) ? 2u : 1u) : 1u;
+// Staged tiles take the head dim in parts of 128 dims, or stagedPartDims (the host budget mirrors this);
+// CHUNKS_PART must be a multiple of NUM_SG.
+const uint KV_PART_DH4 = (stagedPartDims != 0u) ? stagedPartDims / 4u : 32u;
+const uint KV_PARTS    = (shmemStaging != 0u) ? ((DH4_PAD > KV_PART_DH4) ? DH4_PAD / KV_PART_DH4 : 1u) : 1u;
 const uint DH4_PART    = DH4_PAD / KV_PARTS;
 const uint CHUNKS_PART = DH_CHUNKS / KV_PARTS;
-const uint KV_STRIDE = DH4_PART + 2u;  // f16vec4
+const uint KV_STRIDE   = DH4_PART + 2u;  // f16vec4
+// nested selects: glslc -O rejects && between spec-constant terms
+const bool WIDE_KV      = (kvWideLoads != 0u) ? ((DH4_PAD == DH4) ? ((DH4 % 2u == 0u) ? (DH4_PART % 2u == 0u) : false) : false) : false;
 // S and P are held TRANSPOSED ([Bc][Br/4]) so one vec4 covers four Q rows.
-// +2 pad only on staged (NVIDIA) decode: it eats bank conflicts there,
-// while unstaged (RDNA) decode gains more from the LDS the pad would
-// burn. Prefill was always unpadded.
+// +2 pad only on the staged append-before-sweep decode: it eats bank
+// conflicts there, while an unstaged tile gains more from the shared memory
+// the pad would take. Prefill was always unpadded.
 const uint SP_PAD   = (appendBeforeSweep != 0u && shmemStaging != 0u) ? 2u : 0u;
 const uint S_STRIDE = wgRows / 4u + SP_PAD;   // vec4 (f32), row-packed
 const uint P_STRIDE = wgRows / 4u + SP_PAD;   // f16vec4, row-packed
 // GEMM2's f32 P.V drains through s_s (S^T is dead once P^T is written), one
 // head-dim part at a time: no tile's partial sum is rounded to f16 on the way
 // to the f32 accumulator registers (precision rule: >= llama.cpp cm1 / cm2).
-const uint PV_STRIDE = DH4_PART + 2u;   // vec4 (f32)
-const uint SS_SIZE   = (wgKv * S_STRIDE > wgRows * PV_STRIDE) ? wgKv * S_STRIDE : wgRows * PV_STRIDE;
+// Unstaged pipelines can drain in parts too (pvDrainParts), so s_s holds one part; CHUNKS_DRAIN must be a
+// multiple of NUM_SG (the host's part counts keep it so). Staged pipelines drain per K / V part.
+const uint DRAIN_PARTS  = (shmemStaging != 0u) ? KV_PARTS : ((pvDrainParts > 1u) ? pvDrainParts : 1u);
+const uint DH4_DRAIN    = DH4_PAD / DRAIN_PARTS;
+const uint CHUNKS_DRAIN = DH_CHUNKS / DRAIN_PARTS;
+const uint PV_STRIDE = DH4_DRAIN + 2u;   // vec4 (f32)
+const uint SS_DRAIN  = (wgKv * S_STRIDE > wgRows * PV_STRIDE) ? wgKv * S_STRIDE : wgRows * PV_STRIDE;
+const bool PERSISTENT_O = (persistentOAcc != 0u) && (shmemStaging != 0u);
+const uint OC_PER_SG = (DH_CHUNKS + NUM_SG - 1u) / NUM_SG;    // PERSISTENT_O: O chunks a subgroup owns
+const uint CORR_BASE = SS_DRAIN;                              // PERSISTENT_O: per-row corr, one vec4 per four rows
+const uint SS_SIZE   = PERSISTENT_O ? SS_DRAIN + wgRows / 4u : SS_DRAIN;
+const float RESCALE_LOG2 = 8.0;   // PERSISTENT_O: P stays <= 2^(8 - 3) = 32 in f16
 
 // Small unstaged staging (= ggml SHMEM_STAGING=0 kvsh): when full tiles
 // direct-load, s_kv only serves the boundary/tail tile and shrinks to the
 // union of one 16-wide K chunk and one GEMM2 V pass. appendBeforeSweep stays
 // excluded: the chunked boundary path in that binary re-creates the
-// class-presence penalty it removes.
+// class-presence penalty it removes. A V pass holds VP_CHUNKS head-dim chunks:
+// one per subgroup, or smallKvVChunks (>= 2: the K chunk has to fit), which
+// leaves the other subgroups idle in the boundary tile's GEMM2.
 const bool SMALL_KV  = (shmemStaging == 0u) && (DH4_PAD == DH4) && (appendBeforeSweep == 0u);
 const uint KB_STRIDE = MAT / 4u + 2u;        // f16vec4 (= upstream MatBr/4 + 2)
-const uint VS_STRIDE = NUM_SG * MAT / 4u;    // f16vec4 (= upstream v_cols, no pad)
+const uint VP_CHUNKS = (smallKvVChunks != 0u) ? smallKvVChunks : NUM_SG;
+const uint VS_STRIDE = VP_CHUNKS * MAT / 4u; // f16vec4 (= upstream v_cols, no pad)
 
 #define NEG_INF uintBitsToFloat(0xFF800000u)
-const float QK_MAX_OFFSET = 3.0 * 0.6931;   // ~ln(8) (= ggml FATTN_KQ_MAX_OFFSET)
+// The softmax runs in log2 units (log2(e) folds into the S scale, one exp2 per exp); the split
+// partials leave in natural units (m * ln 2).
+const float LOG2E = 1.4426950408889634;
+const float LN2   = 0.6931471805599453;
+const float QK_MAX_OFFSET = 3.0;   // log2(8) (= ggml FATTN_KQ_MAX_OFFSET)
 
 shared f16vec4 s_q[wgRows * Q_STRIDE];      // Q tile, unscaled (scale applied to S)
 shared f16vec4 s_kv[SMALL_KV ? wgKv * VS_STRIDE : wgKv * KV_STRIDE];   // one head-dim part of the K, then V tile (SMALL_KV: boundary-only chunks), zero-filled
 // S is fp32 fixed (= llama.cpp production, PREC_F32 always)
 shared vec4 s_s[SS_SIZE];                   // S^T, then the P.V drain (f32)
-shared f16vec4 s_p[wgKv * P_STRIDE];        // P^T = exp(S - m) exchange
+shared f16vec4 s_p[wgKv * P_STRIDE];        // P^T = exp2(S * log2(e) - m) exchange
 
 // Direct global coopMatLoad for unstaged full f16 tiles; f32-source tiles
 // stage instead (an f32 A/B coopmat is a shape no device reports).
@@ -260,7 +300,7 @@ void stageKChunkSmall(uint jBase, uint dc, uint inputEnd,
     }
 }
 
-// Same for V: all NUM_SG head-dim chunks of one GEMM2 pass.
+// Same for V: the VP_CHUNKS head-dim chunks of one GEMM2 pass.
 void stageVPassSmall(uint jBase, uint pass, uint inputEnd,
                      uint kvCacheBase, uint kvInputBase, uint tid)
 {
@@ -301,81 +341,86 @@ void stageVPassSmall(uint jBase, uint pass, uint inputEnd,
         [[unroll]] for (uint k = 0u; k < PV4_PER_LANE; ++k)                                        \
         {                                                                                          \
             uint d = k * sgSize + lane;                                                            \
-            if (d < DH4 && d >= (part) * DH4_PART && d < (part) * DH4_PART + DH4_PART)             \
+            if (d < DH4 && d >= (part) * DH4_DRAIN && d < (part) * DH4_DRAIN + DH4_DRAIN)          \
             {                                                                                      \
-                if (accF16 != 0u)                                                                  \
-                    acc16[r * PV4_PER_LANE + k] = acc16[r * PV4_PER_LANE + k] * float16_t(corr[r]) \
-                        + f16vec4(s_s[(rowBase + r) * PV_STRIDE + d - (part) * DH4_PART]);         \
-                else                                                                               \
-                    acc32[r * PV4_PER_LANE + k] = acc32[r * PV4_PER_LANE + k] * corr[r]            \
-                        + s_s[(rowBase + r) * PV_STRIDE + d - (part) * DH4_PART];                  \
+                acc32[r * PV4_PER_LANE + k] = acc32[r * PV4_PER_LANE + k] * corr[r]                \
+                    + s_s[(rowBase + r) * PV_STRIDE + d - (part) * DH4_DRAIN];                     \
             }                                                                                      \
         }
 
+f16vec4 halfLo(uvec4 u) { return f16vec4(unpackFloat2x16(u.x), unpackFloat2x16(u.y)); }
+f16vec4 halfHi(uvec4 u) { return f16vec4(unpackFloat2x16(u.z), unpackFloat2x16(u.w)); }
 
-// K tile, head-dim part p -> s_kv: full tiles copy from one hoisted source,
-// the boundary tile selects/zero-fills per element.
-void stageKPart(uint jBase, uint p, bool fullCache, bool fullInput, uint inputEnd,
-                uint kvCacheBase, uint kvInputBase, uint tid)
+// WIDE_KV: one full f16 tile part in 16-byte loads (uvec4 index = f16vec4 index / 2).
+// which: 0 K cache, 1 K input, 2 V cache, 3 V input.
+const uint WIDE_PER_THREAD = (wgKv * DH4_PART / 2u + wgSize - 1u) / wgSize;   // uvec4 per thread per tile part
+const bool PREFETCH_V = (prefetchV != 0u) ? WIDE_KV : false;
+
+// prefetchV: the load half of stageWide (part 0) into registers, and the store half.
+void loadWide(uint which, uint base, uint tid, uint rows, out uvec4 r[WIDE_PER_THREAD])
 {
-    if (fullCache)
+    [[unroll]] for (uint n = 0u; n < WIDE_PER_THREAD; ++n)
     {
-        [[unroll]] for (uint idx0 = 0u; idx0 < wgKv * DH4_PART; idx0 += wgSize)
+        uint idx = n * wgSize + tid;
+        if (idx < wgKv * DH4_PART / 2u)
         {
-            uint idx = idx0 + tid;
-            if (idx0 + wgSize <= wgKv * DH4_PART || idx < wgKv * DH4_PART)
-            {
-                uint c = idx / DH4_PART, dp = idx % DH4_PART, d = p * DH4_PART + dp;
-                s_kv[c * KV_STRIDE + dp] = (DH4_PAD == DH4 || d < DH4)
-                    ? readKCache4h(kvCacheBase + (jBase + c) * DH4 + d) : f16vec4(0.0);
-            }
+            uint c = idx / (DH4_PART / 2u), dp = 2u * (idx % (DH4_PART / 2u));
+            uint i = (base + min(c, rows - 1u) * DH4 + dp) / 2u;
+            r[n] = (which == 2u) ? bufferVCache_u4[i] : bufferV_u4[i];
         }
     }
-    else if (fullInput)
+}
+void storeWide(uint tid, uvec4 r[WIDE_PER_THREAD])
+{
+    [[unroll]] for (uint n = 0u; n < WIDE_PER_THREAD; ++n)
     {
-        [[unroll]] for (uint idx0 = 0u; idx0 < wgKv * DH4_PART; idx0 += wgSize)
+        uint idx = n * wgSize + tid;
+        if (idx < wgKv * DH4_PART / 2u)
         {
-            uint idx = idx0 + tid;
-            if (idx0 + wgSize <= wgKv * DH4_PART || idx < wgKv * DH4_PART)
-            {
-                uint c = idx / DH4_PART, dp = idx % DH4_PART, d = p * DH4_PART + dp;
-                s_kv[c * KV_STRIDE + dp] = (DH4_PAD == DH4 || d < DH4)
-                    ? readK4h(kvInputBase + (jBase - kvCacheCount + c) * DH4 + d)
-                    : f16vec4(0.0);
-            }
-        }
-    }
-    else
-    {
-        [[unroll]] for (uint idx0 = 0u; idx0 < wgKv * DH4_PART; idx0 += wgSize)
-        {
-            uint idx = idx0 + tid;
-            if (idx0 + wgSize <= wgKv * DH4_PART || idx < wgKv * DH4_PART)
-            {
-                uint c = idx / DH4_PART, dp = idx % DH4_PART, d = p * DH4_PART + dp;
-                uint j = jBase + c;
-                f16vec4 v = f16vec4(0.0);
-                if (DH4_PAD == DH4 || d < DH4)
-                {
-                    // appendBeforeSweep: single-source guarded tail (no cache/input select).
-                    if (appendBeforeSweep != 0u)
-                    {
-                        if (j < inputEnd) v = readKCache4h(kvCacheBase + j * DH4 + d);
-                    }
-                    else if (j < kvCacheCount) v = readKCache4h(kvCacheBase + j * DH4 + d);
-                    else if (j < inputEnd)         v = readK4h(kvInputBase + (j - kvCacheCount) * DH4 + d);
-                }
-                s_kv[c * KV_STRIDE + dp] = v;
-            }
+            uint c = idx / (DH4_PART / 2u), dp = 2u * (idx % (DH4_PART / 2u));
+            s_kv[c * KV_STRIDE + dp]      = halfLo(r[n]);
+            s_kv[c * KV_STRIDE + dp + 1u] = halfHi(r[n]);
         }
     }
 }
 
-// Same for V.
-void stageVPart(uint jBase, uint p, bool fullCache, bool fullInput, uint inputEnd,
-                uint kvCacheBase, uint kvInputBase, uint tid)
+void stageWide(uint which, uint base, uint p, uint tid, uint rows)
 {
-    if (fullCache)
+    [[unroll]] for (uint idx0 = 0u; idx0 < wgKv * DH4_PART / 2u; idx0 += wgSize)
+    {
+        uint idx = idx0 + tid;
+        if (idx0 + wgSize <= wgKv * DH4_PART / 2u || idx < wgKv * DH4_PART / 2u)
+        {
+            uint c = idx / (DH4_PART / 2u), dp = 2u * (idx % (DH4_PART / 2u)), d = p * DH4_PART + dp;
+            uint i = (base + min(c, rows - 1u) * DH4 + d) / 2u;
+            uvec4 u = (which == 0u) ? bufferKCache_u4[i] : (which == 1u) ? bufferK_u4[i]
+                    : (which == 2u) ? bufferVCache_u4[i] : bufferV_u4[i];
+            s_kv[c * KV_STRIDE + dp]      = halfLo(u);
+            s_kv[c * KV_STRIDE + dp + 1u] = halfHi(u);
+        }
+    }
+}
+
+// The K or V (isV) source of the staging below; isV is a constant at every call.
+f16vec4 readKvCache4h(bool isV, uint i) { return isV ? readVCache4h(i) : readKCache4h(i); }
+f16vec4 readKv4h(bool isV, uint i)      { return isV ? readV4h(i) : readK4h(i); }
+
+// K or V tile, head-dim part p -> s_kv: a tile with one source (cacheTile, inputTile) copies from it, its
+// rows clamped to the valid ones (see the header); the boundary tile, cached keys and new tokens in one,
+// selects per element.
+void stageKvPart(bool isV, uint jBase, uint p, bool cacheTile, bool inputTile, uint inputEnd,
+                 uint kvCacheBase, uint kvInputBase, uint tid)
+{
+    const uint rows = min(wgKv, inputEnd - jBase);   // the tile's valid rows
+    if (WIDE_KV && cacheTile && typeCache != DTYPE_F32)
+    {
+        stageWide(isV ? 2u : 0u, kvCacheBase + jBase * DH4, p, tid, rows);
+    }
+    else if (WIDE_KV && inputTile && typeKV != DTYPE_F32)
+    {
+        stageWide(isV ? 3u : 1u, kvInputBase + (jBase - kvCacheCount) * DH4, p, tid, rows);
+    }
+    else if (cacheTile)
     {
         [[unroll]] for (uint idx0 = 0u; idx0 < wgKv * DH4_PART; idx0 += wgSize)
         {
@@ -384,11 +429,11 @@ void stageVPart(uint jBase, uint p, bool fullCache, bool fullInput, uint inputEn
             {
                 uint c = idx / DH4_PART, dp = idx % DH4_PART, d = p * DH4_PART + dp;
                 s_kv[c * KV_STRIDE + dp] = (DH4_PAD == DH4 || d < DH4)
-                    ? readVCache4h(kvCacheBase + (jBase + c) * DH4 + d) : f16vec4(0.0);
+                    ? readKvCache4h(isV, kvCacheBase + (jBase + min(c, rows - 1u)) * DH4 + d) : f16vec4(0.0);
             }
         }
     }
-    else if (fullInput)
+    else if (inputTile)
     {
         [[unroll]] for (uint idx0 = 0u; idx0 < wgKv * DH4_PART; idx0 += wgSize)
         {
@@ -397,7 +442,7 @@ void stageVPart(uint jBase, uint p, bool fullCache, bool fullInput, uint inputEn
             {
                 uint c = idx / DH4_PART, dp = idx % DH4_PART, d = p * DH4_PART + dp;
                 s_kv[c * KV_STRIDE + dp] = (DH4_PAD == DH4 || d < DH4)
-                    ? readV4h(kvInputBase + (jBase - kvCacheCount + c) * DH4 + d)
+                    ? readKv4h(isV, kvInputBase + (jBase - kvCacheCount + min(c, rows - 1u)) * DH4 + d)
                     : f16vec4(0.0);
             }
         }
@@ -414,13 +459,8 @@ void stageVPart(uint jBase, uint p, bool fullCache, bool fullInput, uint inputEn
                 f16vec4 v = f16vec4(0.0);
                 if (DH4_PAD == DH4 || d < DH4)
                 {
-                    // appendBeforeSweep: single-source guarded tail (see the K copy).
-                    if (appendBeforeSweep != 0u)
-                    {
-                        if (j < inputEnd) v = readVCache4h(kvCacheBase + j * DH4 + d);
-                    }
-                    else if (j < kvCacheCount) v = readVCache4h(kvCacheBase + j * DH4 + d);
-                    else if (j < inputEnd)         v = readV4h(kvInputBase + (j - kvCacheCount) * DH4 + d);
+                    if (j < kvCacheCount)  v = readKvCache4h(isV, kvCacheBase + j * DH4 + d);
+                    else if (j < inputEnd) v = readKv4h(isV, kvInputBase + (j - kvCacheCount) * DH4 + d);
                 }
                 s_kv[c * KV_STRIDE + dp] = v;
             }
@@ -497,9 +537,32 @@ void main()
             }
         }
     }
-    // Tkv > Tq (no appendBeforeSweep, which appends one token): the rows past
-    // the grid's own, a whole grid of tiles apart.
-    if (Tkv > Tq && kvCaching != 0u && split == 0u && (packed || wgY % groupSize == 0u))
+    // Tkv > Tq (no appendBeforeSweep): the rows past the grid's own, written by every split's Q tiles
+    // (splitsAppendExtraKv) or by split 0's. The sweep reads the inputs, so nothing waits on these writes.
+    if (splitsAppendExtraKv != 0u)
+    {
+        if (Tkv > Tq && kvCaching != 0u && (packed || wgY % groupSize == 0u))
+        {
+            const uint tileRows = packed ? 1u : wgRows;
+            const uint gridRows = packed ? Tq : (Tq + wgRows - 1u) / wgRows * wgRows;
+            const uint writers  = gl_NumWorkGroups.x;   // this head's Q tiles x splits
+            for (uint first = gridRows + gl_WorkGroupID.x * tileRows; first < Tkv; first += writers * tileRows)
+            {
+                for (uint idx = tid; idx < tileRows * DH4; idx += wgSize)
+                {
+                    uint tok = first + idx / DH4, d = idx % DH4;
+                    if (tok < Tkv)
+                    {
+                        uint src = kvInputBase + tok * DH4 + d;
+                        uint dst = kvCacheBase + cacheRow(kvCacheCount + tok) * DH4 + d;
+                        writeKCache4(dst, readK4(src));
+                        writeVCache4(dst, readV4(src));
+                    }
+                }
+            }
+        }
+    }
+    else if (Tkv > Tq && kvCaching != 0u && split == 0u && (packed || wgY % groupSize == 0u))
     {
         const uint tileRows = packed ? 1u : wgRows;
         const uint gridRows = packed ? Tq : (Tq + wgRows - 1u) / wgRows * wgRows;
@@ -522,37 +585,53 @@ void main()
         memoryBarrierBuffer();   // own append visible before the sweep reads it back
     barrier();   // s_q ready
 
-    // Per-thread state: my subgroup's rows x my head-dim lane stripe; m/l
-    // fp32, the tile-to-tile O accumulator follows accF16.
+    // Per-thread state: my subgroup's rows x my head-dim lane stripe, all fp32.
     float m[ROWS_PER_SG];
     float l[ROWS_PER_SG];
-    vec4    acc32[(accF16 == 0u) ? ROWS_PER_SG * PV4_PER_LANE : 1u];
-    f16vec4 acc16[(accF16 != 0u) ? ROWS_PER_SG * PV4_PER_LANE : 1u];
+    vec4  acc32[ROWS_PER_SG * PV4_PER_LANE];
     float corr[ROWS_PER_SG];
     [[unroll]] for (uint r = 0u; r < ROWS_PER_SG; ++r) { m[r] = -1e30; l[r] = 0.0; }
     [[unroll]] for (uint x = 0u; x < ROWS_PER_SG * PV4_PER_LANE; ++x)
-    {
-        if (accF16 != 0u) acc16[x] = f16vec4(0.0);
-        else acc32[x] = vec4(0.0);
-    }
+        acc32[x] = vec4(0.0);
+    // PERSISTENT_O: my head-dim chunks {sg, sg + 4, ...} of O for every tile row.
+    coopmat<float, gl_ScopeSubgroup, MAT, MAT, gl_MatrixUseAccumulator> oacc[PERSISTENT_O ? OC_PER_SG : 1u];
+    if (PERSISTENT_O)
+        [[unroll]] for (uint i = 0u; i < OC_PER_SG; ++i)
+            oacc[i] = coopmat<float, gl_ScopeSubgroup, MAT, MAT, gl_MatrixUseAccumulator>(0.0);
 
     // Unified KV sweep in global token coordinates: position j reads cache[j]
     // when j < cached, else input[j - cached]; only the boundary tile mixes
-    // sources, and the last split absorbs the new tokens into it.
+    // sources (appendBeforeSweep: the cache alone, the new token in the last split).
     {
         const uint inputEnd = kvCacheCount + Tkv;   // token count after append
 
         // Split-K: my span of the keys the tile reaches, which the tile's last
         // row bounds (keyEnd rises with the row); appendBeforeSweep spans the
-        // cache alone (see the header). The span comes from the live cache, not
+        // cache's whole tiles (see the header). The span comes from the live cache, not
         // the host: the command buffer outlives the cache length it was
         // recorded at.
         const uint lastRowTok = packed ? qTile : min(Tq, qTile * wgRows + wgRows) - 1u;
         const uint tileEnd   = kvCacheCount + keyEnd(lastRowTok);
-        const uint splitKeys = (appendBeforeSweep != 0u) ? kvCacheCount : tileEnd;
-        const uint splitSpan = (((splitKeys + kCount - 1u) / kCount) + wgKv - 1u) & ~(wgKv - 1u);
-        const uint spanStart = min(split * splitSpan, splitKeys);
+        const uint splitKeys = (appendBeforeSweep != 0u) ? kvCacheCount & ~(wgKv - 1u) : tileEnd;
+        const uint lo        = spanOrigin(ROW_TOK(0u));   // spanned sweeps cut their splits from the span's start
+        const uint splitSpan = ((((splitKeys - lo) + kCount - 1u) / kCount) + wgKv - 1u) & ~(wgKv - 1u);
+        const uint spanStart = min(lo + split * splitSpan, splitKeys);
         const uint sweepEnd  = (split == kCount - 1u) ? tileEnd : min(splitKeys, spanStart + splitSpan);
+
+        // skipEmptySplits: a span with no keys marks its partial slots empty (m = -1e30, l = -1) and
+        // leaves. The busy splits are a prefix (plus the last split with appendBeforeSweep) that the
+        // reduce folds alone. Workgroup-uniform; the barriers left are all past it.
+        if (skipEmptySplits != 0u && spanStart >= sweepEnd)
+        {
+            for (uint row = tid; row < wgRows; row += wgSize)
+                if (ROW_VALID(row))
+                {
+                    const uint rowIdx = outRow(ROW_TOK(row), ROW_HEAD(row));
+                    partialML[(rowIdx * kCount + split) * 2u]      = -1e30;
+                    partialML[(rowIdx * kCount + split) * 2u + 1u] = -1.0;
+                }
+            return;
+        }
 
         // Spanned sweeps start at the bound of the tile's OLDEST row, so the
         // start stays workgroup-uniform and no split's end moves; the spans
@@ -566,16 +645,6 @@ void main()
         // four and skips the exclusion compares.
         const uint rowsLo   = keyStart(keyPos(ROW_TOK(rowBase + 3u)));
         const uint rowsHi   = min(kvCacheCount + keyEnd(ROW_TOK(rowBase)) - 1u, sweepEnd - 1u);
-
-#if HOIST
-        uint loRow[4], hiRow[4];
-        [[unroll]] for (uint k = 0u; k < 4u; ++k)
-        {
-            uint rowTok = ROW_TOK(rowBase + k);
-            loRow[k] = keyStart(keyPos(rowTok));
-            hiRow[k] = min(kvCacheCount + keyEnd(rowTok) - 1u, sweepEnd - 1u);
-        }
-#endif
 
         [[dont_unroll]]
         for (uint jBase = jStart; jBase < sweepEnd; jBase += wgKv)
@@ -591,19 +660,37 @@ void main()
                                   <= (appendBeforeSweep != 0u ? inputEnd : kvCacheCount);
             const bool fullInput  = appendBeforeSweep == 0u
                                   && jBase >= kvCacheCount && jBase + wgKv <= inputEnd;
-            const bool stagedTile = (shmemStaging != 0u) || (DH4_PAD != DH4)
-                                  || !((fullCache && typeCache != DTYPE_F32) || (fullInput && typeI != DTYPE_F32));
+            // directLoadPaddedDh: input tiles only (a cache row past the count may be unwritten), and not the tile
+            // holding the inputs' last row: its chunk past Dh would read past the tensor, and a pooled buffer
+            // may be longer than its tensor, so those bytes are neither out of bounds nor zero.
+            const bool lastInputTile = kvHead + 1u == gl_NumWorkGroups.z * Hkv && jBase + wgKv == inputEnd;
+            const bool directLoadTile = (directLoadPaddedDh != 0u) && !fullCache && fullInput && !lastInputTile
+                                    && typeKV != DTYPE_F32;
+            const bool stagedTile = (shmemStaging != 0u) || ((DH4_PAD != DH4) && !directLoadTile)
+                                  || !((fullCache && typeCache != DTYPE_F32) || (fullInput && typeKV != DTYPE_F32));
+            // One-source tiles, whole or tail: every appendBeforeSweep tile reads the cache, a tile past the
+            // cached keys reads the new tokens.
+            const bool cacheTile  = appendBeforeSweep != 0u || fullCache;
+            const bool inputTile  = appendBeforeSweep == 0u && jBase >= kvCacheCount;
+            const uint tileRows   = min(wgKv, inputEnd - jBase);
 
             // (a) K tile, part 0 -> s_kv (the rest inside GEMM1); SMALL_KV
             // pipelines stage per chunk inside GEMM1/GEMM2 instead.
             if (stagedTile && !SMALL_KV)
             {
                 barrier();   // previous tile's s_kv and s_s reads done
-                stageKPart(jBase, 0u, fullCache, fullInput, inputEnd, cacheBase, kvInputBase, tid);
+                stageKvPart(false, jBase, 0u, cacheTile, inputTile, inputEnd, cacheBase, kvInputBase, tid);
                 barrier();
             }
             else if (!stagedTile)
                 barrier();   // previous tile's s_s reads done
+
+            // prefetchV: issue this tile's V part-0 loads now (full f16 tiles only).
+            const bool vEarlyCache = PREFETCH_V && cacheTile && typeCache != DTYPE_F32;
+            const bool vEarlyInput = PREFETCH_V && !cacheTile && inputTile && typeKV != DTYPE_F32;
+            uvec4 vpre[WIDE_PER_THREAD];
+            if (vEarlyCache)      loadWide(2u, cacheBase + jBase * DH4, tid, tileRows, vpre);
+            else if (vEarlyInput) loadWide(3u, kvInputBase + (jBase - kvCacheCount) * DH4, tid, tileRows, vpre);
 
             // (b) GEMM1: my subgroup's 16 KV rows of S^T = K * Q^T; unstaged
             // full tiles load K straight from global. fp32 accumulator (see
@@ -633,7 +720,7 @@ void main()
                             if (dc > 0u && dc % CHUNKS_PART == 0u)   // next head-dim part
                             {
                                 barrier();   // this part's reads done
-                                stageKPart(jBase, dc / CHUNKS_PART, fullCache, fullInput, inputEnd, cacheBase, kvInputBase, tid);
+                                stageKvPart(false, jBase, dc / CHUNKS_PART, cacheTile, inputTile, inputEnd, cacheBase, kvInputBase, tid);
                                 barrier();
                             }
                             coopMatLoad(A, s_kv, (sg * MAT) * KV_STRIDE + dc * (MAT / 4u) - (dc / CHUNKS_PART) * DH4_PART,
@@ -670,17 +757,13 @@ void main()
                 {
                     uint c = cl * sgSize + lane;
                     uint j = jBase + c;
-                    // scale lands here, on the f32 S values.
-                    vec4 v = s_s[c * S_STRIDE + rowVec] * scale;
+                    // scale (with log2(e)) lands here, on the f32 S values.
+                    vec4 v = s_s[c * S_STRIDE + rowVec] * (scale * LOG2E);
                     // Causality, span and range exclusion in one compare pair
                     // per row, on the tiles that cut a row's range: the sweepEnd
                     // term binds where the tile runs past my split's span.
                     if (!wholeTile)
                     {
-#if HOIST
-                        [[unroll]] for (uint k = 0u; k < 4u; ++k)
-                            v[k] = (j <= hiRow[k] && j >= loRow[k]) ? v[k] : NEG_INF;
-#else
                         [[unroll]] for (uint k = 0u; k < 4u; ++k)
                         {
                             uint rowTok = ROW_TOK(rowBase + k);
@@ -688,7 +771,6 @@ void main()
                             uint hi   = min(kvCacheCount + keyEnd(rowTok) - 1u, sweepEnd - 1u);
                             v[k] = (j <= hi && j >= lo) ? v[k] : NEG_INF;
                         }
-#endif
                     }
                     sv[cl] = v;
                     rowMax = max(rowMax, v);
@@ -698,9 +780,17 @@ void main()
                 {
                     float rm = subgroupMax(rowMax[k]) + QK_MAX_OFFSET;   // exact per tile
                     float mPrev = m[k];
-                    m[k] = max(rm, mPrev);
-                    corr[k] = exp(mPrev - m[k]);
+                    // PERSISTENT_O: keep the reference until the tile outgrows it (first
+                    // tile: mPrev = -1e30, so it moves and corr = 0).
+                    m[k] = PERSISTENT_O ? ((rm > mPrev + RESCALE_LOG2) ? rm : mPrev) : max(rm, mPrev);
+                    corr[k] = exp2(mPrev - m[k]);
                     l[k] *= corr[k];
+                }
+                if (PERSISTENT_O && lane == 0u)
+                {
+                    vec4 cvec;   // through the loop variable (spec-sized array, see mvec)
+                    [[unroll]] for (uint k = 0u; k < 4u; ++k) cvec[k] = corr[k];
+                    s_s[CORR_BASE + rowVec] = cvec;
                 }
 
                 // Built through the loop variable: glslang refuses literal
@@ -710,15 +800,17 @@ void main()
                 [[unroll]] for (uint cl = 0u; cl < COLS_PER_LANE; ++cl)
                 {
                     uint c = cl * sgSize + lane;
-                    vec4 p4 = exp(sv[cl] - mvec);   // -inf -> exact 0
+                    vec4 p4 = exp2(sv[cl] - mvec);   // -inf -> exact 0
                     [[unroll]] for (uint k = 0u; k < 4u; ++k) l[k] += p4[k];
                     s_p[c * P_STRIDE + rowVec] = f16vec4(p4);
                 }
             }
             // V tile, part 0: as (a); unstaged full tiles skip it, SMALL_KV
             // boundary tiles stage per GEMM2 pass inside (d).
-            if (stagedTile && !SMALL_KV)
-                stageVPart(jBase, 0u, fullCache, fullInput, inputEnd, cacheBase, kvInputBase, tid);
+            if (vEarlyCache || vEarlyInput)
+                storeWide(tid, vpre);
+            else if (stagedTile && !SMALL_KV)
+                stageKvPart(true, jBase, 0u, cacheTile, inputTile, inputEnd, cacheBase, kvInputBase, tid);
             barrier();   // s_p and V staging ready
 
             // (d) GEMM2: my subgroup's head-dim chunks of PV = P * V; unstaged
@@ -726,16 +818,18 @@ void main()
             if (SMALL_KV && stagedTile)
             {
                 // Boundary tile with the small buffer: GEMM2 runs in passes of
-                // NUM_SG chunks — stage the pass's V columns, then subgroup sg
-                // takes chunk pass*NUM_SG + sg.
-                const uint VP = (DH_CHUNKS + NUM_SG - 1u) / NUM_SG;
+                // VP_CHUNKS chunks — stage the pass's V columns, then subgroup sg
+                // (< VP_CHUNKS) takes chunk pass*VP_CHUNKS + sg.
+                const uint VP = (DH_CHUNKS + VP_CHUNKS - 1u) / VP_CHUNKS;
                 for (uint pass = 0u; pass < VP; ++pass)
                 {
                     barrier();   // prior pass's V reads (pass 0: GEMM1's K chunk reads) done
+                    if (DRAIN_PARTS > 1u && pass * VP_CHUNKS >= CHUNKS_DRAIN && (pass * VP_CHUNKS) % CHUNKS_DRAIN == 0u)
+                        PULL_PV(pass * VP_CHUNKS / CHUNKS_DRAIN - 1u);   // the previous drain part is complete
                     stageVPassSmall(jBase, pass, inputEnd, cacheBase, kvInputBase, tid);
                     barrier();
-                    uint dc = pass * NUM_SG + sg;
-                    if (dc < DH_CHUNKS)
+                    uint dc = pass * VP_CHUNKS + sg;
+                    if (sg < VP_CHUNKS && dc < DH_CHUNKS)
                     {
                         coopmat<float, gl_ScopeSubgroup, MAT, MAT, gl_MatrixUseAccumulator> PV =
                             coopmat<float, gl_ScopeSubgroup, MAT, MAT, gl_MatrixUseAccumulator>(0.0);
@@ -749,19 +843,77 @@ void main()
                                         gl_CooperativeMatrixLayoutRowMajor);
                             PV = coopMatMulAdd(A, B, PV);
                         }
-                        coopMatStore(PV, s_s, dc * (MAT / 4u), PV_STRIDE, gl_CooperativeMatrixLayoutRowMajor);
+                        coopMatStore(PV, s_s, (dc % CHUNKS_DRAIN) * (MAT / 4u), PV_STRIDE, gl_CooperativeMatrixLayoutRowMajor);
+                    }
+                }
+            }
+            else if (PERSISTENT_O)
+            {
+                // Rescale my O chunks if any row's reference moved (0 < corr < 1): workgroup-uniform, a
+                // chunk round-trips through s_s (S^T reads are done).
+                bool rescale = false;
+                [[unroll]] for (uint q = 0u; q < wgRows / 4u; ++q)
+                {
+                    const vec4 c4 = s_s[CORR_BASE + q];
+                    [[unroll]] for (uint k = 0u; k < 4u; ++k)
+                        rescale = rescale || (c4[k] > 0.0 && c4[k] < 1.0);
+                }
+                if (rescale)
+                    [[unroll]] for (uint i = 0u; i < OC_PER_SG; ++i)
+                    {
+                        const uint dc = sg + i * NUM_SG;
+                        if (dc < DH_CHUNKS)
+                        {
+                            const uint col = (dc % CHUNKS_PART) * (MAT / 4u);
+                            coopMatStore(oacc[i], s_s, col, PV_STRIDE, gl_CooperativeMatrixLayoutRowMajor);
+                            subgroupMemoryBarrierShared();
+                            subgroupBarrier();
+                            for (uint e = lane; e < MAT * (MAT / 4u); e += sgSize)
+                            {
+                                const uint row = e / (MAT / 4u);
+                                s_s[row * PV_STRIDE + col + e % (MAT / 4u)] *= s_s[CORR_BASE + row / 4u][row % 4u];
+                            }
+                            subgroupMemoryBarrierShared();
+                            subgroupBarrier();
+                            coopMatLoad(oacc[i], s_s, col, PV_STRIDE, gl_CooperativeMatrixLayoutRowMajor);
+                        }
+                    }
+                // O += P * V straight into the accumulators.
+                [[unroll]] for (uint i = 0u; i < OC_PER_SG; ++i)
+                {
+                    const uint dc = sg + i * NUM_SG;
+                    if (dc < DH_CHUNKS)
+                    {
+                        // Next part; CHUNKS_PART % NUM_SG == 0, so all subgroups cross together.
+                        if (dc >= CHUNKS_PART && (dc - sg) % CHUNKS_PART == 0u)
+                        {
+                            barrier();   // this part's V reads done
+                            stageKvPart(true, jBase, dc / CHUNKS_PART, cacheTile, inputTile, inputEnd, cacheBase, kvInputBase, tid);
+                            barrier();
+                        }
+                        [[unroll]] for (uint kc = 0u; kc < KV_CHUNKS; ++kc)
+                        {
+                            coopmat<float16_t, gl_ScopeSubgroup, MAT, MAT, gl_MatrixUseA> A;
+                            coopmat<float16_t, gl_ScopeSubgroup, MAT, MAT, gl_MatrixUseB> B;
+                            coopMatLoad(A, s_p, (kc * MAT) * P_STRIDE, P_STRIDE,
+                                        gl_CooperativeMatrixLayoutColumnMajor);
+                            coopMatLoad(B, s_kv, (kc * MAT) * KV_STRIDE + dc * (MAT / 4u) - (dc / CHUNKS_PART) * DH4_PART,
+                                        KV_STRIDE, gl_CooperativeMatrixLayoutRowMajor);
+                            oacc[i] = coopMatMulAdd(A, B, oacc[i]);
+                        }
                     }
                 }
             }
             else
             for (uint dc = sg; dc < DH_CHUNKS; dc += NUM_SG)
             {
-                // Next part; CHUNKS_PART % NUM_SG == 0, so all subgroups cross together.
-                if (!SMALL_KV && stagedTile && dc >= CHUNKS_PART && (dc - sg) % CHUNKS_PART == 0u)
+                // Next drain part (staged: and V part); CHUNKS_DRAIN % NUM_SG == 0, so all subgroups cross together.
+                if (DRAIN_PARTS > 1u && dc >= CHUNKS_DRAIN && (dc - sg) % CHUNKS_DRAIN == 0u)
                 {
                     barrier();   // this part's reads and P.V stores done
-                    PULL_PV(dc / CHUNKS_PART - 1u);
-                    stageVPart(jBase, dc / CHUNKS_PART, fullCache, fullInput, inputEnd, cacheBase, kvInputBase, tid);
+                    PULL_PV(dc / CHUNKS_DRAIN - 1u);
+                    if (KV_PARTS > 1u)
+                        stageKvPart(true, jBase, dc / CHUNKS_PART, cacheTile, inputTile, inputEnd, cacheBase, kvInputBase, tid);
                     barrier();
                 }
                 coopmat<float, gl_ScopeSubgroup, MAT, MAT, gl_MatrixUseAccumulator> PV =
@@ -784,14 +936,38 @@ void main()
                                                     + dc * (MAT / 4u));
                     PV = coopMatMulAdd(A, B, PV);
                 }
-                coopMatStore(PV, s_s, (dc % CHUNKS_PART) * (MAT / 4u), PV_STRIDE, gl_CooperativeMatrixLayoutRowMajor);
+                coopMatStore(PV, s_s, (dc % CHUNKS_DRAIN) * (MAT / 4u), PV_STRIDE, gl_CooperativeMatrixLayoutRowMajor);
             }
-            barrier();   // P.V (last part) in s_s ready
+            if (!PERSISTENT_O)
+            {
+                barrier();   // P.V (last part) in s_s ready
 
-            // (e) Pull the last part's P.V into acc.
-            PULL_PV(KV_PARTS - 1u);
+                // (e) Pull the last part's P.V into acc.
+                PULL_PV(DRAIN_PARTS - 1u);
+            }
         }
     }
+
+    // PERSISTENT_O: drain O into acc once, part by part (the epilogue below is shared).
+    if (PERSISTENT_O)
+        [[unroll]] for (uint part = 0u; part < KV_PARTS; ++part)
+        {
+            barrier();   // the sweep's s_s use is over (or the previous part read)
+            [[unroll]] for (uint i = 0u; i < OC_PER_SG; ++i)
+            {
+                const uint dc = sg + i * NUM_SG;
+                if (dc < DH_CHUNKS && dc / CHUNKS_PART == part)
+                    coopMatStore(oacc[i], s_s, (dc % CHUNKS_PART) * (MAT / 4u), PV_STRIDE, gl_CooperativeMatrixLayoutRowMajor);
+            }
+            barrier();
+            [[unroll]] for (uint r = 0u; r < ROWS_PER_SG; ++r)
+                [[unroll]] for (uint k = 0u; k < PV4_PER_LANE; ++k)
+                {
+                    uint d = k * sgSize + lane;
+                    if (d < DH4 && d >= part * DH4_PART && d < part * DH4_PART + DH4_PART)
+                        acc32[r * PV4_PER_LANE + k] = s_s[(rowBase + r) * PV_STRIDE + d - part * DH4_PART];
+                }
+        }
 
     // Epilogue: l is striped across the subgroup's lanes (one subgroupAdd);
     // acc is not (each lane owns disjoint head-dim columns).
@@ -801,7 +977,8 @@ void main()
     if (kCount > 1u)
     {
         // Split partials: same layout as the scalar kernel, folded by the
-        // same reduce pass; empty splits naturally write (m=-1e30, l=0, acc=0).
+        // same reduce pass; empty splits naturally write (m=-1e30, l=0, acc=0)
+        // (skipEmptySplits: the ones past the keys left above with l = -1).
         [[unroll]] for (uint r = 0u; r < ROWS_PER_SG; ++r)
         {
             uint row = rowBase + r;
@@ -811,13 +988,11 @@ void main()
             {
                 uint d = k * sgSize + lane;
                 if (d < DH4)
-                    partialO[(rowIdx * kCount + split) * DH4 + d] =
-                        (accF16 != 0u) ? vec4(acc16[r * PV4_PER_LANE + k])
-                                       : acc32[r * PV4_PER_LANE + k];
+                    partialO[(rowIdx * kCount + split) * DH4 + d] = acc32[r * PV4_PER_LANE + k];
             }
             if (lane == 0u)
             {
-                partialML[(rowIdx * kCount + split) * 2u]      = m[r];
+                partialML[(rowIdx * kCount + split) * 2u]      = m[r] * LN2;   // natural units for the reduce
                 partialML[(rowIdx * kCount + split) * 2u + 1u] = l[r];
             }
         }
@@ -834,9 +1009,7 @@ void main()
         {
             uint d = k * sgSize + lane;
             if (d < DH4)
-                writeO4(outRow(ROW_TOK(row), ROW_HEAD(row)) * DH4 + d,
-                        ((accF16 != 0u) ? vec4(acc16[r * PV4_PER_LANE + k])
-                                        : acc32[r * PV4_PER_LANE + k]) * lInv);
+                writeO4(outRow(ROW_TOK(row), ROW_HEAD(row)) * DH4 + d, acc32[r * PV4_PER_LANE + k] * lInv);
         }
     }
 }
