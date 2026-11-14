@@ -15,8 +15,8 @@
    softmax subgroup sg owns Q rows [sg*4, +4): exact row max per tile
            (subgroupMax), online rescale, P staged to shared as f16.
    GEMM2   subgroup sg owns head-dim chunks {sg, sg+4, ...}: PV = P * V,
-           f16 accumulate/exchange (= upstream O_TYPE pvsh), pulled into
-           acc registers with the row rescale (accF16).
+           f32 accumulate and drain through s_s (= upstream f32acc O_TYPE),
+           pulled into acc registers with the row rescale (accF16).
 
  K/V staging follows the host vendor policy (shmemStaging). Staged pipelines
  copy full tiles, in KV_PARTS head-dim parts, from one hoisted source; only
@@ -189,11 +189,11 @@ const uint KV_STRIDE = DH4_PART + 2u;  // f16vec4
 const uint SP_PAD   = (appendBeforeSweep != 0u && shmemStaging != 0u) ? 2u : 0u;
 const uint S_STRIDE = wgRows / 4u + SP_PAD;   // vec4 (f32), row-packed
 const uint P_STRIDE = wgRows / 4u + SP_PAD;   // f16vec4, row-packed
-// NOTE (vs llama.cpp): ggml drains pvsh once per hsv_tile; vai holds the
-// whole padded head dim and drains once — the split drain was measured and
-// rejected on staged pipelines. On unstaged RDNA the LDS bottleneck is the
-// full-tile s_kv instead; SMALL_KV below recovers that occupancy step.
-const uint PV_STRIDE = DH4_PAD + 2u;   // f16vec4
+// GEMM2's f32 P.V drains through s_s (S^T is dead once P^T is written), one
+// head-dim part at a time: no tile's partial sum is rounded to f16 on the way
+// to the f32 accumulator registers (precision rule: >= llama.cpp cm1 / cm2).
+const uint PV_STRIDE = DH4_PART + 2u;   // vec4 (f32)
+const uint SS_SIZE   = (wgKv * S_STRIDE > wgRows * PV_STRIDE) ? wgKv * S_STRIDE : wgRows * PV_STRIDE;
 
 // Small unstaged staging (= ggml SHMEM_STAGING=0 kvsh): when full tiles
 // direct-load, s_kv only serves the boundary/tail tile and shrinks to the
@@ -210,9 +210,8 @@ const float QK_MAX_OFFSET = 3.0 * 0.6931;   // ~ln(8) (= ggml FATTN_KQ_MAX_OFFSE
 shared f16vec4 s_q[wgRows * Q_STRIDE];      // Q tile, unscaled (scale applied to S)
 shared f16vec4 s_kv[SMALL_KV ? wgKv * VS_STRIDE : wgKv * KV_STRIDE];   // one head-dim part of the K, then V tile (SMALL_KV: boundary-only chunks), zero-filled
 // S is fp32 fixed (= llama.cpp production, PREC_F32 always)
-shared vec4 s_s[wgKv * S_STRIDE];           // S^T exchange (f32 accumulator)
+shared vec4 s_s[SS_SIZE];                   // S^T, then the P.V drain (f32)
 shared f16vec4 s_p[wgKv * P_STRIDE];        // P^T = exp(S - m) exchange
-shared f16vec4 s_pv[wgRows * PV_STRIDE];    // P.V exchange (f16, = upstream O_TYPEV4 pvsh)
 
 // Direct global coopMatLoad for unstaged full f16 tiles; f32-source tiles
 // stage instead (an f32 A/B coopmat is a shape no device reports).
@@ -295,6 +294,23 @@ void stageVPassSmall(uint jBase, uint pass, uint inputEnd,
 #define ROW_HEAD(row)  (packed ? wgY * gqaRatio + (row) : wgY)
 #define ROW_TOK(row)   (packed ? qTile : qTile * wgRows + (row))
 #define ROW_VALID(row) (packed ? (row) < gqaRatio : qTile * wgRows + (row) < Tq)
+
+// One head-dim part of P.V from s_s into acc, rescaled by corr.
+#define PULL_PV(part)                                                                              \
+    [[unroll]] for (uint r = 0u; r < ROWS_PER_SG; ++r)                                             \
+        [[unroll]] for (uint k = 0u; k < PV4_PER_LANE; ++k)                                        \
+        {                                                                                          \
+            uint d = k * sgSize + lane;                                                            \
+            if (d < DH4 && d >= (part) * DH4_PART && d < (part) * DH4_PART + DH4_PART)             \
+            {                                                                                      \
+                if (accF16 != 0u)                                                                  \
+                    acc16[r * PV4_PER_LANE + k] = acc16[r * PV4_PER_LANE + k] * float16_t(corr[r]) \
+                        + f16vec4(s_s[(rowBase + r) * PV_STRIDE + d - (part) * DH4_PART]);         \
+                else                                                                               \
+                    acc32[r * PV4_PER_LANE + k] = acc32[r * PV4_PER_LANE + k] * corr[r]            \
+                        + s_s[(rowBase + r) * PV_STRIDE + d - (part) * DH4_PART];                  \
+            }                                                                                      \
+        }
 
 
 // K tile, head-dim part p -> s_kv: full tiles copy from one hoisted source,
@@ -582,10 +598,12 @@ void main()
             // pipelines stage per chunk inside GEMM1/GEMM2 instead.
             if (stagedTile && !SMALL_KV)
             {
-                barrier();   // previous tile's V reads done with s_kv
+                barrier();   // previous tile's s_kv and s_s reads done
                 stageKPart(jBase, 0u, fullCache, fullInput, inputEnd, cacheBase, kvInputBase, tid);
                 barrier();
             }
+            else if (!stagedTile)
+                barrier();   // previous tile's s_s reads done
 
             // (b) GEMM1: my subgroup's 16 KV rows of S^T = K * Q^T; unstaged
             // full tiles load K straight from global. fp32 accumulator (see
@@ -719,8 +737,8 @@ void main()
                     uint dc = pass * NUM_SG + sg;
                     if (dc < DH_CHUNKS)
                     {
-                        coopmat<float16_t, gl_ScopeSubgroup, MAT, MAT, gl_MatrixUseAccumulator> PV =
-                            coopmat<float16_t, gl_ScopeSubgroup, MAT, MAT, gl_MatrixUseAccumulator>(0.0);
+                        coopmat<float, gl_ScopeSubgroup, MAT, MAT, gl_MatrixUseAccumulator> PV =
+                            coopmat<float, gl_ScopeSubgroup, MAT, MAT, gl_MatrixUseAccumulator>(0.0);
                         [[unroll]] for (uint kc = 0u; kc < KV_CHUNKS; ++kc)
                         {
                             coopmat<float16_t, gl_ScopeSubgroup, MAT, MAT, gl_MatrixUseA> A;
@@ -731,7 +749,7 @@ void main()
                                         gl_CooperativeMatrixLayoutRowMajor);
                             PV = coopMatMulAdd(A, B, PV);
                         }
-                        coopMatStore(PV, s_pv, dc * (MAT / 4u), PV_STRIDE, gl_CooperativeMatrixLayoutRowMajor);
+                        coopMatStore(PV, s_s, dc * (MAT / 4u), PV_STRIDE, gl_CooperativeMatrixLayoutRowMajor);
                     }
                 }
             }
@@ -741,12 +759,13 @@ void main()
                 // Next part; CHUNKS_PART % NUM_SG == 0, so all subgroups cross together.
                 if (!SMALL_KV && stagedTile && dc >= CHUNKS_PART && (dc - sg) % CHUNKS_PART == 0u)
                 {
-                    barrier();   // this part's reads done
+                    barrier();   // this part's reads and P.V stores done
+                    PULL_PV(dc / CHUNKS_PART - 1u);
                     stageVPart(jBase, dc / CHUNKS_PART, fullCache, fullInput, inputEnd, cacheBase, kvInputBase, tid);
                     barrier();
                 }
-                coopmat<float16_t, gl_ScopeSubgroup, MAT, MAT, gl_MatrixUseAccumulator> PV =
-                    coopmat<float16_t, gl_ScopeSubgroup, MAT, MAT, gl_MatrixUseAccumulator>(0.0);
+                coopmat<float, gl_ScopeSubgroup, MAT, MAT, gl_MatrixUseAccumulator> PV =
+                    coopmat<float, gl_ScopeSubgroup, MAT, MAT, gl_MatrixUseAccumulator>(0.0);
                 [[unroll]] for (uint kc = 0u; kc < KV_CHUNKS; ++kc)
                 {
                     coopmat<float16_t, gl_ScopeSubgroup, MAT, MAT, gl_MatrixUseA> A;
@@ -765,25 +784,12 @@ void main()
                                                     + dc * (MAT / 4u));
                     PV = coopMatMulAdd(A, B, PV);
                 }
-                coopMatStore(PV, s_pv, dc * (MAT / 4u), PV_STRIDE, gl_CooperativeMatrixLayoutRowMajor);
+                coopMatStore(PV, s_s, (dc % CHUNKS_PART) * (MAT / 4u), PV_STRIDE, gl_CooperativeMatrixLayoutRowMajor);
             }
-            barrier();   // s_pv ready
+            barrier();   // P.V (last part) in s_s ready
 
-            // (e) Pull PV into my acc registers with the row rescale.
-            [[unroll]] for (uint r = 0u; r < ROWS_PER_SG; ++r)
-                [[unroll]] for (uint k = 0u; k < PV4_PER_LANE; ++k)
-                {
-                    uint d = k * sgSize + lane;
-                    if (d < DH4)
-                    {
-                        if (accF16 != 0u)
-                            acc16[r * PV4_PER_LANE + k] = acc16[r * PV4_PER_LANE + k] * float16_t(corr[r])
-                                + s_pv[(rowBase + r) * PV_STRIDE + d];
-                        else
-                            acc32[r * PV4_PER_LANE + k] = acc32[r * PV4_PER_LANE + k] * corr[r]
-                                + vec4(s_pv[(rowBase + r) * PV_STRIDE + d]);
-                    }
-                }
+            // (e) Pull the last part's P.V into acc.
+            PULL_PV(KV_PARTS - 1u);
         }
     }
 

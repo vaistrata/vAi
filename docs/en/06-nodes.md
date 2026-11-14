@@ -9,7 +9,7 @@
 | [Activation](#activation) | Applies an element-wise activation. | `activation.comp` |
 | [Add](#add) | element-wise addition for residual connections | `add.comp` |
 | [Argmax](#argmax) | Row-wise argmax / greedy sampling | `argmax.comp` |
-| [Attention](#attention) | fused KV cache append + causal attention (GQA), split between three kernels | `attention-fa-intel.comp`, `attention-fa-cm.comp`, `attention-fa.comp`, `attention-fa-reduce.comp`, `attention.comp` |
+| [Attention](#attention) | fused KV cache append + causal attention (GQA), split between three kernels | `attention-fa-intel.comp`, `attention-fa-cm-intel.comp`, `attention-fa-cm.comp`, `attention-fa.comp`, `attention-fa-reduce.comp`, `attention.comp` |
 | [Concat](#concat) | join inputs along one axis | `concat.comp` |
 | [Convolution](#convolution) | 2D convolution with device-selected direct, implicit, or Winograd plans | `conv-k1s1-gemm-cm.comp`, `conv-k1s1-gemm.comp`, `conv-k3s2-gemm-cm.comp`, `conv-k3s1-implicit-gemm-cm.comp`, `conv-k3s1-implicit-gemm.comp`, `conv-implicit-gemm.comp`, `conv-implicit-gemm-cm.comp`, `conv-k3s2-gemm.comp`, `cm-transform.comp`, `conv-k3s1-winograd-filter-transform.comp`, `conv-k3s1-winograd-input.comp`, `conv-k3s1-winograd-output.comp`, `bn-reduce.comp`, `conv-k3s1-winograd-gemm.comp`, `conv-k3s1-winograd-gemm-cm.comp` |
 | [CyclicTableReader](#cyclictablereader) | read successive table rows, wrapping at the end | `cyclic-table-reader.comp` |
@@ -182,7 +182,10 @@ vendor) tuned tiles; everything the cm gates reject.
 - Intel FA (attention-fa-intel): Intel parts without a coopmat path;
 a 16-row tile packs one KV group's heads, subgroup-broadcast products.
 - naive (attention): the unconditional fallback — unfamiliar
-devices degrade instead of crashing. See ggmlFATuningParams().
+devices degrade instead of crashing. See supportsFlashAttention().
+
+Intel's coopmat tiles (Xe2 / Xe3) run attention-fa-cm-intel, the kernel
+Intel was verified with; attention-fa-cm moved on for the other vendors.
 
 The path and tuning are selected per (shape, device) in prepare(); a tuning
 change re-requests the pipeline from the pool. Every path leaves the KV
@@ -222,6 +225,7 @@ from kvCacheCount per forward.
 **Kernels**
 
 - `vai/shaders/attention-fa-intel.comp`
+- `vai/shaders/attention-fa-cm-intel.comp`
 - `vai/shaders/attention-fa-cm.comp`
 - `vai/shaders/attention-fa.comp`
 - `vai/shaders/attention-fa-reduce.comp`
