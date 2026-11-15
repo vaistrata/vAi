@@ -261,17 +261,3 @@ tier와 추론 설정은 [`demo.cpp`](../../../models/experimental/yolox/demo.cp
 
 전처리는 RGB 이미지 로더의 결과를 BGR CHW로 바꾸고, 비율을 유지해 좌상단부터 배치하며
 남는 영역은 114로 채웁니다. 입력은 0–255 float이고 `1/255` 정규화를 하지 않습니다.
-
-## 벤치마크 요약
-
-YOLOX Large FP16, 640x640 기준 평균 추론 지연시간입니다. 측정 환경과 조건(전처리, NMS 포함
-여부), 재현 방법은 [`benchmarks/yolox/README.md`](../../../benchmarks/yolox/README.md) 참조.
-
-| | 890M (Strix Point) | 8060S (Strix Halo) | RTX 5070 | RTX 3060 Laptop |
-|---|---|---|---|---|
-| vAi (ms) | TBD | TBD | TBD | TBD |
-| ncnn (ms) | TBD | TBD | TBD | TBD |
-| OpenVINO (ms) | TBD | TBD | TBD | TBD |
-
-
-전체 모델 요약은 [제공 모델](README.md#통합-벤치마크) 참조.

@@ -261,17 +261,3 @@ Change the tier and inference settings at the top of [`demo.cpp`](../../../model
 
 Preprocessing converts the RGB image loader's output to BGR CHW, places it from the top-left corner while preserving its aspect ratio,
 and fills the remaining area with 114. Input values are floats in the range 0-255, without `1/255` normalization.
-
-## Benchmark summary
-
-These are mean inference latencies for YOLOX Large FP16 at 640x640. For measurement environments and conditions (including whether preprocessing and NMS are included),
-and reproduction instructions, see [`benchmarks/yolox/README.md`](../../../benchmarks/yolox/README.md).
-
-| | 890M (Strix Point) | 8060S (Strix Halo) | RTX 5070 | RTX 3060 Laptop |
-|---|---|---|---|---|
-| vAi (ms) | TBD | TBD | TBD | TBD |
-| ncnn (ms) | TBD | TBD | TBD | TBD |
-| OpenVINO (ms) | TBD | TBD | TBD | TBD |
-
-
-For a summary across all models, see [Supported models](README.md#combined-benchmarks).
