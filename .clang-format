@@ -65,6 +65,13 @@ ConstructorInitializerIndentWidth: 0
 # when it ends in a comma, f({ ..., }).
 BinPackArguments: false
 Cpp11BracedListStyle: false
+# Indent is expensive, so a line that does not fit breaks after its ( or = and
+# indents one level instead of aligning under the ( or the right-hand side.
+PenaltyIndentedWhitespace: 100
+# Never leave a return type on its own line; break after the ( instead.
+PenaltyReturnTypeOnItsOwnLine: 1000
+# Keep the first << on the stream's line, so std::cout never stands alone.
+PenaltyBreakFirstLessLess: 10000
 
 # Keep template <...> on its own line: gen-node-docs.py finds templated node
 # classes such as Pool2d by the class line.

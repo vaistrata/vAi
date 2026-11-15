@@ -16,10 +16,12 @@ static void bindPermute(nb::module_& m)
                 // The core stores perms unvalidated and indexes with them —
                 // out-of-range or duplicate entries are an OOB read at prepare.
                 const size_t rank = perms.size();
+                // clang-format off
                 if (rank == 0 || rank > PERMUTE_MAX_RANK)
                     throw nb::value_error(
                         ("PermuteNode: perms must hold between 1 and "
                          + std::to_string(PERMUTE_MAX_RANK) + " axes").c_str());
+                // clang-format on
                 std::vector<bool> seen(rank, false);
                 for (uint32_t axis : perms)
                 {

@@ -51,12 +51,12 @@ ffn1 - ffn2;                // 그룹 - 그룹
 
 ## 2. 중첩
 
-`NodeGroup` 안에 다른 `NodeGroup`을 둘 수도 있습니다. Llama 3.2의 TransformerLayer는 `MultiHeadAttention`과
+`NodeGroup` 안에 다른 `NodeGroup`을 둘 수도 있습니다. Llama 3.2의 TransformerBlock는 `MultiHeadAttention`과
 `GatedFeedForward`를 멤버로 갖는 `NodeGroup`입니다. 두 멤버 역시 여러 `Node`로 구성된 `NodeGroup`입니다.
 
 ```cpp
 template<TransformerType layout, QkvLayout qkv>
-struct TransformerLayer : public vai::NodeGroup {
+struct TransformerBlock : public vai::NodeGroup {
     vai::node::Identity input;
     typename BranchNorm<layout>::Type norm1;
     MultiHeadAttention<qkv> mhAttn;
@@ -65,7 +65,7 @@ struct TransformerLayer : public vai::NodeGroup {
     typename BranchNorm<layout>::Type norm2;
     typename BranchFfn<layout>::Type ffn;
 
-    TransformerLayer(...)
+    TransformerBlock(...)
     {
         input - norm1 -            mhAttn - lastRow - gate/"then" - norm2 -            ffn;
         input         - "residual"/mhAttn - lastRow - gate/"then"         - "residual"/ffn;
@@ -91,19 +91,19 @@ Llama 3에서는 `norm1`·`norm2`가 `RmsNorm`, `ffn`이 `GatedFeedForward`입�
 서로의 주소를 갖고 있기 때문에 담긴 원소는 복사·이동하지 않고 주소를 유지해야 합니다.
 
 ```cpp
-layers.reserve(config.numLayers);
-for (uint32_t i = 0; i < config.numLayers; ++i)
+blocks.reserve(config.nBlocks);
+for (uint32_t i = 0; i < config.nBlocks; ++i)
 {
-    // ... 레이어별 설정
-    layers.emplace_back(config.layerCfg);
+    // ... 블록별 설정
+    blocks.emplace_back(blockCfg);
 }
 
-for (size_t i = 1; i < layers.size(); ++i)
-    layers[i - 1] - layers[i];
+for (size_t i = 1; i < blocks.size(); ++i)
+    blocks[i - 1] - blocks[i];
 ```
 
 `std::vector`에 자리가 부족하면 기존 원소를 새 메모리로 옮깁니다.
-`push_back(Layer(...))`처럼 임시 노드를 넣는 것도 복사·이동을 일으킵니다.
+`push_back(Block(...))`처럼 임시 노드를 넣는 것도 복사·이동을 일으킵니다.
 이때 슬롯의 부모 참조나 연결이 원래 객체를 가리킨 채 남아 실행 시 잘못된
 객체에 접근할 수 있습니다. 컴파일은 통과하지만 그래프 실행 시 에러가 발생합니다.
 
@@ -116,8 +116,8 @@ for (size_t i = 1; i < layers.size(); ++i)
 포인터를 옮겨도 가리키는 객체는 움직이지 않습니다.
 
 ```cpp
-std::vector<std::unique_ptr<Layer>> layers;
-layers.push_back(std::make_unique<Layer>(layerCfg));
+std::vector<std::unique_ptr<Block>> blocks;
+blocks.push_back(std::make_unique<Block>(blockCfg));
 ```
 
 vAi는 2번 방식도 허용하지만 1번을 권장합니다.

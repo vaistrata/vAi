@@ -20,16 +20,16 @@ namespace gpt2 = model::production::gpt2;
 
 void setProfileTags(gpt2::Net& net)
 {
-    const uint32_t D = net.modelCfg.languageCfg.layerCfg.embedDim;
-    const uint32_t V = net.modelCfg.languageCfg.vocabSize;
+    const uint32_t D = net.modelCfg.trf.embedDim;
+    const uint32_t V = net.modelCfg.vocabSize;
 
     auto lin = [](uint32_t in, uint32_t out) {
         return "Linear.[" + std::to_string(in) + "x" + std::to_string(out) + "]";
     };
 
-    for (uint32_t i = 0; i < net.modelCfg.languageCfg.numLayers; ++i)
+    for (uint32_t i = 0; i < net.modelCfg.trf.nBlocks; ++i)
     {
-        auto& b = net.decoder.layers[i];
+        auto& b = net.decoder.blocks[i];
         b.norm1.setProfileTag("LayerNorm");
         b.mhAttn.projQKV.setProfileTag(lin(D, 3 * D));
         b.mhAttn.attn.setProfileTag("Attn");
@@ -49,11 +49,11 @@ int main()
     // Load model
     auto modelCfg = gpt2::ModelConfig::_124M();
     printf("Loading GPT-2-%s model...\n", modelCfg.variant);
-    gpt2::Net net(
-        {
-            .wDefaultDtype = Dtype::Fp16,
-        },
-        modelCfg);
+    // clang-format off
+    gpt2::Net net({
+        .wDefaultDtype = Dtype::Fp16,
+    }, modelCfg);
+    // clang-format on
 
     // Configure the per-node GPU execution-time profiler
     setProfileTags(net);
@@ -100,11 +100,12 @@ int main()
 
     // Prefill
     {
-        utils::TimeChecker totalTimer("\n"
-                                      "────────────────────────────────────────\n"
-                                      "▶ Prefill {} tokens in {}ms \n"
-                                      "────────────────────────────────────────",
-                                      promptLength);
+        utils::TimeChecker totalTimer(
+            "\n"
+            "────────────────────────────────────────\n"
+            "▶ Prefill {} tokens in {}ms \n"
+            "────────────────────────────────────────",
+            promptLength);
 
         net.prefill(promptTokenIds, &nextTokenId);
         ids.push_back(nextTokenId.getData<uint32_t>()[0]);
@@ -116,11 +117,12 @@ int main()
     {
         const int maxNewTokens = 128;
 
-        utils::TimeChecker totalTimer("\n"
-                                      "────────────────────────────────────────\n"
-                                      "▶ Decode {} tokens in {}ms \n"
-                                      "────────────────────────────────────────",
-                                      maxNewTokens);
+        utils::TimeChecker totalTimer(
+            "\n"
+            "────────────────────────────────────────\n"
+            "▶ Decode {} tokens in {}ms \n"
+            "────────────────────────────────────────",
+            maxNewTokens);
 
         for (int gen = 0; gen < maxNewTokens; gen++)
         {

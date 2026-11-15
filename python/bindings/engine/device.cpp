@@ -1,6 +1,6 @@
 #include "python/bindings/module.h"
 #include "vai/engine/neural-net.h"
-#include "vai/nodes/node-common.h"   // gVaiDestSetPool
+#include "vai/nodes/common.h"   // gVaiDestSetPool
 #include <cstdlib>
 #include <optional>
 #include <string>

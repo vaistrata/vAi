@@ -1,7 +1,7 @@
 #ifndef VAI_NODES_GROUP_NORM_H
 #define VAI_NODES_GROUP_NORM_H
 
-#include "node-common.h"
+#include "common.h"
 
 namespace vai::node {
 

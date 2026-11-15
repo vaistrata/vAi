@@ -47,15 +47,19 @@ Net(const vai::NeuralNetConfig& netCfg, const ModelConfig& modelCfg, const Runti
 : NeuralNet(netCfg)                       // Engine configuration
 , modelCfg(modelCfg)
 , runtimeCfg(runtimeCfg)
-, maxRuntimeContext(std::min(runtimeCfg.maxRuntimeContext, modelCfg.languageCfg.maxTrainedContext))
+, maxRuntimeContext(std::min(runtimeCfg.maxRuntimeContext, modelCfg.maxTrainedContext))
 , embedding({                             // Model structure configuration
-      .vocabSize = modelCfg.languageCfg.vocabSize,
-      .embedDim = modelCfg.languageCfg.layerCfg.embedDim,
-      .posTableSize = modelCfg.languageCfg.maxTrainedContext,
+      .vocabSize = modelCfg.vocabSize,
+      .embedDim = modelCfg.trf.embedDim,
+      .posTableSize = modelCfg.maxTrainedContext,
   })
-, decoder(modelCfg.languageCfg.with(      // Apply runtime settings to the structure configuration
-      { .kvCacheSize = maxRuntimeContext, .kvCacheDtype = runtimeCfg.kvCacheDtype, .sliceLastRow = true }))
-, lmHead({ .inDim = modelCfg.languageCfg.layerCfg.embedDim, .outDim = modelCfg.languageCfg.vocabSize })
+, decoder({                               // Add runtime settings to the structure configuration
+      .base = modelCfg.trf,
+      .kvCacheSize = maxRuntimeContext,
+      .kvCacheDtype = runtimeCfg.kvCacheDtype,
+      .sliceLastRow = true,
+  })
+, lmHead({ .inDim = modelCfg.trf.embedDim, .outDim = modelCfg.vocabSize })
 {
     // ...
 }
@@ -281,7 +285,7 @@ Check the following before submitting.
 
 **Model and group declarations**
 
-Use `PascalCase` for type names, capitalizing the first letter of every word (for example, `ModelConfig` and `RuntimeConfig`). Use `camelCase` for functions and variables, starting the first word in lowercase and capitalizing each subsequent word (for example, `resetState()`, `numLayers`, and `modelCfg`). Put opening braces for functions and structures on the next line.
+Use `PascalCase` for type names, capitalizing the first letter of every word (for example, `ModelConfig` and `RuntimeConfig`). Use `camelCase` for functions and variables, starting the first word in lowercase and capitalizing each subsequent word (for example, `resetState()`, `nBlocks`, and `modelCfg`). Put opening braces for functions and structures on the next line.
 
 The following example shows the format of `net.h`. The node configuration and constructor are omitted. Replace `model_name`, the model name in the comment, and the author email with the contributor's information. Keep the structure name `Net`.
 
@@ -300,7 +304,7 @@ struct Block : public vai::NodeGroup
 
 struct Net : public vai::NeuralNet
 {
-    uint32_t numLayers = 0;
+    uint32_t nBlocks = 0;
 
     void resetState()
     {

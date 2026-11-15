@@ -3,27 +3,12 @@
 
 #include "vai/groups/patch-embedding.h"
 #include "vai/groups/transformer.h"
-#include "models/config-base.h"
+#include "models/common.h"
 #include "vai/nodes/linear.h"
 #include "vai/nodes/pool2d.h"
 #include "vai/nodes/reshape.h"
 #include "vai/nodes/rms-norm.h"
 
-namespace model::production::gemma3 {
-
-struct VisionEncoderConfig : public VisionModelConfig
-{
-    static constexpr uint32_t tokensPerSide = 16;
-    static constexpr uint32_t tokensPerImage = 256;
-    uint32_t imageTokenId = 262144;
-
-    constexpr VisionEncoderConfig()
-    : VisionModelConfig(siglip::so400m14(896))
-    {
-    }
-};
-
-}   // namespace model::production::gemma3
 namespace model::production::gemma3::group {
 
 using VisionTransformer = vai::group::Transformer<vai::TransformerType::Classic>;
@@ -31,6 +16,10 @@ using VisionTransformer = vai::group::Transformer<vai::TransformerType::Classic>
 
 struct VisionEncoder : vai::NodeGroup
 {
+    static constexpr VisionTransformerConfig config = common::so400m14(896);   // SigLIP So400m/14 at 896 pixels
+    static constexpr uint32_t tokensPerSide = 16;                              // 4 x 4 patches pool into each token
+    static constexpr uint32_t tokensPerImage = tokensPerSide * tokensPerSide;
+
     vai::group::PatchEmbedding patchEmbed;   // [B, C, S, S] -> [B, N, D], N = G * G
     VisionTransformer encoder;               //              -> [B, N, D]
     vai::node::Reshape toGrid;               //              -> [B, G, G, D]
@@ -38,22 +27,21 @@ struct VisionEncoder : vai::NodeGroup
     vai::node::Reshape toTokens;             //              -> [B, tokensPerImage, D]
     vai::node::RmsNorm imageNorm;            //              -> [B, tokensPerImage, D]
 
-    VisionEncoder(const VisionEncoderConfig& cfg)
+    VisionEncoder()
     : patchEmbed({
-          .imageChannels = cfg.imageChannels,
-          .imageSize = cfg.imageSize,
-          .patchSize = cfg.patchSize,
-          .embedDim = cfg.layerCfg.embedDim,
+          .imageChannels = config.imageChannels,
+          .imageSize = config.imageSize,
+          .patchSize = config.patchSize,
+          .embedDim = config.embedDim,
           .allowBatch = true,
       })
-    , encoder(cfg.with({ .allowBatch = true }))
-    , toGrid({ -1, cfg.patchesPerSide(), cfg.patchesPerSide(), cfg.layerCfg.embedDim })
+    , encoder({ .base = config, .allowBatch = true })
+    , toGrid({ -1, config.patchesPerSide(), config.patchesPerSide(), config.embedDim })
     , pool({ .kernelSize = 4, .stride = 4, .channelsLast = true })
-    , toTokens({ -1, cfg.numPatches() / 16, cfg.layerCfg.embedDim })
-    , imageNorm({ .eps = cfg.layerCfg.normEps })
+    , toTokens({ -1, tokensPerImage, config.embedDim })
+    , imageNorm({ .eps = config.normEps })
     {
-        VAI_ASSERT(cfg.tokensPerSide * 4 == cfg.patchesPerSide());
-        VAI_ASSERT(cfg.tokensPerImage * 16 == cfg.numPatches());
+        VAI_ASSERT(tokensPerSide * 4 == config.patchesPerSide());
 
         // clang-format off
         patchEmbed - encoder - toGrid - pool - toTokens - imageNorm;

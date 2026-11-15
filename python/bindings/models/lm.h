@@ -19,20 +19,24 @@ uint32_t runtimeContext(std::optional<uint32_t> maxRuntimeContext, const char* p
 {
     if (!maxRuntimeContext)
         return RuntimeConfig{}.maxRuntimeContext;
+    // clang-format off
     if (*maxRuntimeContext == 0)
         throw nb::value_error((std::string(pyName)
             + ": max_runtime_context must be >= 1 "
               "(None: the checkpoint's max_trained_context)").c_str());
+    // clang-format on
     return *maxRuntimeContext;
 }
 
 // Token ids as the models index them: [T], T >= 1.
 inline void requireTokenIds(const vai::Tensor& t, const char* who)
 {
+    // clang-format off
     if (t.shape().size() != 1 || t.shape()[0] == 0)
         throw nb::value_error((std::string(who)
             + ": prompt_token_ids must be a [T] tensor of token ids (Tensor.from_u32), "
               "T >= 1").c_str());
+    // clang-format on
 }
 
 [[noreturn]] inline void refuseCall(const char* pyName)

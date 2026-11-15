@@ -1,7 +1,7 @@
 #ifndef VAI_NODES_NEAREST_UPSAMPLE_H
 #define VAI_NODES_NEAREST_UPSAMPLE_H
 
-#include "node-common.h"
+#include "common.h"
 
 namespace vai::node {
 

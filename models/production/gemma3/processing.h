@@ -58,13 +58,12 @@ inline std::vector<float> loadImages(const std::vector<std::string>& paths, uint
     pixels.reserve(paths.size() * 3 * imageSize * imageSize);
     for (const std::string& path : paths)
     {
-        std::vector<float> chw =
-            vai::utils::ImageProcessor(path)
-                .resize(imageSize,
-                        vai::utils::Resize::
-                            BilinearAntialiasInt16)   // HF Gemma3ImageProcessor: torchvision uint8 antialias
-                .normalize(-1.0f, 1.0f)
-                .chw();
+        // clang-format off
+        std::vector<float> chw = vai::utils::ImageProcessor(path)
+            .resize(imageSize, vai::utils::Resize::BilinearAntialiasInt16) // HF Gemma3ImageProcessor: torchvision uint8 antialias
+            .normalize(-1.0f, 1.0f)
+            .chw();
+        // clang-format on
         pixels.insert(pixels.end(), chw.begin(), chw.end());
     }
 

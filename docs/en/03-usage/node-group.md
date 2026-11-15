@@ -45,11 +45,11 @@ The `/` slot selection rules are the same. Before a group, it selects an input s
 
 ## 2. Nesting
 
-A `NodeGroup` can contain other `NodeGroup` instances. Llama 3.2's TransformerLayer is a `NodeGroup` with `MultiHeadAttention` and `GatedFeedForward` members. Both members are also `NodeGroup` instances made up of multiple `Node` instances.
+A `NodeGroup` can contain other `NodeGroup` instances. Llama 3.2's TransformerBlock is a `NodeGroup` with `MultiHeadAttention` and `GatedFeedForward` members. Both members are also `NodeGroup` instances made up of multiple `Node` instances.
 
 ```cpp
 template<TransformerType layout, QkvLayout qkv>
-struct TransformerLayer : public vai::NodeGroup {
+struct TransformerBlock : public vai::NodeGroup {
     vai::node::Identity input;
     typename BranchNorm<layout>::Type norm1;
     MultiHeadAttention<qkv> mhAttn;
@@ -58,7 +58,7 @@ struct TransformerLayer : public vai::NodeGroup {
     typename BranchNorm<layout>::Type norm2;
     typename BranchFfn<layout>::Type ffn;
 
-    TransformerLayer(...)
+    TransformerBlock(...)
     {
         input - norm1 -            mhAttn - lastRow - gate/"then" - norm2 -            ffn;
         input         - "residual"/mhAttn - lastRow - gate/"then"         - "residual"/ffn;
@@ -80,18 +80,18 @@ In the example above, `input` is an `Identity` that performs no computation. It 
 Both `Node` and `NodeGroup` can be stored in containers. However, slots connected with `-` hold each other's addresses, so the elements must keep their addresses without being copied or moved.
 
 ```cpp
-layers.reserve(config.numLayers);
-for (uint32_t i = 0; i < config.numLayers; ++i)
+blocks.reserve(config.nBlocks);
+for (uint32_t i = 0; i < config.nBlocks; ++i)
 {
-    // ... Per-layer configuration
-    layers.emplace_back(config.layerCfg);
+    // ... Per-block configuration
+    blocks.emplace_back(blockCfg);
 }
 
-for (size_t i = 1; i < layers.size(); ++i)
-    layers[i - 1] - layers[i];
+for (size_t i = 1; i < blocks.size(); ++i)
+    blocks[i - 1] - blocks[i];
 ```
 
-When a `std::vector` runs out of capacity, it moves existing elements to new memory. Inserting a temporary node with `push_back(Layer(...))` also causes a copy or move. Slot parent references or connections may still point to the original objects, causing access to the wrong objects during execution. Compilation succeeds, but graph execution fails.
+When a `std::vector` runs out of capacity, it moves existing elements to new memory. Inserting a temporary node with `push_back(Block(...))` also causes a copy or move. Slot parent references or connections may still point to the original objects, causing access to the wrong objects during execution. Compilation succeeds, but graph execution fails.
 
 The author must keep elements at stable addresses. There are two approaches.
 
@@ -100,8 +100,8 @@ The author must keep elements at stable addresses. There are two approaches.
 **2. `std::unique_ptr`**: Allocate elements on the heap and store only pointers in the container. Moving pointers within the vector does not move the objects they point to.
 
 ```cpp
-std::vector<std::unique_ptr<Layer>> layers;
-layers.push_back(std::make_unique<Layer>(layerCfg));
+std::vector<std::unique_ptr<Block>> blocks;
+blocks.push_back(std::make_unique<Block>(blockCfg));
 ```
 
 vAi allows the second approach but recommends the first.

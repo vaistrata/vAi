@@ -143,15 +143,14 @@ int main(int argc, char** argv)
     auto modelCfg = size->config();
     printf("model: llama3 %s\n", modelCfg.variant);
 
-    llama3::Net net(
-        {
-            .device = device,
-            .wDefaultDtype = Dtype::Fp16,
-        },
-        modelCfg,
-        {
-            .maxRuntimeContext = 4096,   // = the llama.cpp bench's n_ctx
-        });
+    // clang-format off
+    llama3::Net net({
+        .device = device,
+        .wDefaultDtype = Dtype::Fp16,
+    }, modelCfg, {
+        .maxRuntimeContext = 4096,   // = the llama.cpp bench's n_ctx
+    });
+    // clang-format on
 
     loadWeights<"meta">(net);
 

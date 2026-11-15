@@ -1,7 +1,7 @@
 #ifndef VAI_NODES_PERMUTE_H
 #define VAI_NODES_PERMUTE_H
 
-#include "node-common.h"
+#include "common.h"
 
 namespace vai::node {
 

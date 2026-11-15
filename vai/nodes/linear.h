@@ -3,7 +3,7 @@
 
 // Linear / fully-connected layer, tile (scalar / coopmat) and slab kernels
 // (ports of the ggml/llama.cpp Vulkan mul_mm / mul_mat_vec kernels).
-#include "node-common.h"
+#include "common.h"
 
 namespace vai::node {
 
@@ -407,11 +407,13 @@ inline int ggmlGuessTier(uint32_t M, uint32_t N, eva::Device device, bool coopma
 
     const bool mmS = !appleLike;
     const bool mmM = coopmat || fits(1);
+    // clang-format off
     const bool mmL = !appleLike
                   && vendor != eva::VENDOR_ID::QUALCOMM
                   && (coopmat || (fits(2)                              // scalar: shared memory,
                                && vendor != eva::VENDOR_ID::INTEL      // L wants coopmat, and
                                && vendor != eva::VENDOR_ID::AMD));     // a trusted driver on AMD
+    // clang-format on
 
     if ((mmS && (M <= 32 || N <= 32)) || (!mmM && !mmL)) return 0;
     if ((mmM && (M <= 64 || N <= 64)) || !mmL)           return 1;

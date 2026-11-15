@@ -35,47 +35,51 @@ void bindPaliGemma(nb::module_& m)
         "variant's resolution and the Gemma 2B decoder, built by preset(variant).");
     bindPresets(cfgCls, "PaliGemmaConfig", paligemmaPresets());
     cfgCls
-        .def_rw("vision_cfg",   &paligemma::ModelConfig::visionCfg,
-                "The SigLIP tower (VisionModelConfig); its image_size is the variant's.")
-        .def_rw("language_cfg", &paligemma::ModelConfig::languageCfg,
-                "The Gemma decoder and 257152-row token table (LanguageModelConfig).");
+        .def_rw("vision_trf",
+                &paligemma::ModelConfig::visionTrf,
+                "The SigLIP tower (VisionTransformerConfig); its image_size is the variant's.")
+        .def_rw("language_trf", &paligemma::ModelConfig::languageTrf, "The Gemma decoder (TransformerConfig).")
+        .def_rw(
+            "vocab_size", &paligemma::ModelConfig::vocabSize, "257152 rows: 256000 text, 1024 <loc*> and 128 <seg*>.")
+        .def_rw("max_trained_context",
+                &paligemma::ModelConfig::maxTrainedContext,
+                "The trained context, which caps the KV cache.");
 
-    auto cls = nb::class_<paligemma::Net, vai::NeuralNet>(m, "PaliGemmaModel")
-                   .def(
-                       "__init__",
-                       [](paligemma::Net* self,
-                          const paligemma::ModelConfig& config,
-                          vai::Dtype w_default_dtype,
-                          vai::Dtype o_default_dtype,
-                          std::optional<eva::Device>
-                              device,
-                          std::optional<uint32_t>
-                              max_runtime_context,
-                          vai::Dtype kv_cache_dtype) {
-                           checkVisionConfig(config.visionCfg, "PaliGemmaModel", "config.vision_cfg");
-                           checkLanguageConfig(config.languageCfg,
-                                               "PaliGemmaModel",
-                                               "config.language_cfg",
-                                               /*clampsContext*/ true);
-                           const uint32_t context =
-                               runtimeContext<paligemma::RuntimeConfig>(max_runtime_context, "PaliGemmaModel");
-                           const vai::NeuralNetConfig cfg = netConfig(w_default_dtype, o_default_dtype, device);
-                           new (self) paligemma::Net(cfg,
-                                                     config,
-                                                     {
-                                                         .kvCacheDtype = kv_cache_dtype,
-                                                         .maxRuntimeContext = context,
-                                                     });
-                       },
-                       nb::arg("config") = paligemma::ModelConfig::_3B_224(),
-                       nb::arg("w_default_dtype") = vai::Dtype::Fp16,
-                       nb::arg("o_default_dtype") = vai::Dtype::Fp32,
-                       nb::arg("device") = nb::none(),
-                       nb::arg("max_runtime_context") = nb::none(),
-                       nb::arg("kv_cache_dtype") = vai::Dtype::Fp16,
-                       "Build a PaliGemma model (default config: PaliGemmaConfig.preset('3B-224')). "
-                       "`max_runtime_context` bounds the KV cache, clamped to the checkpoint's "
-                       "max_trained_context (None: all 8K of it); an image costs num_patches of it.");
+    auto cls =
+        nb::class_<paligemma::Net, vai::NeuralNet>(m, "PaliGemmaModel")
+            .def(
+                "__init__",
+                [](paligemma::Net* self,
+                   const paligemma::ModelConfig& config,
+                   vai::Dtype w_default_dtype,
+                   vai::Dtype o_default_dtype,
+                   std::optional<eva::Device>
+                       device,
+                   std::optional<uint32_t>
+                       max_runtime_context,
+                   vai::Dtype kv_cache_dtype) {
+                    checkVisionConfig(config.visionTrf, "PaliGemmaModel", "config.vision_trf");
+                    checkLanguageConfig(config, "PaliGemmaModel");
+                    const uint32_t context =
+                        runtimeContext<paligemma::RuntimeConfig>(max_runtime_context, "PaliGemmaModel");
+                    const vai::NeuralNetConfig cfg = netConfig(w_default_dtype, o_default_dtype, device);
+                    new (self) paligemma::Net(
+                        cfg,
+                        config,
+                        {
+                            .kvCacheDtype = kv_cache_dtype,
+                            .maxRuntimeContext = context,
+                        });
+                },
+                nb::arg("config") = paligemma::ModelConfig::_3B_224(),
+                nb::arg("w_default_dtype") = vai::Dtype::Fp16,
+                nb::arg("o_default_dtype") = vai::Dtype::Fp32,
+                nb::arg("device") = nb::none(),
+                nb::arg("max_runtime_context") = nb::none(),
+                nb::arg("kv_cache_dtype") = vai::Dtype::Fp16,
+                "Build a PaliGemma model (default config: PaliGemmaConfig.preset('3B-224')). "
+                "`max_runtime_context` bounds the KV cache, clamped to the checkpoint's "
+                "max_trained_context (None: all 8K of it); an image costs num_patches of it.");
     bindWeightsAndTags<paligemma::Net>(
         cls,
         "PaliGemmaModel",
@@ -96,11 +100,13 @@ void bindPaliGemma(nb::module_& m)
             const char* who = "PaliGemmaModel.prefill";
             PrefillArgs a = prefillArgs(self, prompt_token_ids, who);
             vai::Tensor img = stageInput(self, "inImage", image, who);
-            const auto& v = model.modelCfg.visionCfg;
+            const auto& v = model.modelCfg.visionTrf;
+            // clang-format off
             if (!img.isShapeOf(v.imageChannels, v.imageSize, v.imageSize))
                 throw nb::value_error(("PaliGemmaModel.prefill: image must be ["
                     + std::to_string(v.imageChannels) + ", " + std::to_string(v.imageSize) + ", "
                     + std::to_string(v.imageSize) + "]").c_str());
+            // clang-format on
             {
                 nb::gil_scoped_release rel;   // waits the previous forward
                 model.prefill(img, a.tokens, a.token);
@@ -117,12 +123,12 @@ void bindPaliGemma(nb::module_& m)
     bindDecodeLoop<paligemma::Net>(cls, "PaliGemmaModel");
     cls.def_prop_ro(
            "num_patches",
-           [](paligemma::Net& self) { return self.modelCfg.visionCfg.numPatches(); },
-           "Soft tokens one image adds to the context (vision_cfg.num_patches).")
+           [](paligemma::Net& self) { return self.modelCfg.visionTrf.numPatches(); },
+           "Soft tokens one image adds to the context (vision_trf.num_patches).")
         .def_prop_ro(
             "image_size",
-            [](paligemma::Net& self) { return self.modelCfg.visionCfg.imageSize; },
-            "Side of the square image prefill() takes (vision_cfg.image_size).");
+            [](paligemma::Net& self) { return self.modelCfg.visionTrf.imageSize; },
+            "Side of the square image prefill() takes (vision.image_size).");
 
     // The graph is built in C++, out of sight of the Python input()/output().
     declareBoundaries(cls, {"inImage", "inTokenIds"}, {"nextTokenId"});

@@ -26,13 +26,13 @@ void setProfileTags(paligemma::Net& net)
         return std::string(tower) + ".Linear.[" + std::to_string(in) + "x" + std::to_string(out) + "]";
     };
 
-    // Vision tower — SigLIP, one shape for every layer.
+    // Vision tower — SigLIP, one shape for every block.
     const auto& modelCfg = net.modelCfg;
-    const auto& vitCfg = modelCfg.visionCfg;
-    const uint32_t Dv = vitCfg.layerCfg.embedDim;         // 1152
-    const uint32_t Dvff = vitCfg.layerCfg.ffnHiddenDim;   // 4304
+    const auto& vitCfg = modelCfg.visionTrf;
+    const uint32_t Dv = vitCfg.embedDim;         // 1152
+    const uint32_t Dvff = vitCfg.ffnHiddenDim;   // 4304
 
-    for (auto& b : net.encoder.layers)
+    for (auto& b : net.encoder.blocks)
     {
         b.norm1.setProfileTag("Vision.LayerNorm");
         b.mhAttn.projQ.setProfileTag(lin("Vision", Dv, Dv));
@@ -47,10 +47,10 @@ void setProfileTags(paligemma::Net& net)
     net.patchEmbed.perPatches.setProfileTag("Vision.Permute");
     net.patchEmbed.project.setProfileTag(lin("Vision", vitCfg.imageChannels * vitCfg.patchSize * vitCfg.patchSize, Dv));
     net.encoder.finalNorm.setProfileTag("Vision.LayerNorm");
-    net.projector.setProfileTag(lin("Vision", Dv, modelCfg.languageCfg.layerCfg.embedDim));
+    net.projector.setProfileTag(lin("Vision", Dv, modelCfg.languageTrf.embedDim));
 
     // Text tower — Gemma 2B.
-    const auto& langCfg = modelCfg.languageCfg.layerCfg;
+    const auto& langCfg = modelCfg.languageTrf;
     const uint32_t D = langCfg.embedDim;                 // 2048
     const uint32_t Hq = langCfg.numQHeads;               //    8
     const uint32_t Hkv = langCfg.numKVHeads;             //    1 (GQA)
@@ -58,9 +58,9 @@ void setProfileTags(paligemma::Net& net)
     const uint32_t Dq = Hq * Dh;                         // 2048  (Q projection)
     const uint32_t Dkv = Hkv * Dh;                       //  256  (K/V projection)
     const uint32_t Dff = langCfg.ffnHiddenDim;           // 16384
-    const uint32_t V = modelCfg.languageCfg.vocabSize;   // 257152
+    const uint32_t V = modelCfg.vocabSize;               // 257152
 
-    for (auto& b : net.decoder.layers)
+    for (auto& b : net.decoder.blocks)
     {
         b.norm1.setProfileTag("Text.RmsNorm");
         b.mhAttn.projQ.setProfileTag(lin("Text", D, Dq));

@@ -21,7 +21,7 @@ from pyvai._pyvai import model_nodes
 
 ROOT = Path(__file__).resolve().parents[2]
 TESTS = ROOT / "python" / "tests"
-NOT_NODES = {"vai/nodes/node-common.h"}  # node headers that declare no node
+NOT_NODES = {"vai/nodes/common.h"}  # node headers that declare no node
 NODE_NAME = re.compile(r'"(\w+Node)"')
 
 # Stateful nodes (KV cache, counters, sampling, branches) whose tests need
@@ -33,7 +33,6 @@ UNTESTED = frozenset(
         "RowSliceScatterNode",
         "IndexCopyNode",
         "TokenEmbeddingNode",
-        "TimeEmbeddingNode",
         "CyclicTableReaderNode",
         "RopeNode",
         "AttentionNode",

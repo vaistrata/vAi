@@ -4,7 +4,7 @@ A group combines `Node` objects and their connections into a reusable component.
 
 Groups inherit from `vai::NodeGroup`. As described in the custom node guide, a `Node` is a unit of computation in the graph. A group combines `Node` objects, so the actual computation runs in the `Node` objects inside it. A group can be regarded as a small model built from these `Node` objects. New GPU computations require a new `Node` and kernel; see [Writing custom nodes and kernels](nodes.md).
 
-The main example in this guide is [`FeedForward`](../../../vai/groups/feed-forward.h), used by the `Classic` configuration of `Transformer`. The implementation takes the contributor's configuration, creates two `Linear` `Node` objects, connects them internally, and exposes the group's inputs and outputs. The normalization `Node` objects in [`MultiHeadAttention`](../../../vai/groups/multi-head-attention.h) illustrate how to add or omit `Node` objects according to the desired configuration. The layer structure of [`Transformer`](../../../vai/groups/transformer.h) illustrates how to create multiple instances of the same block and connect them in sequence.
+The main example in this guide is [`FeedForward`](../../../vai/groups/feed-forward.h), used by the `Classic` configuration of `Transformer`. The implementation takes the contributor's configuration, creates two `Linear` `Node` objects, connects them internally, and exposes the group's inputs and outputs. The normalization `Node` objects in [`MultiHeadAttention`](../../../vai/groups/multi-head-attention.h) illustrate how to add or omit `Node` objects according to the desired configuration. The block structure of [`Transformer`](../../../vai/groups/transformer.h) illustrates how to create multiple instances of the same block and connect them in sequence.
 
 ## 1. Define the group boundary and inputs and outputs
 
@@ -22,7 +22,7 @@ For example, `FeedForward` combines two `Linear` `Node` objects and an activatio
 
 `...` means that the leading axes are preserved. For example, an input of `[T, inDim]` produces an output of `[T, outDim]`. Specify any dtype and dimension size restrictions according to the conditions supported by the internal `Node` objects.
 
-A group can contain other groups as well as `Node` objects. For example, `TransformerLayer` uses `attention` and `FeedForward` as subgroups. Each subgroup connects its internal `Node` objects, and the parent group connects these subgroups to other components.
+A group can contain other groups as well as `Node` objects. For example, `TransformerBlock` uses `attention` and `FeedForward` as subgroups. Each subgroup connects its internal `Node` objects, and the parent group connects these subgroups to other components.
 
 ## 2. Distinguish configuration values from structural differences
 
@@ -50,7 +50,7 @@ Express structural differences according to the following criteria.
 
 | What varies | How to express it | `Transformer` family example |
 |---|---|---|
-| Dimensions or repetition count | Receive values through `Config`. | `hiddenDim`, `numLayers` |
+| Dimensions or repetition count | Receive values through `Config`. | `hiddenDim`, `nBlocks` |
 | Whether a particular `Node` is used | Use `std::optional` and construct it only when needed. | Optional normalization in attention |
 | Major differences in member types or connection structure | Consider separate types, for example through templates. | `TransformerType`, `QkvLayout` |
 
@@ -58,7 +58,7 @@ Depth and dimensions are values passed to the constructor. Decide whether to use
 
 ### 2.2 Select node and subgroup types
 
-The types of `Node` objects or subgroups can change while keeping the same connection structure. The `Classic` and `Default` configurations of [`TransformerLayer`](../../../vai/groups/transformer-layer.h) share a connection structure but use different normalization `Node` and `FeedForward` group types.
+The types of `Node` objects or subgroups can change while keeping the same connection structure. The `Classic` and `Default` configurations of [`TransformerBlock`](../../../vai/groups/transformer.h) share a connection structure but use different normalization `Node` and `FeedForward` group types.
 
 The following type selection code is in the `vai::group` namespace.
 
@@ -71,12 +71,12 @@ template<> struct BranchFfn<TransformerType::Default> { using Type = GatedFeedFo
 The first line declares the `BranchFfn` template. The next two lines specify the definitions for `Classic` and `Default`. Providing separate definitions for specific template arguments is called **template specialization**.
 
 `Type` is `FeedForward` for `Classic` and `GatedFeedForward` for `Default`.
-`BranchNorm` selects normalization `Node` types in the same way: `LayerNorm` for `Classic` and `RmsNorm` for `Default`. `TransformerLayer` declares its members with the selected types, so there is no need to write separate constructors and connection code for each configuration.
+`BranchNorm` selects normalization `Node` types in the same way: `LayerNorm` for `Classic` and `RmsNorm` for `Default`. `TransformerBlock` declares its members with the selected types, so there is no need to write separate constructors and connection code for each configuration.
 
 A model or parent group specifies the layer configuration as follows.
 
 ```cpp
-using ClassicLayer = vai::group::TransformerLayer<
+using ClassicBlock = vai::group::TransformerBlock<
     vai::TransformerType::Classic, vai::QkvLayout::Separate>;
 ```
 
@@ -141,7 +141,7 @@ The same `hiddenDim` is passed as the first `Node`'s output dimension and the se
 
 ### 3.2 Construct subgroups by type
 
-Declare members with the subgroup types selected in section 2. The following code declares the `ffn` member with the type selected by `TransformerLayer`.
+Declare members with the subgroup types selected in section 2. The following code declares the `ffn` member with the type selected by `TransformerBlock`.
 
 ```cpp
 typename BranchFfn<layout>::Type ffn;
@@ -152,14 +152,14 @@ typename BranchFfn<layout>::Type ffn;
 Pass configuration matching the selected type when constructing the member. The following constructor excerpt creates `ffn`. Initialization of other members is omitted.
 
 ```cpp
-TransformerLayer(Config config)
-: ffn(ffnConfig(config))
+TransformerBlock(Config config)
+: ffn(ffnConfig(config.base))
 {
     // ... Internal connections and slot exposure
 }
 ```
 
-`ffnConfig(config)` illustrates how to take the parent group's configuration and create the configuration passed to a subgroup. The enclosing `ffn(...)` constructs the `ffn` member with that configuration. A configuration helper like this allows the parent group to share construction code even when each type has a different configuration struct.
+`ffnConfig(config.base)` illustrates how to take the parent group's configuration and create the configuration passed to a subgroup. The enclosing `ffn(...)` constructs the `ffn` member with that configuration. A configuration helper like this allows the parent group to share construction code even when each type has a different configuration struct.
 
 The parent group determines the configuration values passed to each subgroup. Each subgroup handles the creation and connection of its own internal `Node` objects.
 
@@ -184,22 +184,27 @@ Slots reference their owning `Node` and store the addresses of connected slots. 
 
 ### 3.4 Construct repeated groups and preserve addresses
 
-Repeated blocks can be stored in a vector. `Transformer` has a `std::vector<Layer> layers` member, where `Layer` is an alias for the selected `TransformerLayer` type. The following block construction code is from the `Transformer` constructor. Code that applies per-layer settings is omitted.
+Repeated blocks can be stored in a vector. `Transformer` has a `std::vector<Block> blocks` member, where `Block` is an alias for the selected `TransformerBlock` type. The following block construction code is from the `Transformer` constructor. Code that applies per-block settings is omitted.
 
 ```cpp
-VAI_ASSERT(config.numLayers >= 1);
+const uint32_t L = config.base.nBlocks;
+VAI_ASSERT(L >= 1);
 
-layers.reserve(config.numLayers);
-for (uint32_t i = 0; i < config.numLayers; ++i)
+blocks.reserve(L);
+for (uint32_t i = 0; i < L; ++i)
 {
-    // ... Calculate settings for this layer
-    layers.emplace_back(config.layerCfg);
+    const bool last = i == L - 1;
+    blocks.emplace_back(typename Block::Config{
+        .base = config.base,
+        // ...
+        .sliceLastRow = config.sliceLastRow && last,
+    });
 }
 ```
 
 Reserve all required storage first with `reserve()`, then construct groups in place with `emplace_back()`. Avoid subsequent operations that move elements or reallocate the vector. Stable addresses are required for the engine to work. For other ownership options, see [Container precautions](../03-usage/node-group.md#4-precautions-when-using-containers).
 
-The parent group determines the repetition count and per-child settings. For example, an option that applies only to the last layer can be set by the parent before constructing that layer.
+The parent group determines the repetition count and per-child settings. For example, an option that applies only to the last block can be set by the parent before constructing that block.
 
 ## 4. Connect internal paths
 
@@ -217,14 +222,14 @@ As shown above, `fc1`'s `out0` connects directly to `fc2`'s `in0`. Connections t
 
 ### 4.2 Connect repeated groups in sequence
 
-Repeated groups in a vector can be connected with a loop that joins each element's output to the next element's input. The following excerpt from [`Transformer`](../../../vai/groups/transformer.h) connects the constructed groups in sequence. Run this loop after constructing all groups in the `layers` vector from section 3.
+Repeated groups in a vector can be connected with a loop that joins each element's output to the next element's input. The following excerpt from [`Transformer`](../../../vai/groups/transformer.h) connects the constructed groups in sequence. Run this loop after constructing all groups in the `blocks` vector from section 3.
 
 ```cpp
-for (size_t i = 1; i < layers.size(); ++i)
-    layers[i - 1] - layers[i];
+for (size_t i = 1; i < blocks.size(); ++i)
+    blocks[i - 1] - blocks[i];
 ```
 
-Each connection joins `layers[i - 1]`'s `out0` to `layers[i]`'s `in0`.
+Each connection joins `blocks[i - 1]`'s `out0` to `blocks[i]`'s `in0`.
 
 ### 4.3 Select slots by name
 
@@ -347,10 +352,10 @@ If the group contains a `Node` that needs an external buffer or state, it can pr
 
 **Helpers for type-specific configuration**
 
-When each selected component has a different configuration type, a function can use `if constexpr` to create the appropriate configuration. The following is `TransformerLayer::ffnConfig()` with individual field values omitted.
+When each selected component has a different configuration type, a function can use `if constexpr` to create the appropriate configuration. The following is `TransformerBlock::ffnConfig()` with individual field values omitted.
 
 ```cpp
-static auto ffnConfig(const Config& config)
+static auto ffnConfig(const TransformerConfig& base)
 {
     if constexpr (layout == TransformerType::Classic)
         return FeedForward::Config{/* ... */};
@@ -363,13 +368,13 @@ static auto ffnConfig(const Config& config)
 
 **Supported choices and initialization order**
 
-The shared implementation of `TransformerLayer` handles both `Classic` and `Default`. The supported choices are the values for which `BranchNorm` and `BranchFfn` are defined; a value without a definition does not compile. As in `MultiHeadAttention`, the primary template can also be declared without a definition, with groups defined only for supported choices. Template specialization is a way to separate implementations, not a format required by the engine.
+The shared implementation of `TransformerBlock` handles both `Classic` and `Default`. The supported choices are the values for which `BranchNorm` and `BranchFfn` are defined; a value without a definition does not compile. As in `MultiHeadAttention`, the primary template can also be declared without a definition, with groups defined only for supported choices. Template specialization is a way to separate implementations, not a format required by the engine.
 
 Declare and initialize derived values used by multiple members before those members. C++ initializes members in declaration order, not in the order listed in the initializer list.
 
 **Order of configuration changes for repeated blocks**
 
-For settings that differ by layer, specify the order of application and how long changed values persist. `Transformer` modifies the same `config.layerCfg` in its constructor loop as it builds the layers, so a changed value persists into the next layer. A value that is on only for the last layer, such as `sliceLastRow`, is therefore assigned again for every layer. Finalize any conditions the parent must guarantee before constructing the child. The following example is an excerpt from the descriptive comment for `FeedForward`.
+For settings that differ by block, specify the order of application and how long changed values persist. `Transformer` builds a fresh `Block::Config` for each block, so no block's settings carry into the next. A value that is on only for the last block, such as `sliceLastRow`, is set by the `last` condition. Finalize any conditions the parent must guarantee before constructing the child. The following example is an excerpt from the descriptive comment for `FeedForward`.
 
 ```cpp
 /////////////////////////////////////////////////////////////////////////////////////////

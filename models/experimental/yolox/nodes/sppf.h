@@ -1,7 +1,7 @@
 #ifndef EXPERIMENTAL_YOLOX_NODES_SPPF_H
 #define EXPERIMENTAL_YOLOX_NODES_SPPF_H
 
-#include "vai/nodes/node-common.h"
+#include "vai/nodes/common.h"
 
 namespace model::experimental::yolox::node {
 

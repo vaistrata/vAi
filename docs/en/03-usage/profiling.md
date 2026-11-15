@@ -7,7 +7,7 @@ vAi can measure each node's **GPU execution time**. It records timestamps before
 Profiling is enabled when at least one node has a tag. With no tags, there is no profiling overhead.
 
 ```cpp
-net.decoder.layers[i].mhAttn.attn.setProfileTag("Attn");
+net.decoder.blocks[i].mhAttn.attn.setProfileTag("Attn");
 ```
 
 
@@ -16,10 +16,10 @@ net.decoder.layers[i].mhAttn.attn.setProfileTag("Attn");
 Times for nodes with the same tag are summed.
 
 ```cpp
-for (uint32_t i = 0; i < net.modelCfg.languageCfg.numLayers; ++i)
+for (uint32_t i = 0; i < net.modelCfg.trf.nBlocks; ++i)
 {
-    net.decoder.layers[i].norm1.setProfileTag("LayerNorm");
-    net.decoder.layers[i].norm2.setProfileTag("LayerNorm");
+    net.decoder.blocks[i].norm1.setProfileTag("LayerNorm");
+    net.decoder.blocks[i].norm2.setProfileTag("LayerNorm");
 }
 ```
 
@@ -98,8 +98,8 @@ After inspecting the full profile, clear the existing tags and tag the desired n
 ```cpp
 net.clearProfileTags();
 
-net.decoder.layers[0].ffn.fc1.setProfileTag("fc1");
-net.decoder.layers[0].ffn.fc2.setProfileTag("fc2");
+net.decoder.blocks[0].ffn.fc1.setProfileTag("fc1");
+net.decoder.blocks[0].ffn.fc2.setProfileTag("fc2");
 ```
 
 Pass an empty string to remove the tag from a specific node.

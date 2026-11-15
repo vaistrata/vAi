@@ -33,13 +33,13 @@ void setProfileTags(paligemma::Net& net)
         return std::string(tower) + ".Linear.[" + std::to_string(in) + "x" + std::to_string(out) + "]";
     };
 
-    // Vision tower — SigLIP, one shape for every layer.
+    // Vision tower — SigLIP, one shape for every block.
     const auto& modelCfg = net.modelCfg;
-    const auto& vitCfg = modelCfg.visionCfg;
-    const uint32_t Dv = vitCfg.layerCfg.embedDim;         // 1152
-    const uint32_t Dvff = vitCfg.layerCfg.ffnHiddenDim;   // 4304
+    const auto& vitCfg = modelCfg.visionTrf;
+    const uint32_t Dv = vitCfg.embedDim;         // 1152
+    const uint32_t Dvff = vitCfg.ffnHiddenDim;   // 4304
 
-    for (auto& b : net.encoder.layers)
+    for (auto& b : net.encoder.blocks)
     {
         b.norm1.setProfileTag("Vision.LayerNorm");
         b.mhAttn.projQ.setProfileTag(lin("Vision", Dv, Dv));
@@ -54,10 +54,10 @@ void setProfileTags(paligemma::Net& net)
     net.patchEmbed.perPatches.setProfileTag("Vision.Permute");
     net.patchEmbed.project.setProfileTag(lin("Vision", vitCfg.imageChannels * vitCfg.patchSize * vitCfg.patchSize, Dv));
     net.encoder.finalNorm.setProfileTag("Vision.LayerNorm");
-    net.projector.setProfileTag(lin("Vision", Dv, modelCfg.languageCfg.layerCfg.embedDim));
+    net.projector.setProfileTag(lin("Vision", Dv, modelCfg.languageTrf.embedDim));
 
     // Text tower — Gemma 2B.
-    const auto& langCfg = modelCfg.languageCfg.layerCfg;
+    const auto& langCfg = modelCfg.languageTrf;
     const uint32_t D = langCfg.embedDim;                 // 2048
     const uint32_t Hq = langCfg.numQHeads;               //    8
     const uint32_t Hkv = langCfg.numKVHeads;             //    1 (GQA)
@@ -65,9 +65,9 @@ void setProfileTags(paligemma::Net& net)
     const uint32_t Dq = Hq * Dh;                         // 2048  (Q projection)
     const uint32_t Dkv = Hkv * Dh;                       //  256  (K/V projection)
     const uint32_t Dff = langCfg.ffnHiddenDim;           // 16384
-    const uint32_t V = modelCfg.languageCfg.vocabSize;   // 257152
+    const uint32_t V = modelCfg.vocabSize;               // 257152
 
-    for (auto& b : net.decoder.layers)
+    for (auto& b : net.decoder.blocks)
     {
         b.norm1.setProfileTag("Text.RmsNorm");
         b.mhAttn.projQ.setProfileTag(lin("Text", D, Dq));
@@ -94,14 +94,13 @@ int main()
     // Load model
     auto modelCfg = paligemma::ModelConfig::_3B_224();
     printf("Loading PaliGemma-%s model...\n", modelCfg.variant);
-    paligemma::Net net(
-        {
-            .wDefaultDtype = Dtype::Fp16,
-        },
-        modelCfg,
-        {
-            .maxRuntimeContext = 2048,
-        });
+    // clang-format off
+    paligemma::Net net({
+        .wDefaultDtype = Dtype::Fp16,
+    }, modelCfg, {
+        .maxRuntimeContext = 2048,
+    });
+    // clang-format on
 
     // Configure the per-node GPU execution-time profiler
     setProfileTags(net);
@@ -117,19 +116,17 @@ int main()
     utils::Tokenizer tokenizer(VAI_DATA_DIR "/tokenizers/paligemma/tokenizer.json");
 
     std::string imagePath = VAI_DATA_DIR "/images/dog.jpg";
-    const uint32_t C = modelCfg.visionCfg.imageChannels;
-    const uint32_t S = modelCfg.visionCfg.imageSize;
+    const uint32_t C = modelCfg.visionTrf.imageChannels;
+    const uint32_t S = modelCfg.visionTrf.imageSize;
 
     // Preprocess the image
     printf("Loading image: %s\n", imagePath.c_str());
-    std::vector<float> pixels =
-        utils::ImageProcessor(imagePath)
-            .resize(
-                S,
-                utils::Resize::
-                    BilinearAlignCorners)   // SigLIP squashes the whole image to its trained square and scales it to [-1, 1].
-            .normalize(-1.0f, 1.0f)
-            .chw();
+    // clang-format off
+    std::vector<float> pixels = utils::ImageProcessor(imagePath)
+        .resize(S, utils::Resize::BilinearAlignCorners)    // SigLIP squashes the whole image to its trained square and scales it to [-1, 1].
+        .normalize(-1.0f, 1.0f)
+        .chw();
+    // clang-format on
 
     // Prepare prompt and encode it to token ids
     std::string prompt = "caption en";
@@ -153,12 +150,13 @@ int main()
 
     // Prefill
     {
-        utils::TimeChecker totalTimer("\n"
-                                      "────────────────────────────────────────\n"
-                                      "▶ Prefill {} image + {} prompt tokens in {}ms \n"
-                                      "────────────────────────────────────────",
-                                      modelCfg.visionCfg.numPatches(),
-                                      promptLength);
+        utils::TimeChecker totalTimer(
+            "\n"
+            "────────────────────────────────────────\n"
+            "▶ Prefill {} image + {} prompt tokens in {}ms \n"
+            "────────────────────────────────────────",
+            modelCfg.visionTrf.numPatches(),
+            promptLength);
 
         net.prefill(inImage, promptTokenIds, &nextTokenId);
         ids.push_back(nextTokenId.getData<uint32_t>()[0]);
@@ -170,11 +168,12 @@ int main()
     {
         const int maxNewTokens = 128;
 
-        utils::TimeChecker totalTimer("\n"
-                                      "────────────────────────────────────────\n"
-                                      "▶ Decode {} tokens in {}ms \n"
-                                      "────────────────────────────────────────",
-                                      maxNewTokens);
+        utils::TimeChecker totalTimer(
+            "\n"
+            "────────────────────────────────────────\n"
+            "▶ Decode {} tokens in {}ms \n"
+            "────────────────────────────────────────",
+            maxNewTokens);
 
         for (int gen = 0; gen < maxNewTokens; gen++)
         {

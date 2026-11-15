@@ -16,19 +16,19 @@ namespace {
 
 void setProfileTags(llama3::Net& net)
 {
-    const auto& layerCfg = net.modelCfg.languageCfg.layerCfg;
-    const uint32_t D = layerCfg.embedDim;
-    const uint32_t Dkv = layerCfg.headDim * layerCfg.numKVHeads;
-    const uint32_t Dff = layerCfg.ffnHiddenDim;
-    const uint32_t V = net.modelCfg.languageCfg.vocabSize;
+    const auto& trf = net.modelCfg.trf;
+    const uint32_t D = trf.embedDim;
+    const uint32_t Dkv = trf.headDim * trf.numKVHeads;
+    const uint32_t Dff = trf.ffnHiddenDim;
+    const uint32_t V = net.modelCfg.vocabSize;
 
     auto lin = [](uint32_t in, uint32_t out) {
         return "Linear.[" + std::to_string(in) + "x" + std::to_string(out) + "]";
     };
 
-    for (uint32_t i = 0; i < net.modelCfg.languageCfg.numLayers; ++i)
+    for (uint32_t i = 0; i < net.modelCfg.trf.nBlocks; ++i)
     {
-        auto& b = net.decoder.layers[i];
+        auto& b = net.decoder.blocks[i];
         b.norm1.setProfileTag("RmsNorm");
         b.mhAttn.projQ.setProfileTag(lin(D, D));
         b.mhAttn.projK.setProfileTag(lin(D, Dkv));

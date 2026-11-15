@@ -26,46 +26,45 @@ void setProfileTags(gemma3::Net& net)
     auto towerLin = [](const char* tower, uint32_t in, uint32_t out) {
         return std::string(tower) + ".Linear.[" + std::to_string(in) + "x" + std::to_string(out) + "]";
     };
-    const auto& decoderCfg = net.modelCfg.decoder;
-    const uint32_t D = decoderCfg.embedDim;
-    const uint32_t H = decoderCfg.numQHeads;
-    const uint32_t Hkv = decoderCfg.numKVHeads;
-    const uint32_t Dh = decoderCfg.headDim;
+    const auto& trf = net.modelCfg.trf;
+    const uint32_t D = trf.embedDim;
+    const uint32_t H = trf.numQHeads;
+    const uint32_t Hkv = trf.numKVHeads;
+    const uint32_t Dh = trf.headDim;
     const uint32_t Dq = H * Dh;
     const uint32_t Dkv = Hkv * Dh;
-    const uint32_t Dff = decoderCfg.ffnHiddenDim;
+    const uint32_t Dff = trf.ffnHiddenDim;
     const uint32_t V = net.modelCfg.vocabSize;
 
     // Vision encoder
     if (net.visionEncoder)
     {
-        const auto& v = *net.modelCfg.vision;
-        const auto& visionLayer = v.layerCfg;
+        const auto& v = gemma3::group::VisionEncoder::config;
         auto& vision = net.visionEncoder.value();
 
-        for (auto& b : vision.encoder.layers)
+        for (auto& b : vision.encoder.blocks)
         {
             b.norm1.setProfileTag("Vision.LayerNorm");
-            b.mhAttn.projQ.setProfileTag(towerLin("Vision", visionLayer.embedDim, visionLayer.embedDim));
-            b.mhAttn.projK.setProfileTag(towerLin("Vision", visionLayer.embedDim, visionLayer.embedDim));
-            b.mhAttn.projV.setProfileTag(towerLin("Vision", visionLayer.embedDim, visionLayer.embedDim));
+            b.mhAttn.projQ.setProfileTag(towerLin("Vision", v.embedDim, v.embedDim));
+            b.mhAttn.projK.setProfileTag(towerLin("Vision", v.embedDim, v.embedDim));
+            b.mhAttn.projV.setProfileTag(towerLin("Vision", v.embedDim, v.embedDim));
             b.mhAttn.attn.setProfileTag("Vision.Attn");
-            b.mhAttn.projOut.setProfileTag(towerLin("Vision", visionLayer.embedDim, visionLayer.embedDim));
+            b.mhAttn.projOut.setProfileTag(towerLin("Vision", v.embedDim, v.embedDim));
             b.norm2.setProfileTag("Vision.LayerNorm");
-            b.ffn.fc1.setProfileTag(towerLin("Vision", visionLayer.embedDim, visionLayer.ffnHiddenDim));
-            b.ffn.fc2.setProfileTag(towerLin("Vision", visionLayer.ffnHiddenDim, visionLayer.embedDim));
+            b.ffn.fc1.setProfileTag(towerLin("Vision", v.embedDim, v.ffnHiddenDim));
+            b.ffn.fc2.setProfileTag(towerLin("Vision", v.ffnHiddenDim, v.embedDim));
         }
 
         vision.patchEmbed.perPatches.setProfileTag("Vision.Permute");
 
         vision.patchEmbed.project.setProfileTag(
-            towerLin("Vision", v.imageChannels * v.patchSize * v.patchSize, visionLayer.embedDim));
+            towerLin("Vision", v.imageChannels * v.patchSize * v.patchSize, v.embedDim));
 
         vision.encoder.finalNorm.setProfileTag("Vision.LayerNorm");
 
         vision.pool.setProfileTag("Vision.Pool");
         vision.imageNorm.setProfileTag("Vision.RmsNorm");
-        net.projector->setProfileTag(towerLin("Vision", visionLayer.embedDim, decoderCfg.embedDim));
+        net.projector->setProfileTag(towerLin("Vision", v.embedDim, trf.embedDim));
 
 #ifdef TEST_INDEX_COPY
         net.imageCopy.setProfileTag("Vision.IndexCopy");
@@ -83,7 +82,7 @@ void setProfileTags(gemma3::Net& net)
         return textPrefix + "Linear.[" + std::to_string(in) + "x" + std::to_string(out) + "]";
     };
 
-    for (uint32_t i = 0; i < decoderCfg.nBlocks; ++i)
+    for (uint32_t i = 0; i < trf.nBlocks; ++i)
     {
         auto& b = net.decoder.blocks[i];
         b.norm1.setProfileTag(textTag("RmsNorm"));
@@ -119,14 +118,13 @@ int main()
     // Load model
     auto modelCfg = gemma3::ModelConfig::get("4B");
     printf("Loading Gemma-%s model...\n", modelCfg.variant);
-    gemma3::Net net(
-        {
-            .wDefaultDtype = Dtype::Fp16,
-        },
-        modelCfg,
-        {
-            .maxRuntimeContext = 4096,
-        });
+    // clang-format off
+    gemma3::Net net({
+        .wDefaultDtype = Dtype::Fp16,
+    }, modelCfg, {
+        .maxRuntimeContext = 4096,
+    });
+    // clang-format on
 
     // Configure the per-node GPU execution-time profiler
     setProfileTags(net);
@@ -148,8 +146,8 @@ int main()
         // VAI_DATA_DIR "/images/paper_captured3.jpg",
     };
     const uint32_t B = (uint32_t)std::size(imagePaths);
-    const uint32_t C = modelCfg.vision->imageChannels;
-    const uint32_t S = modelCfg.vision->imageSize;
+    const uint32_t C = gemma3::group::VisionEncoder::config.imageChannels;
+    const uint32_t S = gemma3::group::VisionEncoder::config.imageSize;
 
     // Preprocess the images and stack them into [B, C, S, S]
     for (uint32_t b = 0; b < B; ++b)
@@ -161,7 +159,7 @@ int main()
     for (uint32_t b = 0; b < B; ++b)
         prompt = "<start_of_image>" + prompt;
     printf("\nPrompt: \"%s\"\n", prompt.c_str());
-    prompt = gemma3::expandImagePlaceholders(prompt, modelCfg.vision->tokensPerImage);
+    prompt = gemma3::expandImagePlaceholders(prompt, gemma3::group::VisionEncoder::tokensPerImage);
     std::vector<int> ids = tokenizer.encode(prompt, true);
     const uint32_t promptLength = (uint32_t)ids.size();
 
@@ -181,11 +179,12 @@ int main()
 
     // Prefill
     {
-        utils::TimeChecker totalTimer("\n"
-                                      "────────────────────────────────────────\n"
-                                      "▶ Prefill {} tokens in {}ms \n"
-                                      "────────────────────────────────────────",
-                                      promptLength);
+        utils::TimeChecker totalTimer(
+            "\n"
+            "────────────────────────────────────────\n"
+            "▶ Prefill {} tokens in {}ms \n"
+            "────────────────────────────────────────",
+            promptLength);
 
         net.prefill(inImages, promptTokenIds, &nextTokenId);
         ids.push_back(nextTokenId.getData<uint32_t>()[0]);
@@ -197,11 +196,12 @@ int main()
     {
         const int maxNewTokens = 128;
 
-        utils::TimeChecker totalTimer("\n"
-                                      "────────────────────────────────────────\n"
-                                      "▶ Decode {} tokens in {}ms \n"
-                                      "────────────────────────────────────────",
-                                      maxNewTokens);
+        utils::TimeChecker totalTimer(
+            "\n"
+            "────────────────────────────────────────\n"
+            "▶ Decode {} tokens in {}ms \n"
+            "────────────────────────────────────────",
+            maxNewTokens);
 
         for (int gen = 0; gen < maxNewTokens; gen++)
         {

@@ -41,20 +41,20 @@ inline void loadWeights(Net& net, const vai::Checkpoint& ckpt)
     net.embedding["weight"] = vai::Tensor(ckpt["wte.weight"], wDt);
     net.embedding["posWeight"] = vai::Tensor(ckpt["wpe.weight"], wDt);
 
-    // Layer layers
-    for (uint32_t i = 0; i < net.modelCfg.languageCfg.numLayers; ++i)
+    // Transformer blocks
+    for (uint32_t i = 0; i < net.modelCfg.trf.nBlocks; ++i)
     {
         std::string prefix = "h." + std::to_string(i) + ".";
-        auto& layer = net.decoder.layers[i];
+        auto& block = net.decoder.blocks[i];
 
-        loadLN(layer.norm1, prefix + "ln_1");
-        loadLN(layer.norm2, prefix + "ln_2");
+        loadLN(block.norm1, prefix + "ln_1");
+        loadLN(block.norm2, prefix + "ln_2");
 
-        loadLin(layer.mhAttn.projQKV, prefix + "attn.c_attn");
-        loadLin(layer.mhAttn.projOut, prefix + "attn.c_proj");
+        loadLin(block.mhAttn.projQKV, prefix + "attn.c_attn");
+        loadLin(block.mhAttn.projOut, prefix + "attn.c_proj");
 
-        loadLin(layer.ffn.fc1, prefix + "mlp.c_fc");
-        loadLin(layer.ffn.fc2, prefix + "mlp.c_proj");
+        loadLin(block.ffn.fc1, prefix + "mlp.c_fc");
+        loadLin(block.ffn.fc2, prefix + "mlp.c_proj");
     }
 
     // Final layer norm

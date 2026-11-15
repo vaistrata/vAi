@@ -1,7 +1,7 @@
 #ifndef VAI_NODES_ELE_AFFINE_H
 #define VAI_NODES_ELE_AFFINE_H
 
-#include "node-common.h"
+#include "common.h"
 
 namespace vai::node {
 
@@ -20,7 +20,7 @@ namespace vai::node {
   are adjacent, e.g. [1, D] over [T, D], or [C, 1, 1] over [C, H, W].
 
   An add is shift alone, a multiply scale alone, and a gated residual x + g * y
-  both, EleAffine(in0 = y, scale = g, shift = x) (e.g. pi0.5's adaRMS layers).
+  both, EleAffine(in0 = y, scale = g, shift = x) (e.g. pi0.5's adaRMS blocks).
 =============================================================================*/
 class EleAffine : public vai::Node
 {

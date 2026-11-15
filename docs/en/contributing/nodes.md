@@ -34,7 +34,7 @@ vai::node::Activation activation{{.epilogue = vai::Epilogue::Relu}};
 
 ### 2.1 Register slots and store configuration in the constructor
 
-A custom node class publicly inherits from `vai::Node` and implements `prepare()` and `run()`. The node header includes `vai/nodes/node-common.h`. For how to create a node as a model member and connect it to the graph, see [Writing custom models](models.md).
+A custom node class publicly inherits from `vai::Node` and implements `prepare()` and `run()`. The node header includes `vai/nodes/common.h`. For how to create a node as a model member and connect it to the graph, see [Writing custom models](models.md).
 
 The following code is taken from the declaration and constructor of `Activation`. The constructor stores the configuration and registers slots for inputs and outputs. This code is in the `vai::node` namespace.
 

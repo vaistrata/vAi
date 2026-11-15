@@ -221,10 +221,12 @@ std::vector<float> halfBitsToFloats(const uint16_t* data, size_t count)
 
 std::vector<float> preprocessImage(const std::string& path)
 {
+    // clang-format off
     return vai::utils::ImageProcessor(path, kInputChannels)
         .letterbox(kInputHeight, vai::utils::Align::TopLeft, 114.0f)
         .bgr()
         .chw();
+    // clang-format on
 }
 
 void validateModelOutputSize(size_t outputSize, const std::string& runtimeName)

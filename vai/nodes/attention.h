@@ -3,7 +3,7 @@
 
 // Attention (separate-Q/K/V KV-cache attention, GQA-capable;
 // the FA kernels are ports of the ggml/llama.cpp Vulkan flash_attn kernels).
-#include "node-common.h"
+#include "common.h"
 #include <algorithm>
 #include <array>
 #include <cstring>
@@ -107,7 +107,7 @@ namespace vai::node {
   depend on which one runs.
 
   The mask's span bounds a query to its last span keys, a sliding window
-  (e.g. Gemma3's local layers). A ring cache (kvCacheRing) then keeps only the
+  (e.g. Gemma3's local blocks). A ring cache (kvCacheRing) then keeps only the
   last kvCacheSize positions, position p at row p % kvCacheSize; the counter
   keeps counting positions. A dispatch overwrites the rows of its Tkv oldest
   positions, so kvCacheSize >= span + Tkv - 1 keeps every query's span whole.
@@ -1097,69 +1097,70 @@ inline void Attention::prepare()
         {
             pipeParamsFA = t;
 
+            // clang-format off
             if (t.intel)
-                pipeFA =
-                    pipelinePool().request("attention-fa-intel",
-                                           { eva::constant_id<0>(t.wgSize),
-                                             eva::constant_id<1>(t.tileTokens),
-                                             eva::constant_id<3>(Dh),
-                                             eva::constant_id<4>(uint32_t(t.qkAccF32)),
-                                             eva::constant_id<10>(uint32_t(t.accF16)),
-                                             eva::constant_id<12>(uint32_t(config_.kvCacheRing)),   // ring cache
-                                             eva::constant_id<13>(iDtype),                          // typeI (Q / K / V)
-                                             eva::constant_id<14>(config_.kvCacheDtype),            // typeCache
-                                             eva::constant_id<15>(uint32_t(config_.kvCacheSize > 0)),   // kvCaching
-                                             eva::constant_id<SPEC_ID_TYPE_O>(oDtype) },
-                                           { .requiredSubgroupSize = t.sgSize });
+                pipeFA = pipelinePool().request("attention-fa-intel", {
+                    eva::constant_id<0>(t.wgSize),
+                    eva::constant_id<1>(t.tileTokens),
+                    eva::constant_id<3>(Dh),
+                    eva::constant_id<4>(uint32_t(t.qkAccF32)),
+                    eva::constant_id<10>(uint32_t(t.accF16)),
+                    eva::constant_id<12>(uint32_t(config_.kvCacheRing)),       // ring cache
+                    eva::constant_id<13>(iDtype),                              // typeI (Q / K / V)
+                    eva::constant_id<14>(config_.kvCacheDtype),                // typeCache
+                    eva::constant_id<15>(uint32_t(config_.kvCacheSize > 0)),   // kvCaching
+                    eva::constant_id<SPEC_ID_TYPE_O>(oDtype)
+                }, { .requiredSubgroupSize = t.sgSize });
             else if (intelKernels && t.coopmat)   // Intel's coopmat kernel, as verified there
-                pipeFA =
-                    pipelinePool().request("attention-fa-cm-intel",
-                                           { eva::constant_id<0>(t.wgSize),
-                                             eva::constant_id<1>(t.wgRows),
-                                             eva::constant_id<2>(t.wgKv),
-                                             eva::constant_id<3>(Dh),
-                                             eva::constant_id<6>(t.sgSize),
-                                             eva::constant_id<7>(uint32_t(t.shmemStaging)),
-                                             eva::constant_id<10>(uint32_t(t.accF16)),
-                                             eva::constant_id<11>(uint32_t(t.appendBeforeSweep)),
-                                             eva::constant_id<12>(uint32_t(config_.kvCacheRing)),   // ring cache
-                                             eva::constant_id<13>(iDtype),                          // typeI (Q / K / V)
-                                             eva::constant_id<14>(config_.kvCacheDtype),            // typeCache
-                                             eva::constant_id<15>(uint32_t(config_.kvCacheSize > 0)),   // kvCaching
-                                             eva::constant_id<SPEC_ID_TYPE_O>(oDtype) },
-                                           { .requiredSubgroupSize = t.sgSize });
+                pipeFA = pipelinePool().request("attention-fa-cm-intel", {
+                    eva::constant_id<0>(t.wgSize),
+                    eva::constant_id<1>(t.wgRows),
+                    eva::constant_id<2>(t.wgKv),
+                    eva::constant_id<3>(Dh),
+                    eva::constant_id<6>(t.sgSize),
+                    eva::constant_id<7>(uint32_t(t.shmemStaging)),
+                    eva::constant_id<10>(uint32_t(t.accF16)),
+                    eva::constant_id<11>(uint32_t(t.appendBeforeSweep)),
+                    eva::constant_id<12>(uint32_t(config_.kvCacheRing)),       // ring cache
+                    eva::constant_id<13>(iDtype),                              // typeI (Q / K / V)
+                    eva::constant_id<14>(config_.kvCacheDtype),                // typeCache
+                    eva::constant_id<15>(uint32_t(config_.kvCacheSize > 0)),   // kvCaching
+                    eva::constant_id<SPEC_ID_TYPE_O>(oDtype)
+                }, { .requiredSubgroupSize = t.sgSize });
             else
-                pipeFA = pipelinePool().request(
-                    t.coopmat ? "attention-fa-cm" : "attention-fa",
-                    { eva::constant_id<0>(t.wgSize),
-                      eva::constant_id<1>(t.wgRows),
-                      eva::constant_id<2>(t.wgKv),
-                      eva::constant_id<3>(Dh),
-                      eva::constant_id<4>(t.dhSplit),
-                      eva::constant_id<5>(t.rowGroups),
-                      eva::constant_id<6>(t.sgSize),
-                      eva::constant_id<7>(uint32_t(t.shmemStaging)),
-                      eva::constant_id<8>(uint32_t(t.stagingF16)),   // scalar only
-                      eva::constant_id<9>(t.limitShmem),             // scalar only
-                      eva::constant_id<10>(uint32_t(t.accF16)),
-                      eva::constant_id<11>(uint32_t(t.appendBeforeSweep)),       // cm only
-                      eva::constant_id<12>(uint32_t(config_.kvCacheRing)),       // ring cache
-                      eva::constant_id<13>(iDtype),                              // typeI (Q)
-                      eva::constant_id<14>(config_.kvCacheDtype),                // typeCache
-                      eva::constant_id<15>(uint32_t(config_.kvCacheSize > 0)),   // kvCaching
-                      eva::constant_id<16>(kvDtype),                             // typeKV (K / V inputs)
-                      eva::constant_id<17>(uint32_t(t.skipEmptySplits)),         // skipEmptySplits
-                      eva::constant_id<18>(uint32_t(t.persistentOAcc)),          // persistentOAcc (cm only)
-                      eva::constant_id<19>(uint32_t(t.kvWideLoads)),             // kvWideLoads (cm only)
-                      eva::constant_id<21>(uint32_t(t.prefetchV)),               // prefetchV (cm only)
-                      eva::constant_id<22>(uint32_t(t.splitsAppendExtraKv)),     // splitsAppendExtraKv (cm / scalar)
-                      eva::constant_id<24>(t.pvDrainParts),                      // pvDrainParts (cm only)
-                      eva::constant_id<25>(uint32_t(t.directLoadPaddedDh)),      // directLoadPaddedDh (cm only)
-                      eva::constant_id<28>(t.smallKvVChunks),                    // smallKvVChunks (cm only)
-                      eva::constant_id<29>(t.stagedPartDims),                    // stagedPartDims (cm only)
-                      eva::constant_id<SPEC_ID_TYPE_O>(oDtype) },
-                    { .requiredSubgroupSize = t.sgSize,   // 0 = not forced
-                      .robustBufferAccess = t.directLoadPaddedDh });
+                pipeFA = pipelinePool().request(t.coopmat ? "attention-fa-cm" : "attention-fa", {
+                    eva::constant_id<0>(t.wgSize),
+                    eva::constant_id<1>(t.wgRows),
+                    eva::constant_id<2>(t.wgKv),
+                    eva::constant_id<3>(Dh),
+                    eva::constant_id<4>(t.dhSplit),
+                    eva::constant_id<5>(t.rowGroups),
+                    eva::constant_id<6>(t.sgSize),
+                    eva::constant_id<7>(uint32_t(t.shmemStaging)),
+                    eva::constant_id<8>(uint32_t(t.stagingF16)),               // scalar only
+                    eva::constant_id<9>(t.limitShmem),                         // scalar only
+                    eva::constant_id<10>(uint32_t(t.accF16)),
+                    eva::constant_id<11>(uint32_t(t.appendBeforeSweep)),       // cm only
+                    eva::constant_id<12>(uint32_t(config_.kvCacheRing)),       // ring cache
+                    eva::constant_id<13>(iDtype),                              // typeI (Q)
+                    eva::constant_id<14>(config_.kvCacheDtype),                // typeCache
+                    eva::constant_id<15>(uint32_t(config_.kvCacheSize > 0)),   // kvCaching
+                    eva::constant_id<16>(kvDtype),                             // typeKV (K / V inputs)
+                    eva::constant_id<17>(uint32_t(t.skipEmptySplits)),         // skipEmptySplits
+                    eva::constant_id<18>(uint32_t(t.persistentOAcc)),          // persistentOAcc (cm only)
+                    eva::constant_id<19>(uint32_t(t.kvWideLoads)),             // kvWideLoads (cm only)
+                    eva::constant_id<21>(uint32_t(t.prefetchV)),               // prefetchV (cm only)
+                    eva::constant_id<22>(uint32_t(t.splitsAppendExtraKv)),     // splitsAppendExtraKv (cm / scalar)
+                    eva::constant_id<24>(t.pvDrainParts),                      // pvDrainParts (cm only)
+                    eva::constant_id<25>(uint32_t(t.directLoadPaddedDh)),      // directLoadPaddedDh (cm only)
+                    eva::constant_id<28>(t.smallKvVChunks),                    // smallKvVChunks (cm only)
+                    eva::constant_id<29>(t.stagedPartDims),                    // stagedPartDims (cm only)
+                    eva::constant_id<SPEC_ID_TYPE_O>(oDtype)
+                }, {
+                    .requiredSubgroupSize = t.sgSize,   // 0 = not forced
+                    .robustBufferAccess = t.directLoadPaddedDh,
+                });
+            // clang-format on
 
             if (!descSetFA)
                 descSetFA = gVaiDestSetPool(pipeFA.descSetLayout(0));
@@ -1176,15 +1177,19 @@ inline void Attention::prepare()
             if (!pipeReduce || r != pipeParamsReduce)
             {
                 pipeParamsReduce = r;
+                // clang-format off
                 if (r.intel)
-                    pipeReduce = pipelinePool().request(
-                        "attention-fa-reduce-intel",
-                        { eva::constant_id<0>(r.blockSize), eva::constant_id<SPEC_ID_TYPE_O>(oDtype) });
+                    pipeReduce = pipelinePool().request("attention-fa-reduce-intel", {
+                        eva::constant_id<0>(r.blockSize),
+                        eva::constant_id<SPEC_ID_TYPE_O>(oDtype)
+                    });
                 else
-                    pipeReduce = pipelinePool().request("attention-fa-reduce",
-                                                        { eva::constant_id<0>(r.blockSize),
-                                                          eva::constant_id<2>(uint32_t(r.skipEmptySplits)),
-                                                          eva::constant_id<SPEC_ID_TYPE_O>(oDtype) });
+                    pipeReduce = pipelinePool().request("attention-fa-reduce", {
+                        eva::constant_id<0>(r.blockSize),
+                        eva::constant_id<2>(uint32_t(r.skipEmptySplits)),
+                        eva::constant_id<SPEC_ID_TYPE_O>(oDtype)
+                    });
+                // clang-format on
                 if (!descSetReduce)
                     descSetReduce = gVaiDestSetPool(pipeReduce.descSetLayout(0));
             }
@@ -1195,13 +1200,16 @@ inline void Attention::prepare()
     if (!useFa && (!pipeNaive || n != pipeParamsNaive))
     {
         pipeParamsNaive = n;
-        pipeNaive = pipelinePool().request("attention",
-                                           { eva::constant_id<0>(uint32_t(config_.kvCacheRing)),       // ring cache
-                                             eva::constant_id<1>(iDtype),                              // typeI (Q)
-                                             eva::constant_id<2>(config_.kvCacheDtype),                // typeCache
-                                             eva::constant_id<3>(uint32_t(config_.kvCacheSize > 0)),   // kvCaching
-                                             eva::constant_id<4>(kvDtype),   // typeKV (K / V inputs)
-                                             eva::constant_id<SPEC_ID_TYPE_O>(oDtype) });
+        // clang-format off
+        pipeNaive = pipelinePool().request("attention", {
+            eva::constant_id<0>(uint32_t(config_.kvCacheRing)),       // ring cache
+            eva::constant_id<1>(iDtype),                              // typeI (Q)
+            eva::constant_id<2>(config_.kvCacheDtype),                // typeCache
+            eva::constant_id<3>(uint32_t(config_.kvCacheSize > 0)),   // kvCaching
+            eva::constant_id<4>(kvDtype),                             // typeKV (K / V inputs)
+            eva::constant_id<SPEC_ID_TYPE_O>(oDtype)
+        });
+        // clang-format on
 
         if (!descSetNaive)
             descSetNaive = gVaiDestSetPool(pipeNaive.descSetLayout(0));

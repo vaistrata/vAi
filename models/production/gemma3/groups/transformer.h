@@ -24,6 +24,7 @@ struct TransformerConfig
     float globalRopeFactor;   // a global block's linear RoPE scale if > 1.0, else 1.0 (default RoPE)
     static constexpr uint32_t headDim = 256;
     static constexpr float normEps = 1e-6f;
+    static constexpr vai::Epilogue ffnActivation = vai::Epilogue::GeluTanh;
 };
 
 }   // namespace model::production::gemma3
@@ -65,10 +66,9 @@ struct TransformerBlock : public vai::NodeGroup
     struct Config
     {
         TransformerConfig base;
-        vai::RopeConfig rope;
+        bool global;   // the whole prefix, RoPE at 1M; else a sliding window, RoPE at 10K, a ring cache
         uint32_t kvCacheSize;
         vai::Dtype kvCacheDtype;
-        bool kvCacheRing;     // a local block: the cache keeps the last kvCacheSize positions
         bool sliceLastRow;    // carry only the last row past the attention
         bool gatingLastOut;   // a closed gate drops the FFN and everything downstream
     };
@@ -82,9 +82,10 @@ struct TransformerBlock : public vai::NodeGroup
           .numKVHeads = config.base.numKVHeads,
           .kvCacheSize = config.kvCacheSize,
           .kvCacheDtype = config.kvCacheDtype,
-          .kvCacheRing = config.kvCacheRing,
+          .kvCacheRing = !config.global,
           .qkNormEps = config.base.normEps,
-          .ropeCfg = config.rope,
+          .ropeCfg = config.global ? vai::RopeConfig{ .base = 1000000.0f, .factor = config.base.globalRopeFactor }
+                                   : vai::RopeConfig{ .base = 10000.0f },
       })
     , norm2({ .eps = config.base.normEps, .acceptResidual = true })
     , norm3({ .eps = config.base.normEps })
@@ -92,7 +93,7 @@ struct TransformerBlock : public vai::NodeGroup
           .inDim = config.base.embedDim,
           .hiddenDim = config.base.ffnHiddenDim,
           .outDim = config.base.embedDim,
-          .activation = vai::Epilogue::GeluTanh,
+          .activation = config.base.ffnActivation,
       })
     , norm4({ .eps = config.base.normEps, .acceptResidual = true })
     {
@@ -132,7 +133,6 @@ struct Transformer : public vai::NodeGroup
         uint32_t kvCacheSize;
         vai::Dtype kvCacheDtype;
         uint32_t maxForwardTokens;   // the most tokens one forward appends
-        bool gatingLastOut;          // slightly faster when the prefill is chunked
     };
 
     Transformer(Config config)
@@ -140,11 +140,6 @@ struct Transformer : public vai::NodeGroup
     {
         const TransformerConfig& base = config.base;
         const uint32_t ringSize = std::min(base.slidingWindow + config.maxForwardTokens - 1, config.kvCacheSize);
-        const vai::RopeConfig localRope = { .type = vai::RopeType::Default, .base = 10000.0f };
-        const vai::RopeConfig globalRope =
-            base.globalRopeFactor == 1.0f
-                ? vai::RopeConfig{ .type = vai::RopeType::Default, .base = 1000000.0f }
-                : vai::RopeConfig{ .type = vai::RopeType::Linear, .base = 1000000.0f, .factor = base.globalRopeFactor };
 
         blocks.reserve(base.nBlocks);
         for (uint32_t i = 0; i < base.nBlocks; ++i)
@@ -153,12 +148,11 @@ struct Transformer : public vai::NodeGroup
             const bool last = i == base.nBlocks - 1;
             blocks.emplace_back(TransformerBlock::Config{
                 .base = base,
-                .rope = global ? globalRope : localRope,
+                .global = global,
                 .kvCacheSize = global ? config.kvCacheSize : ringSize,
                 .kvCacheDtype = config.kvCacheDtype,
-                .kvCacheRing = !global,
                 .sliceLastRow = last,
-                .gatingLastOut = last && config.gatingLastOut,
+                .gatingLastOut = last,
             });
         }
 

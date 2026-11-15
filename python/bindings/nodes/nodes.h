@@ -31,7 +31,7 @@ inline void requireCurrentNet(const char* node)
 }
 
 // The core computes RoPE frequencies unchecked (NaN, inf or a silent no-op);
-// `what` is the caller's name for the config ("rope", "config....layer_cfg.rope_cfg").
+// `what` is the caller's name for the config ("rope", "config.trf.rope_cfg").
 inline void checkRopeConfig(const vai::RopeConfig& cfg, const char* who, const char* what)
 {
     auto fail = [&](const char* msg) {
@@ -39,7 +39,7 @@ inline void checkRopeConfig(const vai::RopeConfig& cfg, const char* who, const c
     };
     if (!(cfg.base > 0.0f))
         fail("base must be > 0");
-    if (cfg.type != vai::RopeType::Default && !(cfg.factor > 0.0f))
+    if (!(cfg.factor > 0.0f))
         fail("factor must be > 0");
     if (cfg.type == vai::RopeType::Llama3 && cfg.lowFreqFactor == cfg.highFreqFactor)
         fail("low_freq_factor and high_freq_factor must differ");

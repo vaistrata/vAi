@@ -27,16 +27,14 @@ from .pi05 import Pi05Model
 from .yolox import YOLOXModel
 
 # Supporting types: configs, enums, detection records. The tokenizer and a
-# layer config's RopeConfig are engine-wide: pyvai.Tokenizer, pyvai.RopeConfig.
+# TransformerConfig's RopeConfig are engine-wide: pyvai.Tokenizer, pyvai.RopeConfig.
 from .._pyvai import (
-    TransformerLayerConfig,
     TransformerConfig,
-    VisionModelConfig,
-    LanguageModelConfig,
+    VisionTransformerConfig,
 )
 from .gpt2 import GPT2Config
 from .llama3 import Llama3Config, LLAMA3_CHAT_TEMPLATE
-from .gemma3 import Gemma3Config, Gemma3VisionEncoderConfig, GEMMA3_CHAT_TEMPLATE, Gemma3ChatSession
+from .gemma3 import Gemma3Config, GEMMA3_CHAT_TEMPLATE, Gemma3ChatSession
 from .paligemma import PaliGemmaConfig
 from .pi0 import Pi0Config, pi0_sample_noise
 from .pi05 import Pi05Config, pi05_make_prompt
@@ -71,15 +69,12 @@ __all__ = [
     "Pi05Model",
     "YOLOXModel",
     # Supporting types
-    "TransformerLayerConfig",
     "TransformerConfig",
-    "VisionModelConfig",
-    "LanguageModelConfig",
+    "VisionTransformerConfig",
     "GPT2Config",
     "Llama3Config",
     "LLAMA3_CHAT_TEMPLATE",
     "Gemma3Config",
-    "Gemma3VisionEncoderConfig",
     "GEMMA3_CHAT_TEMPLATE",
     "Gemma3ChatSession",
     "PaliGemmaConfig",

@@ -1,7 +1,7 @@
 #ifndef VAI_NODES_ROPE_H
 #define VAI_NODES_ROPE_H
 
-#include "node-common.h"
+#include "common.h"
 
 namespace vai::node {
 
@@ -17,9 +17,9 @@ namespace vai::node {
   Positions continue from setKvCacheCounter()'s buffer, so a KV-cache decode
   step rotates by the absolute position rather than by its offset in this forward.
 
-  cfg.type picks how the frequencies are scaled: Default leaves them alone,
-  Linear divides every one by factor, and Llama3 divides only the long
-  wavelengths, interpolating the band between the two frequency bounds.
+  cfg.type picks how the frequencies are scaled: Default divides every one by
+  factor (1 leaves them alone), and Llama3 divides only the long wavelengths,
+  interpolating the band between the two frequency bounds.
 =============================================================================*/
 class Rope : public vai::Node
 {
@@ -72,11 +72,7 @@ inline Rope::Rope(Config config)
         {
             float freq = std::exp2f(-(float(d) / float(halfDh)) * log2Base);
 
-            if (config_.cfg.type == RopeType::Linear)
-            {
-                freq /= config_.cfg.factor;
-            }
-            else if (config_.cfg.type == RopeType::Llama3)
+            if (config_.cfg.type == RopeType::Llama3)
             {
                 float wavelength = 2.0f * PI / freq;
 
@@ -86,6 +82,10 @@ inline Rope::Rope(Config config)
                     / (config_.cfg.highFreqFactor - config_.cfg.lowFreqFactor)));
 
                 freq = (freq / config_.cfg.factor) * (1.0f - t) + freq * t;
+            }
+            else
+            {
+                freq /= config_.cfg.factor;
             }
 
             freqData[d] = freq;

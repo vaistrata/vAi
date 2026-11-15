@@ -158,7 +158,11 @@ void setProfileTags(mnist::Net& net)
 int main()
 {
     // Load the 28x28 gray image and normalize it to [0, 1]
-    std::vector<float> inputData = ImageProcessor(VAI_DATA_DIR "/images/0.png", 1).normalize(0.0f, 1.0f).chw();
+    // clang-format off
+    std::vector<float> inputData = ImageProcessor(VAI_DATA_DIR "/images/0.png", 1)
+        .normalize(0.0f, 1.0f)
+        .chw();
+    // clang-format on
 
     // Load model. Switch wDefaultDtype to Dtype::Fp32 to run weights in FP32.
     mnist::Net net({

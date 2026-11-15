@@ -86,8 +86,8 @@ def test_config_presets(cls, expected):
     for variant in expected:
         assert cls.preset(variant).variant == variant
     a, b = cls.preset(expected[0]), cls.preset(expected[0])
-    # Gemma 3 states its decoder itself; the others build on LanguageModelConfig.
-    nested = (lambda c: c.decoder) if cls is Gemma3Config else (lambda c: c.language_cfg.layer_cfg)
+    # LLMs hold one stack in trf; the VLMs and VLAs name each tower's.
+    nested = (lambda c: c.trf) if hasattr(a, "trf") else (lambda c: c.language_trf)
     nested(a).embed_dim = 1
     assert nested(a).embed_dim == 1  # nested edits land in place
     assert nested(b).embed_dim != 1

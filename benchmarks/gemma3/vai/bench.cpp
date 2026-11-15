@@ -111,13 +111,15 @@ int main(int argc, char** argv)
     printf("model: gemma3 %s (%s)\n",
            modelCfg.variant, args.precision.c_str());
 
-    gemma3::Net net(
-        {
-            .device = device,
-            .wDefaultDtype = precision,
-        },
-        modelCfg,
-        { .kvCacheDtype = precision, .maxRuntimeContext = gemma3_bench::runtimeContext });
+    // clang-format off
+    gemma3::Net net({
+        .device = device,
+        .wDefaultDtype = precision,
+    }, modelCfg, {
+        .kvCacheDtype = precision,
+        .maxRuntimeContext = gemma3_bench::runtimeContext,
+    });
+    // clang-format on
 
     loadWeights<"google">(net);
 
@@ -143,16 +145,20 @@ int main(int argc, char** argv)
         if(args.imagepath == "")
         {
             const auto random = gemma3_bench::makeRandom(v.imageSize, v.imageSize, v.imageChannels);
+            // clang-format off
             rgb = ImageProcessor(random.data(), v.imageSize, v.imageSize, v.imageChannels)
                 .normalize(-1.0f, 1.0f)
                 .chw();
+            // clang-format on
         } 
         else
         {
+            // clang-format off
             rgb = ImageProcessor(args.imagepath)
                 .resize(v.imageSize, Resize::BilinearAntialiasInt16)
                 .normalize(-1.0f, 1.0f)
                 .chw();
+            // clang-format on
         }
 
         inImage = Tensor({v.imageChannels, v.imageSize, v.imageSize}).setFloats(std::move(rgb));

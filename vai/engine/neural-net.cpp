@@ -385,11 +385,13 @@ void NeuralNet::uploadModelParams()
 
             if (tensor.hasHostData())
             {
+                // clang-format off
                 if (!uploader)
                     uploader.emplace(device_, TensorUploader::Config{
                         .chunkSizeMiB = config_.uploadChunkSizeMiB,
                         .alignment = detail::kBufferCopyAlignment
                     });
+                // clang-format on
 
                 uploader->upload(tensor.hostData(), byteSize, pooledBuffer);
 

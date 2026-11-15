@@ -1,7 +1,7 @@
 #include "python/bindings/module.h"
 #include "python/bindings/nodes/bind-node.h"
 #include "python/bindings/nodes/kvcache-counter.h"
-#include "vai/nodes/node-common.h"
+#include "vai/nodes/common.h"
 #include <algorithm>
 
 namespace pyvai {

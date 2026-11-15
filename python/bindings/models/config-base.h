@@ -6,7 +6,7 @@
 
 #include "python/bindings/common.h"
 #include "python/bindings/nodes/nodes.h"   // checkRopeConfig
-#include "models/config-base.h"
+#include "models/common.h"
 #include <cstdint>
 #include <string>
 #include <utility>
@@ -65,10 +65,11 @@ void bindPresets(Cls& cls, const char* pyName, const Presets<Config>& presets)
     throw nb::value_error((who + ": " + msg).c_str());
 }
 
-// `path` names the config in the message, e.g. "config.language_cfg".
-inline void checkLayerConfig(const vai::TransformerLayerConfig& c, const std::string& who,
-                             const std::string& path)
+// `path` names the config in the message, e.g. "config.trf".
+inline void checkTransformerConfig(const vai::TransformerConfig& c, const std::string& who, const std::string& path)
 {
+    if (c.nBlocks == 0)
+        configError(who, path + ".n_blocks must be >= 1");
     if (c.embedDim == 0 || c.headDim == 0 || c.ffnHiddenDim == 0)
         configError(who, path + ": embed_dim, head_dim and ffn_hidden_dim must be >= 1");
     if (c.numQHeads == 0 || c.numKVHeads == 0)
@@ -83,35 +84,30 @@ inline void checkLayerConfig(const vai::TransformerLayerConfig& c, const std::st
     }
 }
 
-inline void checkTransformerConfig(const vai::TransformerConfig& t, const std::string& who,
-                                   const std::string& path)
+// A language model's decoder, token table and trained context, which the model
+// clamps its KV cache to, so 0 would leave it no cache at all.
+template <typename Config>
+void checkLanguageConfig(const Config& c, const std::string& who)
 {
-    if (t.numLayers == 0)
-        configError(who, path + ".num_layers must be >= 1");
-    checkLayerConfig(t.layerCfg, who, path + ".layer_cfg");
-}
-
-// `clampsContext`: the model sizes its KV cache by max_trained_context, so 0
-// would leave it no cache at all.
-inline void checkLanguageConfig(const LanguageModelConfig& l, const std::string& who,
-                                const std::string& path, bool clampsContext)
-{
-    if (l.vocabSize == 0)
-        configError(who, path + ".vocab_size must be >= 1");
-    if (clampsContext && l.maxTrainedContext == 0)
-        configError(who, path + ".max_trained_context must be >= 1: the KV cache is clamped to it");
-    checkTransformerConfig(l, who, path);
+    if constexpr (requires { c.trf; })
+        checkTransformerConfig(c.trf, who, "config.trf");
+    else
+        checkTransformerConfig(c.languageTrf, who, "config.language_trf");
+    if (c.vocabSize == 0)
+        configError(who, "config.vocab_size must be >= 1");
+    if constexpr (requires { c.maxTrainedContext; })
+        if (c.maxTrainedContext == 0)
+            configError(who, "config.max_trained_context must be >= 1: the KV cache is clamped to it");
 }
 
 // The towers here carry a position table of num_patches rows, so the image
 // size is fixed.
-inline void checkVisionConfig(const VisionModelConfig& v, const std::string& who,
-                              const std::string& path)
+inline void checkVisionConfig(const VisionTransformerConfig& v, const std::string& who, const std::string& path)
 {
     if (v.imageChannels == 0)
         configError(who, path + ".image_channels must be >= 1");
-    if (v.patchSize == 0 || v.imageSize == 0 || v.imageSize % v.patchSize != 0)
-        configError(who, path + ".image_size must be a positive multiple of patch_size");
+    if (v.patchSize == 0 || v.imageSize < v.patchSize)
+        configError(who, path + ".image_size must hold at least one patch_size patch");
     checkTransformerConfig(v, who, path);
 }
 

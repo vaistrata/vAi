@@ -33,11 +33,12 @@ void checkPrefill(const pi0::Net& model, const vai::Tensor& images, const vai::T
 {
     const auto& cfg = model.modelCfg;
     const auto& shape = images.shape();
-    const uint32_t S = cfg.visionCfg.imageSize;
-    if (shape.size() != 4 || shape[1] != cfg.visionCfg.imageChannels
+    const uint32_t S = cfg.visionTrf.imageSize;
+    // clang-format off
+    if (shape.size() != 4 || shape[1] != cfg.visionTrf.imageChannels
         || shape[2] != S || shape[3] != S)
         throw nb::value_error(("Pi0Model.prefill: images must be [cameras, "
-            + std::to_string(cfg.visionCfg.imageChannels) + ", " + std::to_string(S) + ", "
+            + std::to_string(cfg.visionTrf.imageChannels) + ", " + std::to_string(S) + ", "
             + std::to_string(S) + "]").c_str());
     const uint32_t cameras = shape[0];
     if (cameras < 1 || cameras > cfg.maxCameras)
@@ -49,12 +50,13 @@ void checkPrefill(const pi0::Net& model, const vai::Tensor& images, const vai::T
             + std::to_string(cfg.actionDim) + "], zero-padded to action_dim").c_str());
 
     const uint32_t tokens = promptTokens.shape()[0];
-    const uint64_t context = uint64_t(cameras) * cfg.visionCfg.numPatches() + tokens + 1 + cfg.actionChunk;
+    const uint64_t context = uint64_t(cameras) * cfg.visionTrf.numPatches() + tokens + 1 + cfg.actionChunk;
     if (context > cfg.maxContext())
         throw nb::value_error(("Pi0Model.prefill: " + std::to_string(cameras) + " cameras and "
             + std::to_string(tokens) + " prompt tokens, with the state token and the chunk, are "
             + std::to_string(context) + " tokens; the KV cache holds "
             + std::to_string(cfg.maxContext())).c_str());
+    // clang-format on
 }
 
 }   // namespace
@@ -78,21 +80,21 @@ void bindPi0(nb::module_& m)
                 "Task-string tokens the KV cache is sized for (the trained length).")
         .def_rw("action_dim", &pi0::ModelConfig::actionDim, "Width of one action; the state is zero-padded to it too.")
         .def_rw("action_chunk", &pi0::ModelConfig::actionChunk, "Actions one chunk carries.")
-        .def_rw("time_min_period", &pi0::ModelConfig::timeMinPeriod, "Fastest sinusoid of the timestep embedding.")
-        .def_rw("time_max_period", &pi0::ModelConfig::timeMaxPeriod, "... and its slowest.")
-        .def_rw("vision_cfg", &pi0::ModelConfig::visionCfg, "The SigLIP tower (VisionModelConfig).")
-        .def_rw("language_cfg",
-                &pi0::ModelConfig::languageCfg,
-                "The Gemma 2B stack that reads the cameras and the prompt "
-                "(LanguageModelConfig; max_trained_context is 0, nothing clamps it).")
-        .def_rw("action_cfg",
-                &pi0::ModelConfig::actionCfg,
-                "The Gemma 300M action stack (TransformerConfig); num_layers, head_dim "
-                "and num_kv_heads must match language_cfg's, whose KV cache it shares.")
-        .def_prop_ro("max_context",
-                     &pi0::ModelConfig::maxContext,
-                     "The KV cache's depth: every camera the policy allows, the prompt, "
-                     "the state token and the chunk.");
+        .def_rw("vision_trf", &pi0::ModelConfig::visionTrf, "The SigLIP tower (VisionTransformerConfig).")
+        .def_rw("language_trf",
+                &pi0::ModelConfig::languageTrf,
+                "The Gemma 2B stack that reads the cameras and the prompt (TransformerConfig).")
+        .def_rw("vocab_size", &pi0::ModelConfig::vocabSize)
+        .def_rw(
+            "action_trf",
+            &pi0::ModelConfig::actionTrf,
+            "The Gemma 300M action stack (TransformerConfig); n_blocks, head_dim "
+            "and num_kv_heads must match language_trf's, whose KV cache it shares.")
+        .def_prop_ro(
+            "max_context",
+            &pi0::ModelConfig::maxContext,
+            "The KV cache's depth: every camera the policy allows, the prompt, "
+            "the state token and the chunk.");
 
     auto cls =
         nb::class_<pi0::Net, vai::NeuralNet>(m, "Pi0Model")
@@ -106,32 +108,26 @@ void bindPi0(nb::module_& m)
                        device,
                    uint32_t denoise_steps,
                    vai::Dtype kv_cache_dtype) {
-                    checkVisionConfig(config.visionCfg, "Pi0Model", "config.vision_cfg");
-                    checkLanguageConfig(config.languageCfg,
-                                        "Pi0Model",
-                                        "config.language_cfg",
-                                        /*clampsContext*/ false);
-                    checkTransformerConfig(config.actionCfg, "Pi0Model", "config.action_cfg");
-                    // Paired layers share one K/V cache, layer for layer.
-                    const vai::TransformerConfig& lang = config.languageCfg;
-                    const vai::TransformerConfig& act = config.actionCfg;
-                    if (act.numLayers != lang.numLayers || act.layerCfg.headDim != lang.layerCfg.headDim ||
-                        act.layerCfg.numKVHeads != lang.layerCfg.numKVHeads)
+                    checkVisionConfig(config.visionTrf, "Pi0Model", "config.vision_trf");
+                    checkLanguageConfig(config, "Pi0Model");
+                    checkTransformerConfig(config.actionTrf, "Pi0Model", "config.action_trf");
+                    // Paired blocks share one K/V cache, block for block.
+                    const vai::TransformerConfig& lang = config.languageTrf;
+                    const vai::TransformerConfig& act = config.actionTrf;
+                    if (act.nBlocks != lang.nBlocks || act.headDim != lang.headDim || act.numKVHeads != lang.numKVHeads)
                         throw nb::value_error(
-                            "Pi0Model: config.action_cfg must pair with config.language_cfg "
-                            "layer for layer (num_layers, layer_cfg.head_dim, layer_cfg.num_kv_heads): "
+                            "Pi0Model: config.action_trf must pair with config.language_trf "
+                            "block for block (n_blocks, head_dim, num_kv_heads): "
                             "the two stacks write one KV cache");
                     if (config.maxCameras == 0 || config.maxPromptTokens == 0 || config.actionDim == 0 ||
                         config.actionChunk == 0)
                         throw nb::value_error("Pi0Model: max_cameras, max_prompt_tokens, action_dim and action_chunk "
                                               "must be >= 1");
-                    // The weight loader tables the timestep embedding with
-                    // vai::node::timeEmbedding(), which checks neither.
-                    if (act.layerCfg.embedDim < 4 || act.layerCfg.embedDim % 2 != 0)
-                        throw nb::value_error("Pi0Model: config.action_cfg.layer_cfg.embed_dim must be even and >= 4 "
-                                              "(the timestep embedding is sin and cos halves)");
-                    if (!(config.timeMinPeriod > 0.0f) || !(config.timeMaxPeriod > config.timeMinPeriod))
-                        throw nb::value_error("Pi0Model: need 0 < time_min_period < time_max_period");
+                    // The weight loader's timeEmbedding() does not check it.
+                    if (act.embedDim < 4 || act.embedDim % 2 != 0)
+                        throw nb::value_error(
+                            "Pi0Model: config.action_trf.embed_dim must be even and >= 4 "
+                            "(the timestep embedding is sin and cos halves)");
                     if (denoise_steps == 0)
                         throw nb::value_error("Pi0Model: denoise_steps must be >= 1");
                     const vai::NeuralNetConfig cfg = netConfig(w_default_dtype, o_default_dtype, device);
@@ -190,10 +186,12 @@ void bindPi0(nb::module_& m)
                 const auto& cfg = model.modelCfg;
                 if (!model.stateToken_.validShape())
                     throw std::runtime_error("Pi0Model.decode: call prefill() first");
+                // clang-format off
                 if (!x.isShapeOf(cfg.actionChunk, cfg.actionDim))
                     throw nb::value_error(("Pi0Model.decode: action must be [" + std::to_string(cfg.actionChunk) +
                                            ", " + std::to_string(cfg.actionDim) + "], the noise the chunk starts from")
                                               .c_str());
+                // clang-format on
                 {
                     nb::gil_scoped_release rel;   // waits the previous forward
                     model.decode(&x);
@@ -216,11 +214,11 @@ void bindPi0(nb::module_& m)
             "Most cameras one prefill takes (config.max_cameras).")
         .def_prop_ro(
             "num_patches",
-            [](pi0::Net& self) { return self.modelCfg.visionCfg.numPatches(); },
-            "Tokens one camera adds to the prefix (vision_cfg.num_patches).")
+            [](pi0::Net& self) { return self.modelCfg.visionTrf.numPatches(); },
+            "Tokens one camera adds to the prefix (vision_trf.num_patches).")
         .def_prop_ro(
             "image_size",
-            [](pi0::Net& self) { return self.modelCfg.visionCfg.imageSize; },
+            [](pi0::Net& self) { return self.modelCfg.visionTrf.imageSize; },
             "Side of the square each camera is letterboxed into.")
         .def_prop_ro("max_prompt_tokens", [](pi0::Net& self) { return self.modelCfg.maxPromptTokens; })
         .def_prop_ro("action_dim", [](pi0::Net& self) { return self.modelCfg.actionDim; })

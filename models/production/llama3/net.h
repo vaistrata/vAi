@@ -6,7 +6,7 @@
 #ifndef PRODUCTION_LLAMA3_NET_H
 #define PRODUCTION_LLAMA3_NET_H
 
-#include "models/config-base.h"
+#include "models/common.h"
 #include "vai/nodes/linear.h"
 #include "vai/nodes/topk-sampling.h"
 #include "vai/nodes/token-embedding.h"
@@ -27,13 +27,15 @@ using Transformer = vai::group::Transformer<vai::TransformerType::Default, vai::
 struct ModelConfig
 {
     const char* variant;   // checkpoint folder under data/
-    LanguageModelConfig languageCfg;
+    vai::TransformerConfig trf;
+    uint32_t vocabSize = 128256;
+    uint32_t maxTrainedContext = 131072;
 
-    static ModelConfig _3_2_1B() { return { .variant = "3.2-1B", .languageCfg = lm(16, 2048, 64) }; }
-    static ModelConfig _3_2_3B() { return { .variant = "3.2-3B", .languageCfg = lm(28, 3072, 128) }; }
+    static constexpr ModelConfig _3_2_1B() { return { .variant = "3.2-1B", .trf = lm(16, 2048, 64) }; }
+    static constexpr ModelConfig _3_2_3B() { return { .variant = "3.2-3B", .trf = lm(28, 3072, 128) }; }
 
 private:
-    static vai::RopeConfig rope(float factor)
+    static constexpr vai::RopeConfig rope(float factor)
     {
         return {
             .type = vai::RopeType::Llama3,
@@ -45,23 +47,17 @@ private:
         };
     }
 
-    static LanguageModelConfig lm(uint32_t numLayers, uint32_t embedDim, uint32_t headDim)
+    static constexpr vai::TransformerConfig lm(uint32_t nBlocks, uint32_t embedDim, uint32_t headDim)
     {
         return {
-            vai::TransformerConfig{
-                .numLayers = numLayers,
-                .layerCfg = {
-                    .embedDim = embedDim,
-                    .headDim = headDim,
-                    .numQHeads = embedDim / headDim,
-                    .numKVHeads = 8,
-                    .ropeCfg = rope(32.0f),
-                    .ffnHiddenDim = 8192,
-                    .ffnActivation = vai::Epilogue::Silu,
-                },
-            },
-            128256,   // vocabSize
-            131072    // maxTrainedContext
+            .nBlocks = nBlocks,
+            .embedDim = embedDim,
+            .headDim = headDim,
+            .numQHeads = embedDim / headDim,
+            .numKVHeads = 8,
+            .ffnHiddenDim = 8192,
+            .ffnActivation = vai::Epilogue::Silu,
+            .ropeCfg = rope(32.0f),
         };
     }
 };
@@ -93,15 +89,16 @@ struct Net : public vai::NeuralNet
     : NeuralNet(netCfg)
     , modelCfg(modelCfg)
     , runtimeCfg(runtimeCfg)
-    , maxRuntimeContext(std::min(runtimeCfg.maxRuntimeContext, modelCfg.languageCfg.maxTrainedContext))
-    , embedding({ .vocabSize = modelCfg.languageCfg.vocabSize, .embedDim = modelCfg.languageCfg.layerCfg.embedDim })
-    , decoder(modelCfg.languageCfg.with({
+    , maxRuntimeContext(std::min(runtimeCfg.maxRuntimeContext, modelCfg.maxTrainedContext))
+    , embedding({ .vocabSize = modelCfg.vocabSize, .embedDim = modelCfg.trf.embedDim })
+    , decoder({
+          .base = modelCfg.trf,
           .kvCacheSize = maxRuntimeContext,
           .kvCacheDtype = runtimeCfg.kvCacheDtype,
           .sliceLastRow = true,
           .gatingLastOut = runtimeCfg.prefillChunk > 0,
-      }))
-    , lmHead({ .inDim = modelCfg.languageCfg.layerCfg.embedDim, .outDim = modelCfg.languageCfg.vocabSize })
+      })
+    , lmHead({ .inDim = modelCfg.trf.embedDim, .outDim = modelCfg.vocabSize })
     {
         this->runtimeCfg.maxRuntimeContext = maxRuntimeContext;
 
@@ -119,9 +116,9 @@ struct Net : public vai::NeuralNet
         // Intel keeps them in Q's dtype: f16 K / V have not been tested there.
         if (vai::node::Attention::allowsDifferentKvDtype(device()))
         {
-            for (auto& layer : decoder.layers)
+            for (auto& block : decoder.blocks)
             {
-                auto& mha = layer.mhAttn;
+                auto& mha = block.mhAttn;
                 if (mha.ropeK)
                     mha.ropeK->setODtype(runtimeCfg.kvCacheDtype, dtypeKey());
                 else

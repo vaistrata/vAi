@@ -75,7 +75,7 @@ The C++ sample models come built in, each in two layers under `pyvai.models`: th
 | pi0.5 | `Pi05` | `Pi05Model` | `Pi05Config` (`3B`), `pi05_make_prompt` (noise: `pi0_sample_noise`) |
 | YOLOX | `YOLOX` | `YOLOXModel` | `YOLOXTier`, `YOLOXDetection`, `yolox_postprocess` |
 
-- **Configs**: each model's C++ `ModelConfig`, built by `preset(variant)` (see `presets`) from the shared `TransformerConfig` / `LanguageModelConfig` / `VisionModelConfig` types; nested edits land in place.
+- **Configs**: each model's C++ `ModelConfig`, built by `preset(variant)` (see `presets`) from the shared `TransformerConfig` / `VisionTransformerConfig` types; nested edits land in place.
 - **Runtime options** (LLMs): `max_runtime_context` (the KV-cache budget), `kv_cache_dtype` and, for Llama 3, `prefill_chunk`. The wrappers default to the C++ demos' values: a 4096-token budget (PaliGemma 2048, GPT-2 its trained 1024), the Gemma 3 4B VLM, and 128 new tokens. A bound model's budget defaults to the trained context, as the core's `RuntimeConfig`.
 - **Weights**: `load_weights` takes the checkpoint folder, `data/<model>/ckpts/<variant>`.
 - **Images**: a file path or an HWC uint8 array; `pyvai.ImageProcessor` decodes and resizes them as the C++ demos do, and prepares input for a bound model too.

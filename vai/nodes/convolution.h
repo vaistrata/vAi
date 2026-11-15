@@ -15,7 +15,7 @@
 #include <variant>
 #include <vector>
 
-#include "node-common.h"
+#include "common.h"
 
 namespace vai::node {
 /////////////////////////////////////////////////////////////////////////////////////////
@@ -4255,9 +4255,11 @@ inline K1S1Plan selectK1S1CMPlan(
         constexpr uint32_t minReductionTilesForTwoSubgroups = 18u;
         constexpr uint32_t mediumReductionTiles = 32u;
         constexpr uint32_t deepReductionTiles = 48u;
+        // clang-format off
         const uint32_t maxWgMFragments = baseFeatures.R >= deepReductionTiles     ? 8u
                                          : baseFeatures.R >= mediumReductionTiles ? 6u
                                                                                   : 4u;
+        // clang-format on
         const uint32_t subgroupCountM = std::min(baseFeatures.M, baseFeatures.R >= minReductionTilesForTwoSubgroups ? 2u : 1u);
         const uint32_t targetWorkgroups = scaleWorkSupplyThreshold(128u, computeBlockCount);
 
@@ -6043,10 +6045,12 @@ inline void Convolution::prepareTensorStorage(const Workload& workload)
         {
             const K3S2Plan& plan = plan_.k3s2;
             const bool packedCM = plan.packedWeights;
+            // clang-format off
             const Dtype partialDtype = (plan_.wDtype == Dtype::Fp32)         ? Dtype::Fp32
                 : packedCM                           ? Dtype::Fp16
                 : plan_.useCM                        ? plan_.oDtype
                                                      : Dtype::Fp32;
+            // clang-format on
             (*this)["split"] = Tensor({ B * plan.splitK * Co, workload.spatialSize() }, partialDtype);
         }
         break;

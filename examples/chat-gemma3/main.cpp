@@ -187,14 +187,13 @@ int main()
     // Load model
     auto modelCfg = gemma3::ModelConfig::get("4B");
     printf("Loading Gemma-%s model...\n", modelCfg.variant);
-    gemma3::Net net(
-        {
-            .wDefaultDtype = Dtype::Fp16,
-        },
-        modelCfg,
-        {
-            .maxRuntimeContext = 4096,
-        });
+    // clang-format off
+    gemma3::Net net({
+        .wDefaultDtype = Dtype::Fp16,
+    }, modelCfg, {
+        .maxRuntimeContext = 4096,
+    });
+    // clang-format on
 
     // Load weights
     printf("Loading weights...\n");

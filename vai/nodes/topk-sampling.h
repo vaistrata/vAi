@@ -2,7 +2,7 @@
 #define VAI_NODES_TOPK_SAMPLING_H
 
 // Token sampling from a logits distribution: TopKSampling.
-#include "node-common.h"
+#include "common.h"
 
 namespace vai::node {
 

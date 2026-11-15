@@ -1,5 +1,5 @@
-#ifndef VAI_NODES_NODE_COMMON_H
-#define VAI_NODES_NODE_COMMON_H
+#ifndef VAI_NODES_COMMON_H
+#define VAI_NODES_COMMON_H
 
 // Shared base for every builtin-node header: the Node/Tensor engine API, the
 // std headers the node implementations use, the Epilogue enum, and the build
@@ -16,9 +16,9 @@
 #include <map>
 #include "vai/shaders/common/spec_constants.h"
 
-#define CEIL_DIV(M, N) (((M) + (N)-1) / (N))
+#define CEIL_DIV(M, N) (((M) + (N) - 1) / (N))
 #define ROUNDUP(M, N) (CEIL_DIV(M, N) * (N))
-#define ROUNDUP_POW2(M, N) (((M) + (N)-1) & ~((N)-1))   // N must be a power of 2
+#define ROUNDUP_POW2(M, N) (((M) + (N) - 1) & ~((N) - 1))   // N must be a power of 2
 #define SHADER_SPV(name) SHADER_OUTPUT_DIR "/" name ".comp.spv"
 #define SPV_BLOB(name) eva::SpvBlob::readFrom(SHADER_SPV(name))
 
@@ -45,19 +45,19 @@ enum class ResidualOrder : uint32_t {
 };
 
 enum class RopeType {
-    Default,   // reads base
-    Linear,    // ... and factor
+    Default,   // reads base and factor (1: unscaled)
     Llama3,    // ... and the frequency bounds
 };
 
 // RoPE frequency parameters. They describe a model, not a layer, so a model
 // config carries one and each attention passes it with its own headDim.
-struct RopeConfig {
-    RopeType type;
-    float    base;
-    float    factor;
-    float    lowFreqFactor;
-    float    highFreqFactor;
+struct RopeConfig
+{
+    RopeType type = RopeType::Default;
+    float base;
+    float factor = 1.0f;   // Default divides every frequency by it, Llama3 the long wavelengths
+    float lowFreqFactor;
+    float highFreqFactor;
     uint32_t originalMaxPos;
 };
 
@@ -72,6 +72,6 @@ inline uint32_t outerSize(const std::vector<uint32_t>& shape, size_t innerAxes =
     return n;
 }
 
-} // namespace vai
+}   // namespace vai
 
-#endif   // VAI_NODES_NODE_COMMON_H
+#endif   // VAI_NODES_COMMON_H

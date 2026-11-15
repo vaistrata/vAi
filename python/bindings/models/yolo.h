@@ -24,9 +24,11 @@ void bindTierLetters(nb::enum_<Tier>& tier, const char* pyName, const char* lett
                 std::string known;
                 for (const char* c = letters; *c; ++c)
                     known += (known.empty() ? "" : ", ") + std::string(1, *c);
+                // clang-format off
                 throw nb::value_error(
                     (std::string(pyName) + ".from_letter: unknown tier '" + letter
                      + "' (one of " + known + ")").c_str());
+                // clang-format on
             },
             nb::arg("letter"),
             fromLetterDoc)

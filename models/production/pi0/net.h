@@ -6,7 +6,7 @@
 #ifndef PRODUCTION_PI0_NET_H
 #define PRODUCTION_PI0_NET_H
 
-#include "models/config-base.h"
+#include "models/common.h"
 #include "vai/nodes/token-embedding.h"
 #include "vai/groups/patch-embedding.h"
 #include "vai/nodes/concat.h"
@@ -22,10 +22,9 @@
 namespace model::production::pi0 {
 
 
-using VisionTransformer = vai::group::Transformer<vai::TransformerType::Classic>;
-
-
-using GemmaTransformer = vai::group::Transformer<vai::TransformerType::Default>;
+using VisionEncoder = vai::group::Transformer<vai::TransformerType::Classic>;
+using LanguageEncoder = vai::group::Transformer<vai::TransformerType::Default>;
+using ActionDecoder = vai::group::Transformer<vai::TransformerType::Default>;
 
 
 /////////////////////////////////////////////////////////////////////////////////////////
@@ -36,24 +35,23 @@ struct ModelConfig
     const char* variant;             // checkpoint folder under data/ckpts/pi0/lerobot/
     uint32_t maxCameras = 3;         // image slots the policy was trained with
     uint32_t maxPromptTokens = 48;   // task strings the checkpoint was trained with
+    uint32_t vocabSize = 257152;     // 256000 text, 1024 <loc*> and 128 <seg*>
     uint32_t actionDim = 32;         // one action, and the state padded to the same width
     uint32_t actionChunk = 50;       // actions one chunk carries
-    float timeMinPeriod = 4e-3f;     // fastest sinusoid of the timestep embedding
-    float timeMaxPeriod = 4.0f;      // ... and its slowest
 
-    VisionModelConfig visionCfg = siglip::so400m14(224);
-    LanguageModelConfig languageCfg = {
-        gemma::ModelConfig::_2B().languageCfg,
-        257152,   // vocabSize: 256000 text, 1024 <loc*> and 128 <seg*>
-    };
-    vai::TransformerConfig actionCfg = gemma::ModelConfig::_300M().languageCfg;
+    VisionTransformerConfig visionTrf = common::so400m14(224);
+    vai::TransformerConfig languageTrf = common::gemma("2B");
+    vai::TransformerConfig actionTrf = common::gemma("300M");
 
     // Every camera the policy allows, the prompt, the state token and the action
     // chunk: the longest context the cache ever holds. A run may carry fewer
     // views, and then the tail of the cache simply stays empty.
-    uint32_t maxContext() const { return maxCameras * visionCfg.numPatches() + maxPromptTokens + 1 + actionChunk; }
+    constexpr uint32_t maxContext() const
+    {
+        return maxCameras * visionTrf.numPatches() + maxPromptTokens + 1 + actionChunk;
+    }
 
-    static ModelConfig _3B()
+    static constexpr ModelConfig _3B()
     {
         return {
             .variant = "3B",
@@ -75,13 +73,13 @@ struct Net : public vai::NeuralNet
     RuntimeConfig runtimeCfg;
 
     vai::group::PatchEmbedding patchEmbed;
-    VisionTransformer visionEncoder;
+    VisionEncoder visionEncoder;
     vai::node::Linear projector;
     vai::node::Reshape mergeCameras;
 
     vai::node::TokenEmbedding promptEmbed;
     vai::node::Concat catCamsPrompt;
-    GemmaTransformer languageEncoder;
+    LanguageEncoder languageEncoder;
 
     vai::node::Linear stateProj;
     vai::node::Linear actionProj;
@@ -89,7 +87,7 @@ struct Net : public vai::NeuralNet
     vai::node::Linear actionTimeIn;
     vai::node::Linear actionTimeOut;
     vai::node::Concat catStateActs;
-    GemmaTransformer actionDecoder;
+    ActionDecoder actionDecoder;
     vai::node::Slice sliceActions;
     vai::node::Linear velocityHead;
 
@@ -101,41 +99,60 @@ struct Net : public vai::NeuralNet
     , modelCfg(modelCfg)
     , runtimeCfg(runtimeCfg)
     , patchEmbed({
-          .imageChannels = modelCfg.visionCfg.imageChannels,
-          .imageSize = modelCfg.visionCfg.imageSize,
-          .patchSize = modelCfg.visionCfg.patchSize,
-          .embedDim = modelCfg.visionCfg.layerCfg.embedDim,
+          .imageChannels = modelCfg.visionTrf.imageChannels,
+          .imageSize = modelCfg.visionTrf.imageSize,
+          .patchSize = modelCfg.visionTrf.patchSize,
+          .embedDim = modelCfg.visionTrf.embedDim,
           .allowBatch = true,
       })
-    , visionEncoder(modelCfg.visionCfg.with({ .allowBatch = true, .kvCacheDtype = runtimeCfg.kvCacheDtype }))
-    , projector({ .inDim = modelCfg.visionCfg.layerCfg.embedDim, .outDim = modelCfg.languageCfg.layerCfg.embedDim })
-    , mergeCameras({ -1, modelCfg.languageCfg.layerCfg.embedDim })
-    , promptEmbed({
-          .vocabSize = modelCfg.languageCfg.vocabSize,
-          .embedDim = modelCfg.languageCfg.layerCfg.embedDim,
-          .scale = std::sqrt(float(modelCfg.languageCfg.layerCfg.embedDim)),
+    , visionEncoder({ .base = modelCfg.visionTrf, .allowBatch = true })
+    , projector({
+          .inDim = modelCfg.visionTrf.embedDim,
+          .outDim = modelCfg.languageTrf.embedDim,
       })
-    , languageEncoder(modelCfg.languageCfg.with({
+    , mergeCameras({ -1, modelCfg.languageTrf.embedDim })
+    , promptEmbed({
+          .vocabSize = modelCfg.vocabSize,
+          .embedDim = modelCfg.languageTrf.embedDim,
+          .scale = std::sqrt(float(modelCfg.languageTrf.embedDim)),
+      })
+    , languageEncoder({
+          .base = modelCfg.languageTrf,
           .kvCacheSize = modelCfg.maxContext(),
           .kvCacheDtype = runtimeCfg.kvCacheDtype,
           .gatingLastOut = true,
-      }))   // Only the prefix KV cache is used.
-    , stateProj({ .inDim = modelCfg.actionDim, .outDim = modelCfg.actionCfg.layerCfg.embedDim })
-    , actionProj({ .inDim = modelCfg.actionDim, .outDim = modelCfg.actionCfg.layerCfg.embedDim })
+      })   // Only the prefix KV cache is used.
+    , stateProj({
+          .inDim = modelCfg.actionDim,
+          .outDim = modelCfg.actionTrf.embedDim,
+      })
+    , actionProj({
+          .inDim = modelCfg.actionDim,
+          .outDim = modelCfg.actionTrf.embedDim,
+      })
     , stepTimeBias({ .numRows = runtimeCfg.denoiseSteps })
     , actionTimeIn({
-          .inDim = modelCfg.actionCfg.layerCfg.embedDim,
-          .outDim = modelCfg.actionCfg.layerCfg.embedDim,
+          .inDim = modelCfg.actionTrf.embedDim,
+          .outDim = modelCfg.actionTrf.embedDim,
           .acceptResidual = true,
           .residualOrder = vai::ResidualOrder::BeforeEpilogue,
           .epilogue = vai::Epilogue::Silu,
       })
-    , actionTimeOut({ .inDim = modelCfg.actionCfg.layerCfg.embedDim, .outDim = modelCfg.actionCfg.layerCfg.embedDim })
-    , actionDecoder(
-          modelCfg.actionCfg.with({ .kvCacheSize = modelCfg.maxContext(), .kvCacheDtype = runtimeCfg.kvCacheDtype }))
-    , sliceActions({ .start = 1, .count = modelCfg.actionChunk })
+    , actionTimeOut({
+          .inDim = modelCfg.actionTrf.embedDim,
+          .outDim = modelCfg.actionTrf.embedDim,
+      })
+    , actionDecoder({
+          .base = modelCfg.actionTrf,
+          .kvCacheSize = modelCfg.maxContext(),
+          .kvCacheDtype = runtimeCfg.kvCacheDtype,
+      })
+    , sliceActions({
+          .start = 1,
+          .count = modelCfg.actionChunk,
+      })
     , velocityHead({
-          .inDim = modelCfg.actionCfg.layerCfg.embedDim,
+          .inDim = modelCfg.actionTrf.embedDim,
           .outDim = modelCfg.actionDim,
           .acceptResidual = true,
           .scalarScale = -1.0f / runtimeCfg.denoiseSteps,
@@ -145,10 +162,7 @@ struct Net : public vai::NeuralNet
         input("inImages") - patchEmbed - visionEncoder - projector - mergeCameras - "in0"/catCamsPrompt;
         input("inPromptTokens")                                     - promptEmbed - "in1"/catCamsPrompt;
         catCamsPrompt - languageEncoder;
-        // clang-format on
-        languageEncoder.setGateOpen(false);
 
-        // clang-format off
         input("inState") - stateProj - output("outStateToken");
 
         input("inStateToken")                                                       - "in0"/catStateActs;
@@ -158,6 +172,7 @@ struct Net : public vai::NeuralNet
         catStateActs - actionDecoder - sliceActions - velocityHead - output("outActions");
         // clang-format on
 
+        languageEncoder.setGateOpen(false);
         kvCacheCounter = vai::createKvCacheCounter(device());
         languageEncoder.setKvCacheCounter(kvCacheCounter);
         actionDecoder.setKvCacheCounter(kvCacheCounter);
@@ -165,10 +180,10 @@ struct Net : public vai::NeuralNet
         actionMask = vai::createCausalMask(device(), 0, { 1 });
         actionDecoder.setCausalMask(actionMask);
 
-        for (uint32_t i = 0; i < modelCfg.languageCfg.numLayers; ++i)
+        for (uint32_t i = 0; i < modelCfg.languageTrf.nBlocks; ++i)
         {
-            auto& encAttn = languageEncoder.layers[i].mhAttn.attn;
-            auto& decAttn = actionDecoder.layers[i].mhAttn.attn;
+            auto& encAttn = languageEncoder.blocks[i].mhAttn.attn;
+            auto& decAttn = actionDecoder.blocks[i].mhAttn.attn;
             decAttn["K_cache"] = encAttn["K_cache"];
             decAttn["V_cache"] = encAttn["V_cache"];
         }
@@ -184,9 +199,10 @@ struct Net : public vai::NeuralNet
     {
         const uint32_t cameras = images.shape()[0];
         VAI_ASSERT(cameras >= 1 && cameras <= modelCfg.maxCameras);
+        VAI_ASSERT(promptTokenIds.shape()[0] <= modelCfg.maxPromptTokens);
         sync();   // The GPU may still be reading kvCacheCounter.
 
-        prefixLength_ = cameras * modelCfg.visionCfg.numPatches() + promptTokenIds.shape()[0];
+        prefixLength_ = cameras * modelCfg.visionTrf.numPatches() + promptTokenIds.shape()[0];
         *(uint32_t*)kvCacheCounter.map() = 0;
         stepTimeBias.rewind();
 
