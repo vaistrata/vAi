@@ -182,14 +182,3 @@ cmake --build build --config RelWithDebInfo
 ```
 
 The demo generates text that continues the text in `prompt`. It measures `prefill` and `decode` times separately and prints them with the generated text.
-
-## Benchmark summary
-
-These results compare llama.cpp (Vulkan) and vAi with a **512-token prompt**. For full results by GPU and prompt length, measurement environments and conditions, and reproduction instructions, see [`benchmarks/gpt2/README.md`](../../../benchmarks/gpt2/README.md).
-
-| | | 890M (Strix Point) | 8060S (Strix Halo) | UHD Graphics (TGL GT1) | RTX 3060 Laptop | RTX 5070 | RTX 4090 | RTX 5090 |
-|---|---|---:|---:|---:|---:|---:|---:|---:|
-| vAi | prefill (t/s) | 10,899 | 50,777 | 1,201 | 61,236 | 154,785 | 269,911 | 308,638 |
-|  | decode (t/s) | 130.5 | 500.9 | 94.06 | 743.2 | 1,319 | 1,631 | 1,756 |
-| llama.cpp | prefill (t/s) | 7,803 | 41,159 | 1,065 | 50,910 | 131,056 | 155,877 | 153,821 |
-|  | decode (t/s) | 133.6 | 595.4 | 80.90 | 592.5 | 1,020 | 979.0 | 940.5 |

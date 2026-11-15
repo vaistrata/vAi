@@ -182,14 +182,3 @@ cmake --build build --config RelWithDebInfo
 ```
 
 `prompt`에 적은 문장을 이어 새 문장을 생성합니다. `prefill`과 `decode` 시간을 각각 측정해 생성된 문장과 함께 출력합니다.
-
-## 벤치마크 요약
-
-llama.cpp(Vulkan)와 vAi를 **prompt 512 토큰** 기준으로 비교한 결과입니다. GPU와 prompt 길이별 전체 결과, 측정 환경과 조건, 재현 방법은 [`benchmarks/gpt2/README.md`](../../../benchmarks/gpt2/README.md) 참조.
-
-| | | 890M (Strix Point) | 8060S (Strix Halo) | UHD Graphics (TGL GT1) | RTX 3060 Laptop | RTX 5070 | RTX 4090 | RTX 5090 |
-|---|---|---:|---:|---:|---:|---:|---:|---:|
-| vAi | prefill (t/s) | 10,899 | 50,777 | 1,201 | 61,236 | 154,785 | 269,911 | 308,638 |
-|  | decode (t/s) | 130.5 | 500.9 | 94.06 | 743.2 | 1,319 | 1,631 | 1,756 |
-| llama.cpp | prefill (t/s) | 7,803 | 41,159 | 1,065 | 50,910 | 131,056 | 155,877 | 153,821 |
-|  | decode (t/s) | 133.6 | 595.4 | 80.90 | 592.5 | 1,020 | 979.0 | 940.5 |
