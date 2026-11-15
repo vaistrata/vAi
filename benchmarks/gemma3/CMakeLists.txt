@@ -2,8 +2,9 @@ cmake_minimum_required(VERSION 3.21)
 
 project(bench-gemma3)
 
-# The model owns its definition (net.h) and checkpoint loader, so the bench
-# and models/production/gemma3/demo.cpp always use the same model implementation and weights.
+# The model owns its definition (net.h) and its checkpoint loader
+# (google-weights.h, which resolves data/ckpts/gemma3/google/...), so the bench and models/production/gemma3/demo.cpp
+# can never end up on different weights.
 set(MODEL_DIR ${CMAKE_SOURCE_DIR}/models/production/gemma3)
 
 ################################################################################
@@ -14,8 +15,8 @@ add_executable(bench-gemma3-vai
 )
 
 target_include_directories(bench-gemma3-vai PRIVATE
-    ${MODEL_DIR}                         # net.h
-    ${CMAKE_CURRENT_SOURCE_DIR}/common   # bench-prompts.h
+    ${MODEL_DIR}                           # net.h, google-weights.h
+    ${CMAKE_SOURCE_DIR}/benchmarks/common  # bench-inputs.h, bench-utils.h
 )
 
 target_link_libraries(bench-gemma3-vai PRIVATE
@@ -25,62 +26,42 @@ target_link_libraries(bench-gemma3-vai PRIVATE
 ################################################################################
 # llama.cpp
 ################################################################################
-# Optional. benchmarks/scripts/setup-llamacpp.sh installs into the user cache
-# (with LLAMA_BUILD_MTMD=ON) and registers it in CMake's package registry, so no
-# path is needed here; an explicit -Dllama_DIR or CMAKE_PREFIX_PATH still takes
-# precedence.
+# Optional. benchmarks/scripts/setup-llamacpp.sh installs into the user cache and
+# registers it in CMake's package registry, so no path is needed here; an
+# explicit -Dllama_DIR or CMAKE_PREFIX_PATH still takes precedence.
 # NO_SYSTEM_ENVIRONMENT_PATH: CMake searches prefixes derived from $PATH
 # (~/.local/bin -> ~/.local) before the registry, so any other llama.cpp
 # installed there would shadow the pinned one.
 find_package(llama QUIET CONFIG NO_SYSTEM_ENVIRONMENT_PATH)
 
-if(llama_FOUND)
+if(llama_FOUND AND NOT LLAMA_BUILD_NUMBER EQUAL 11960)
+    # The bench calls the pinned release's batch and backend-sampling API, which other
+    # builds lack or change, and its numbers are recorded against that release.
+    message(WARNING "[vAi-bench] llama.cpp build ${LLAMA_BUILD_NUMBER} at ${llama_DIR} != pinned v0.8.0 (b11960): "
+                    "skipping bench-gemma3-llamacpp. Run benchmarks/scripts/setup-llamacpp.sh, "
+                    "or point llama_DIR at a v0.8.0 install.")
+elseif(llama_FOUND)
     message(STATUS "[vAi-bench] llama.cpp found: ${llama_DIR} (build ${LLAMA_BUILD_NUMBER})")
 
-    # mtmd is installed alongside llama.cpp, but currently does not provide its
-    # own CMake package config, so resolve it from llama's install lib directory.
-    find_library(MTMD_LIBRARY
-        NAMES mtmd
-        HINTS ${LLAMA_LIB_DIR}
+    # The installed llama.cpp is a Release (/MD) static library; a Debug (/MDd)
+    # bench fails to link against it with LNK2038 on MSVC.
+    if(CMAKE_CONFIGURATION_TYPES)
+        message(STATUS "[vAi-bench] llama.cpp was built Release: build bench-gemma3-llamacpp with --config Release")
+    endif()
+
+    add_executable(bench-gemma3-llamacpp
+        llama.cpp/bench.cpp
     )
 
-    if(MTMD_LIBRARY)
-        message(STATUS "[vAi-bench] mtmd found: ${MTMD_LIBRARY}")
+    target_include_directories(bench-gemma3-llamacpp PRIVATE
+        ${CMAKE_SOURCE_DIR}/benchmarks/common   # bench-inputs.h, bench-utils.h
+    )
 
-        add_library(mtmd UNKNOWN IMPORTED)
-
-        set_target_properties(mtmd PROPERTIES
-            IMPORTED_LOCATION "${MTMD_LIBRARY}"
-            INTERFACE_INCLUDE_DIRECTORIES "${LLAMA_INCLUDE_DIR}"
-            INTERFACE_LINK_LIBRARIES "llama"
-        )
-
-        # The installed llama.cpp is a Release (/MD) static library; a Debug
-        # (/MDd) bench may fail to link against it with LNK2038 on MSVC.
-        if(CMAKE_CONFIGURATION_TYPES)
-            message(STATUS "[vAi-bench] llama.cpp was built Release: build bench-gemma3-llamacpp with --config Release")
-        endif()
-
-        add_executable(bench-gemma3-llamacpp
-            llama.cpp/bench.cpp
-            ${CMAKE_SOURCE_DIR}/vai/utils/image-processor.cpp
-        )
-
-        target_link_libraries(bench-gemma3-llamacpp PRIVATE
-            llama
-            mtmd
-        )
-
-        target_include_directories(bench-gemma3-llamacpp PRIVATE
-            ${CMAKE_CURRENT_SOURCE_DIR}/common
-            ${CMAKE_SOURCE_DIR}
-        )
-    else()
-        message(STATUS "[vAi-bench] llama.cpp found, but mtmd was not found — "
-                       "build/install llama.cpp with -DLLAMA_BUILD_MTMD=ON.")
-    endif()
+    target_link_libraries(bench-gemma3-llamacpp PRIVATE
+        llama
+    )
 else()
-    message(STATUS "[vAi-bench] llama.cpp not found — building bench-gemma3-vai only. "
+    message(STATUS "[vAi-bench] llama.cpp not found, building bench-gemma3-vai only. "
                    "For the llama.cpp counterpart run benchmarks/scripts/setup-llamacpp.sh, "
                    "or point llama_DIR at an existing install.")
 endif()

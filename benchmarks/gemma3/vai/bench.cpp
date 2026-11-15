@@ -2,256 +2,236 @@
 #include "google-weights.h"
 #include "vai/utils/tokenizer.h"
 #include "eva-runtime.h"
-#include "bench-common.h"
-#include "vai/utils/image-processor.h"
-
+#include "bench-inputs.h"
+#include "bench-utils.h"
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
-#include <stdexcept>
+#include <cstring>
 #include <string>
 #include <vector>
 
 using namespace vai;
-using namespace vai::utils;
-using namespace gemma3_bench;
 namespace gemma3 = model::production::gemma3;
 
-static constexpr const char* modelSizes[] = { "4B", "1B" };
 
-inline std::vector<int> makePrompt(
-    const Tokenizer& tokenizer,
-    const gemma3::ModelConfig& modelCfg,
-    const std::string& prompt,
-    int nText)
+// --size names a folder under data/ckpts/gemma3/google/ and picks its config with it.
+// 4B is a vision-language model: its vision weights load, but a prefill without images never
+// runs them, so the bench measures its language model as it does the text-only sizes.
+constexpr const char* modelSizes[] = { "1B", "270M", "4B" };
+
+
+void usage(const char* argv0)
 {
-    using namespace gemma3_bench;
-
-    const std::vector<int> textTokens = tokenizer.encode(prompt);
-
-    if (nText <= 0 || nText > static_cast<int>(textTokens.size()))
-        throw std::runtime_error("requested text length exceeds source prompt");
-
-    const std::vector<int> selected(textTokens.begin(), textTokens.begin() + nText);
-
-    if (!modelCfg.vision)
-        return selected;
-
-    const int image = tokenizer.pieceToId(imageSoftToken);
-
-    if (tokenizer.pieceToId(startOfImageToken) < 0 || tokenizer.pieceToId(endOfImageToken) < 0 || image < 0 ||
-        static_cast<uint32_t>(image) != gemma3::ModelConfig::imageTokenId)
-        throw std::runtime_error("tokenizer image tokens do not match the model");
-
-    std::vector<int> tokens = tokenizer.encode(std::string(userPromptPrefix) + startOfImageToken);
-
-    tokens.insert(tokens.end(), gemma3::group::VisionEncoder::tokensPerImage, image);
-
-    const auto afterImage = tokenizer.encode(std::string(endOfImageToken) + textAfterImage);
-    tokens.insert(tokens.end(), afterImage.begin(), afterImage.end());
-
-    tokens.insert(tokens.end(), selected.begin(), selected.end());
-
-    const auto suffix = tokenizer.encode(modelPromptSuffix);
-    tokens.insert(tokens.end(), suffix.begin(), suffix.end());
-
-    return tokens;
+    fprintf(stderr, "usage: %s [N ...] [--size NAME] [--showText]\n", argv0);
+    fprintf(stderr, "  N           prompt lengths in tokens, one table row each (default: 128 256 512 1024 2048)\n");
+    fprintf(
+        stderr,
+        "  --size      checkpoint folder under data/ckpts/gemma3/google/ (default: %s), one of:",
+        modelSizes[0]);
+    for (const char* s : modelSizes)
+        fprintf(stderr, " %s", s);
+    fprintf(stderr, "\n");
+    fprintf(stderr, "  --showText  print rep 0's generated text for the last length after the table\n");
 }
+
 
 int main(int argc, char** argv)
 {
-    constexpr int nGen = gemma3_bench::decodeTokens;
-    constexpr int nReps = gemma3_bench::decodeRepetitions;
-    constexpr int nPPReps = gemma3_bench::prefillRepetitions;
-    constexpr int nWarmPre = gemma3_bench::warmupPrefills;
-    constexpr int nWarmGen = gemma3_bench::warmupDecodeTokens;
-    constexpr unsigned seed = gemma3_bench::randomSeed;
+    constexpr int nGen = 128;     // decode tokens per timed run
+    constexpr int nReps = 5;      // timed decode runs per length
+    constexpr int nPPReps = 5;    // timed prefill runs per length
+    constexpr int nWarmPre = 1;   // untimed prefills per length after the decode warm-up
+    constexpr int nWarmGen = 8;   // untimed decode steps per length
+    constexpr int nCtx = 4096;    // = the llama.cpp bench's n_ctx
+    constexpr uint32_t seed = 42;
 
-    gemma3_bench::BenchmarkArgumentParser args;
+    // N takes the first N tokens of llmParagraph in bench-inputs.h.
+    bool showText = false;
+    const char* sizeName = modelSizes[0];
 
-    if (!args.parse(argc, argv))
+    std::vector<int> lengths;
+    for (int i = 1; i < argc; ++i)
     {
-        args.printErrorAndUsage();
-        return 1;
+        if (!strcmp(argv[i], "--showText"))
+        {
+            showText = true;
+            continue;
+        }
+        if (!strcmp(argv[i], "--size"))
+        {
+            if (++i == argc)
+            {
+                fprintf(stderr, "error: --size needs a name\n");
+                usage(argv[0]);
+                return 1;
+            }
+            sizeName = argv[i];
+            continue;
+        }
+        int n = 0;
+        if (!parseInt(argv[i], n) || n <= 0)
+        {
+            usage(argv[0]);
+            return 1;
+        }
+        lengths.push_back(n);
     }
+    if (lengths.empty())
+        lengths = { 128, 256, 512, 1024, 2048 };
 
     const char* size = nullptr;
-
     for (const char* s : modelSizes)
-        if (args.size == s)
+        if (!strcmp(s, sizeName))
         {
             size = s;
             break;
         }
-
     if (!size)
     {
-        fprintf(stderr, "error: unknown model size '%s'\n", args.size.c_str());
-        return 1;
-    }
-
-    Dtype precision;
-
-    if (args.precision == "fp16") precision = Dtype::Fp16;
-    else if (args.precision == "fp32") precision = Dtype::Fp32;
-    else {
-        fprintf(stderr, "error: unsupported precision '%s'\n", args.precision.c_str());
+        fprintf(stderr, "error: unknown --size '%s'\n", sizeName);
+        usage(argv[0]);
         return 1;
     }
 
     eva::Device device = getVaiDevice();
-
     printf("device: vendorID 0x%04x, deviceID 0x%04x\n", device.vendorID(), device.deviceID());
 
+    // TopKSampling draws via std::rand() each forward
     srand(seed);
 
-    gemma3::ModelConfig modelCfg = gemma3::ModelConfig::get(size);
-
-    const bool hasVision = modelCfg.vision;
-
-    printf("model: gemma3 %s (%s)\n",
-           modelCfg.variant, args.precision.c_str());
+    // Load model
+    auto modelCfg = gemma3::ModelConfig::get(size);
+    printf("model: gemma3 %s\n", modelCfg.variant);
 
     // clang-format off
     gemma3::Net net({
         .device = device,
-        .wDefaultDtype = precision,
+        .wDefaultDtype = Dtype::Fp16,
     }, modelCfg, {
-        .kvCacheDtype = precision,
-        .maxRuntimeContext = gemma3_bench::runtimeContext,
+        .maxRuntimeContext = nCtx,
+        .prefillChunk = nCtx,   // the whole prompt in one forward, as llama.cpp's n_ubatch = n_ctx
     });
     // clang-format on
 
+    // Load weights
     loadWeights<"google">(net);
 
-    const std::string tokenizerPath = std::string(VAI_DATA_DIR "/gemma3/") + modelCfg.variant + "/tokenizer.json";
+    // Load tokenizer
+    utils::Tokenizer tokenizer(VAI_DATA_DIR "/tokenizers/gemma3/tokenizer.json");
 
-    Tokenizer tokenizer(tokenizerPath.c_str());
-
-    const std::string vqaPrompt = gemma3_bench::vqaPrompt();
-
-    Tensor inImage;
-
-    if (hasVision) {
-        const auto& v = gemma3::group::VisionEncoder::config;
-
-        if (v.imageChannels != gemma3_bench::syntheticImageChannels ||
-            v.imageSize != gemma3_bench::syntheticImageSize)
-            throw std::runtime_error(
-                "vision dimensions differ from the shared benchmark image"
-            );
-
-        std::vector<float> rgb;
-
-        if(args.imagepath == "")
+    // true: Gemma 3 prompts open with <bos>
+    const std::vector<int> paragraphTokens = tokenizer.encode(llmParagraph, true);
+    for (int n : lengths)
+    {
+        if (n > (int)paragraphTokens.size())
         {
-            const auto random = gemma3_bench::makeRandom(v.imageSize, v.imageSize, v.imageChannels);
-            // clang-format off
-            rgb = ImageProcessor(random.data(), v.imageSize, v.imageSize, v.imageChannels)
-                .normalize(-1.0f, 1.0f)
-                .chw();
-            // clang-format on
-        } 
-        else
-        {
-            // clang-format off
-            rgb = ImageProcessor(args.imagepath)
-                .resize(v.imageSize, Resize::BilinearAntialiasInt16)
-                .normalize(-1.0f, 1.0f)
-                .chw();
-            // clang-format on
-        }
-
-        inImage = Tensor({v.imageChannels, v.imageSize, v.imageSize}).setFloats(std::move(rgb));
-    }
-
-    printHeader(nGen, nReps, nPPReps);
-
-    std::vector<int> sanity;
-    int sanityText = 0;
-    int sanityTotal = 0;
-
-    for (const int nText : args.promptLengths) {
-        const std::vector<int> promptTokens =
-            makePrompt(tokenizer, modelCfg, vqaPrompt, nText);
-
-        const int nPrompt = static_cast<int>(promptTokens.size());
-
-        if (nPrompt + nGen > static_cast<int>(net.runtimeCfg.maxRuntimeContext))
-        {
-            fprintf(stderr,
-                    "error: prompt %d + generation exceeds the %u-token context\n",
-                    nPrompt,
-                    net.runtimeCfg.maxRuntimeContext);
+            fprintf(stderr, "error: the prompt has %zu tokens, %d requested\n", paragraphTokens.size(), n);
             return 1;
         }
+        if (n + nGen > (int)net.runtimeCfg.maxRuntimeContext)
+        {
+            fprintf(
+                stderr,
+                "error: prompt %d + generation exceeds the %u-token context\n",
+                n,
+                net.runtimeCfg.maxRuntimeContext);
+            return 1;
+        }
+    }
 
-        Tensor inTokens({static_cast<uint32_t>(nPrompt)});
-        Tensor outToken;
+    Tensor outToken;
+    std::vector<int> sanity;   // --showText: rep 0 of the last length, printed at the end
+    int sanityLen = 0;
 
+    // Warm-up at the longest length: pipeline creation, buffer allocation and the GPU
+    // clock ramp are paid here instead of in the first row.
+    {
+        const int nMax = *std::max_element(lengths.begin(), lengths.end());
+        const std::vector<int> maxPrompt(paragraphTokens.begin(), paragraphTokens.begin() + nMax);
+
+        net.resetCache();
+        net.prefill({}, Tensor({ (uint32_t)nMax }).setData(maxPrompt.data()), &outToken);   // {}: no images
+
+        for (int i = 0; i < nWarmGen; ++i)
+            net.decode(&outToken);
+    }
+
+    printLLMHeader(nGen, nReps, nPPReps);
+
+    for (const int nPrompt : lengths)
+    {
+        const std::vector<int> promptTokens(paragraphTokens.begin(), paragraphTokens.begin() + nPrompt);
+
+        // Reused across prefills, as the demos do: a new Tensor would land on a different
+        // device buffer.
+        Tensor inTokenIds({ (uint32_t)nPrompt });
+
+        // setData marks the tokens for upload again, so each prefill still copies its
+        // prompt to the device, as llama.cpp's does.
         auto prefill = [&]() -> int {
             net.resetCache();
-            inTokens.setData(promptTokens.data());
-
-            net.prefill(inImage, inTokens, &outToken);
-
-            return static_cast<int>(
-                outToken.getData<uint32_t>()[0]
-            );
+            inTokenIds.setData(promptTokens.data());
+            net.prefill({}, inTokenIds, &outToken);
+            return (int)outToken.getData<uint32_t>()[0];
         };
 
-        int tok = 0;
-
-        for (int i = 0; i < nWarmPre; ++i) tok = prefill();
-
-        for (int i = 0; i < nWarmGen; ++i) {
+        // Warm-up for this length. The last prefill seeds the decode that opens the timed
+        // prefills.
+        prefill();   // seeds the cache the decode warm-up reads
+        for (int i = 0; i < nWarmGen; ++i)
             net.decode(&outToken);
-            tok = static_cast<int>(outToken.getData<uint32_t>()[0]);
-        }
 
-        std::vector<double> ppTps;
+        for (int i = 0; i < nWarmPre; ++i)
+            prefill();
+
+        std::vector<double> ppTps, tgTps;
+        std::vector<int> generated;
+
+        // Each prefill follows a decode, as in generation, so it re-records its commands.
+        // The readback keeps the decode out of the timed span.
         for (int rep = 0; rep < nPPReps; ++rep)
         {
-            const double t0 = nowSec();
+            net.decode(&outToken);
+            outToken.getData<uint32_t>();
+
+            double t0 = nowSec();
             prefill();
             ppTps.push_back(nPrompt / (nowSec() - t0));
         }
 
-        std::vector<double> tgTps;
-        std::vector<int> generated;
+        for (int rep = 0; rep < nReps; ++rep)
+        {
+            int tok = prefill();
 
-        for (int rep = 0; rep < nReps; ++rep) {
-            tok = prefill();
-
-            const bool keep = args.showText && rep == 0;
-
-            if (keep) {
-                generated.clear();
+            bool keep = showText && rep == 0;
+            if (keep)
+            {
+                generated = promptTokens;
                 generated.push_back(tok);
             }
 
-            const double t0 = nowSec();
-
+            double t1 = nowSec();
             for (int gen = 0; gen < nGen; ++gen)
             {
                 net.decode(&outToken);
-                tok = static_cast<int>(outToken.getData<uint32_t>()[0]);
-
-                if (keep) generated.push_back(tok);
+                tok = (int)outToken.getData<uint32_t>()[0];
+                if (keep)
+                    generated.push_back(tok);
             }
-
-            tgTps.push_back(nGen / (nowSec() - t0));
+            tgTps.push_back(nGen / (nowSec() - t1));
         }
 
-        printRow("vAi", nText, nPrompt, stats(ppTps), stats(tgTps));
-
-        sanity = std::move(generated);
-        sanityText = nText;
-        sanityTotal = nPrompt;
+        printLLMRow("vAi", nPrompt, ppTps, tgTps);
+        sanity = generated;
+        sanityLen = nPrompt;
     }
 
-    if (args.showText)
-        printf("\n=== Generated Text (text=%d, total=%d, rep 0) ===\n%s\n"
-            ,sanityText, sanityTotal, tokenizer.decode(sanity).c_str());
+    if (showText)
+    {
+        printf("\n=== Generated Text (N=%d, rep 0) ===\n", sanityLen);
+        printf("%s\n", tokenizer.decode(sanity).c_str());
+    }
 
     return 0;
 }

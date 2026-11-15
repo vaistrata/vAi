@@ -16,7 +16,7 @@ add_executable(bench-gpt2-vai
 
 target_include_directories(bench-gpt2-vai PRIVATE
     ${MODEL_DIR}                           # net.h, openai-weights.h
-    ${CMAKE_CURRENT_SOURCE_DIR}/common            # bench-prompts.h
+    ${CMAKE_SOURCE_DIR}/benchmarks/common  # bench-inputs.h, bench-utils.h
 )
 
 target_link_libraries(bench-gpt2-vai PRIVATE
@@ -34,7 +34,13 @@ target_link_libraries(bench-gpt2-vai PRIVATE
 # installed there would shadow the pinned one.
 find_package(llama QUIET CONFIG NO_SYSTEM_ENVIRONMENT_PATH)
 
-if(llama_FOUND)
+if(llama_FOUND AND NOT LLAMA_BUILD_NUMBER EQUAL 11960)
+    # The bench calls the pinned release's batch and backend-sampling API, which other
+    # builds lack or change, and its numbers are recorded against that release.
+    message(WARNING "[vAi-bench] llama.cpp build ${LLAMA_BUILD_NUMBER} at ${llama_DIR} != pinned v0.8.0 (b11960): "
+                    "skipping bench-gpt2-llamacpp. Run benchmarks/scripts/setup-llamacpp.sh, "
+                    "or point llama_DIR at a v0.8.0 install.")
+elseif(llama_FOUND)
     message(STATUS "[vAi-bench] llama.cpp found: ${llama_DIR} (build ${LLAMA_BUILD_NUMBER})")
 
     # The installed llama.cpp is a Release (/MD) static library; a Debug (/MDd)
@@ -43,26 +49,19 @@ if(llama_FOUND)
         message(STATUS "[vAi-bench] llama.cpp was built Release: build bench-gpt2-llamacpp with --config Release")
     endif()
 
-    if(NOT LLAMA_BUILD_NUMBER EQUAL 10426)
-        message(WARNING "[vAi-bench] llama.cpp build ${LLAMA_BUILD_NUMBER} != pinned b10426 — "
-                        "recorded numbers are not comparable, and the [EXPERIMENTAL] "
-                        "sampling API this bench uses may break the build or silently "
-                        "change what gets sampled")
-    endif()
-
     add_executable(bench-gpt2-llamacpp
         llama.cpp/bench.cpp
     )
 
     target_include_directories(bench-gpt2-llamacpp PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/common      # bench-prompts.h
+        ${CMAKE_SOURCE_DIR}/benchmarks/common   # bench-inputs.h, bench-utils.h
     )
 
     target_link_libraries(bench-gpt2-llamacpp PRIVATE
         llama
     )
 else()
-    message(STATUS "[vAi-bench] llama.cpp not found — building bench-gpt2-vai only. "
+    message(STATUS "[vAi-bench] llama.cpp not found, building bench-gpt2-vai only. "
                    "For the llama.cpp counterpart run benchmarks/scripts/setup-llamacpp.sh, "
                    "or point llama_DIR at an existing install.")
 endif()

@@ -136,8 +136,6 @@ if(VAI_BUILD_BENCH)
     # LLM benchmarks
     add_subdirectory(benchmarks/gpt2)
     add_subdirectory(benchmarks/llama3)
-
-    # VLM benchmarks
     add_subdirectory(benchmarks/gemma3)
 
     message(STATUS "[vAi] Benchmark projects build configuration completed.")
