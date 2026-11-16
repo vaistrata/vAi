@@ -66,6 +66,9 @@ layout(constant_id = 9)  const uint tK       = 16;   // coopmat tile along K (= 
 layout(constant_id = 11) const uint accType  = 0;    // accumulator dtype (0: fp32, 1: fp16)
 layout(constant_id = 12) const uint robustBufferAccess  = 0;    // robust buffer access (0: disabled, 1: enabled)
 
+layout(constant_id = 14) const uint rowMajor = 0; // 0: N-first tile order; else M tile count for M-first order
+layout(constant_id = 15) const uint prefetch = 0;
+
 layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0;  // O (output) dtype
 layout(constant_id = SPEC_ID_TYPE_I) const uint typeI = 0;  // I (input) dtype
 layout(constant_id = SPEC_ID_TYPE_W) const uint typeW = 0;  // W (weight) dtype
@@ -119,6 +122,22 @@ shared f16vec2 tileB[wgM * SHMEM_STRIDE];
 // Per-subgroup scratch for the staged store paths (always fp32, see header).
 shared float cmStage[(wgSize / sgSize) * tN * tM];
 
+void storeWeightPack(uint offset, f16mat2x4 value)
+{
+    tileA[offset] = value[0].xy;
+    tileA[offset + 1u] = value[0].zw;
+    tileA[offset + 2u] = value[1].xy;
+    tileA[offset + 3u] = value[1].zw;
+}
+
+void storeInputPack(uint offset, f16mat2x4 value)
+{
+    tileB[offset] = value[0].xy;
+    tileB[offset + 1u] = value[0].zw;
+    tileB[offset + 2u] = value[1].xy;
+    tileB[offset + 3u] = value[1].zw;
+}
+
 void W_to_tileA(const uint pos_a, const uint row, const uint col, const uint idx_n, const uint block, const uint endK)
 {
     if (aligned != 0u)
@@ -126,10 +145,7 @@ void W_to_tileA(const uint pos_a, const uint row, const uint col, const uint idx
         const uint idx     = pos_a + col * (K / LOAD_VEC) + row;
         const uint buf_idx = col * SHMEM_STRIDE + row * (LOAD_VEC / 2);
         f16mat2x4 aa = (robustBufferAccess != 0 || idx_n < N) ? readW8(idx) : f16mat2x4(0.0);
-        tileA[buf_idx    ] = aa[0].xy;
-        tileA[buf_idx + 1] = aa[0].zw;
-        tileA[buf_idx + 2] = aa[1].xy;
-        tileA[buf_idx + 3] = aa[1].zw;
+        storeWeightPack(buf_idx, aa);
     }
     else
     {
@@ -151,10 +167,7 @@ void I_to_tileB(const uint pos_b, const uint row, const uint col, const uint idx
         const uint idx     = pos_b + col * (K / LOAD_VEC) + row;
         const uint buf_idx = col * SHMEM_STRIDE + row * (LOAD_VEC / 2);
         f16mat2x4 bb = (robustBufferAccess != 0 || idx_m < M) ? readI8(idx) : f16mat2x4(0.0);
-        tileB[buf_idx    ] = bb[0].xy;
-        tileB[buf_idx + 1] = bb[0].zw;
-        tileB[buf_idx + 2] = bb[1].xy;
-        tileB[buf_idx + 3] = bb[1].zw;
+        storeInputPack(buf_idx, bb);
     }
     else
     {
@@ -169,10 +182,31 @@ void I_to_tileB(const uint pos_b, const uint row, const uint col, const uint idx
     }
 }
 
+// The Point wave32 specialization uses raw FP16 operands, full N/K tiles and an M tail.
+const uint packRows = wgSize / (wgK / 8u);
+const uint wLoads = prefetch != 0u ? wgN / packRows : 1u;
+const uint iLoads = prefetch != 0u ? wgM / packRows : 1u;
+
+void fetchBlock(uint firstM, uint firstN, uint block, out f16mat2x4 w[wLoads], out f16mat2x4 x[iLoads])
+{
+    uint row = gl_LocalInvocationIndex / (wgK / 8u);
+    uint k = block / 8u + gl_LocalInvocationIndex % (wgK / 8u);
+    [[unroll]] for (uint i = 0; i < wLoads; ++i)
+        w[i] = bufferW_8f16[(firstN + row + i * packRows) * (K / 8u) + k];
+    [[unroll]] for (uint i = 0; i < iLoads; ++i)
+        x[i] = bufferI_8f16[min(firstM + row + i * packRows, M - 1u) * (K / 8u) + k];
+}
+
 void main()
 {
-    const uint nTile = gl_WorkGroupID.x;   // which wgN-wide slice of N this workgroup owns
-    const uint mTile = gl_WorkGroupID.y;   // which wgM-wide slice of M this workgroup owns
+    uint nTile = gl_WorkGroupID.x;
+    uint mTile = gl_WorkGroupID.y;
+    if (rowMajor != 0u)
+    {
+        const uint id = mTile * gl_NumWorkGroups.x + nTile;
+        mTile = id % rowMajor;
+        nTile = id / rowMajor;
+    }
 
     // Split-K: workgroup z accumulates only its own K span.
     const uint startK = gl_WorkGroupID.z * splitSize;
@@ -207,43 +241,93 @@ void main()
     }
 
     // Stage one k-block of W and I into shared memory, accumulate over it, repeat.
-    for (uint block = startK; block < endK; block += wgK)
+    if (prefetch != 0u)
     {
-        [[unroll]] for (uint l = 0; l < wgN; l += loadstride)
-            W_to_tileA(pos_a, loadr, loadc + l, nTile * wgN + loadc + l, block, endK);
-
-        [[unroll]] for (uint l = 0; l < wgM; l += loadstride)
-            I_to_tileB(pos_b, loadr, loadc + l, mTile * wgM + loadc + l, block, endK);
-
-        barrier();
-
-        pos_a += wgK / LOAD_VEC;
-        pos_b += wgK / LOAD_VEC;
-
-        // March tK-deep slices of the k-block through the accumulator grid.
-        // Offsets and strides into the staged tiles are in f16vec2 slots,
-        // hence the i / 2 (tK is even).
-        [[unroll]] for (uint i = 0; i < wgK; i += tK)
+        const uint firstM = mTile * wgM, firstN = nTile * wgN;
+        const uint rowM = sg_m * sgM, rowN = sg_n * sgN;
+        uint row = gl_LocalInvocationIndex / (wgK / 8u);
+        uint col = gl_LocalInvocationIndex % (wgK / 8u) * 4u;
+        f16mat2x4 w[wLoads], x[iLoads];
+        fetchBlock(firstM, firstN, 0u, w, x);
+        for (uint block = 0; block < K; block += wgK)
         {
-            [[unroll]] for (uint a = 0; a < cmsN; a++)
+            [[unroll]] for (uint i = 0; i < wLoads; ++i)
             {
-                matA ca;
-                coopMatLoad(ca, tileA, (sg_n * sgN + a * tN) * SHMEM_STRIDE + i / 2,
-                            SHMEM_STRIDE, gl_CooperativeMatrixLayoutRowMajor);
+                uint off = (row + i * packRows) * SHMEM_STRIDE + col;
+                storeWeightPack(off, w[i]);
+            }
+            [[unroll]] for (uint i = 0; i < iLoads; ++i)
+            {
+                uint off = (row + i * packRows) * SHMEM_STRIDE + col;
+                storeInputPack(off, x[i]);
+            }
+            barrier();
+            if (block + wgK < K) fetchBlock(firstM, firstN, block + wgK, w, x);
+            [[unroll]] for (uint k = 0; k < wgK / 16u; ++k)
+            {
+                matA wf[cmsN];
+                matB xf[cmsM];
+                [[unroll]] for (uint n = 0; n < cmsN; ++n)
+                    coopMatLoad(wf[n], tileA, (rowN + n * 16u) * SHMEM_STRIDE + k * 8u, SHMEM_STRIDE, gl_CooperativeMatrixLayoutRowMajor);
+                [[unroll]] for (uint m = 0; m < cmsM; ++m)
+                    coopMatLoad(xf[m], tileB, (rowM + m * 16u) * SHMEM_STRIDE + k * 8u, SHMEM_STRIDE, gl_CooperativeMatrixLayoutColumnMajor);
+                [[unroll]] for (uint n = 0; n < cmsN; ++n)
+                    [[unroll]] for (uint m = 0; m < cmsM; ++m)
+                        sums_f32[m * cmsN + n] = coopMatMulAdd(wf[n], xf[m], sums_f32[m * cmsN + n]);
+            }
+            barrier();
+        }
+    }
+    else
+    {
+        for (uint block = startK; block < endK; block += wgK)
+        {
+            [[unroll]] for (uint l = 0; l < wgN; l += loadstride)
+                W_to_tileA(pos_a, loadr, loadc + l, nTile * wgN + loadc + l, block, endK);
 
-                [[unroll]] for (uint b = 0; b < cmsM; b++)
+            [[unroll]] for (uint l = 0; l < wgM; l += loadstride)
+                I_to_tileB(pos_b, loadr, loadc + l, mTile * wgM + loadc + l, block, endK);
+
+            barrier();
+
+            pos_a += wgK / LOAD_VEC;
+            pos_b += wgK / LOAD_VEC;
+
+            // March tK-deep slices of the k-block through the accumulator grid.
+            // Offsets and strides into the staged tiles are in f16vec2 slots,
+            // hence the i / 2 (tK is even).
+            [[unroll]] for (uint i = 0; i < wgK; i += tK)
+            {
+                matB cb[cmsM];
+                if (cmsN > 1)
                 {
-                    matB cb;
-                    coopMatLoad(cb, tileB, (sg_m * sgM + b * tM) * SHMEM_STRIDE + i / 2,
-                                SHMEM_STRIDE, gl_CooperativeMatrixLayoutColumnMajor);
+                    [[unroll]] for (uint b = 0; b < cmsM; b++)
+                        coopMatLoad(cb[b], tileB, (sg_m * sgM + b * tM) * SHMEM_STRIDE + i / 2,
+                                    SHMEM_STRIDE, gl_CooperativeMatrixLayoutColumnMajor);
+                }
 
-                    if (accType == DTYPE_F32) sums_f32[b * cmsN + a] = coopMatMulAdd(ca, cb, sums_f32[b * cmsN + a]);
-                    else               sums_f16[b * cmsN + a] = coopMatMulAdd(ca, cb, sums_f16[b * cmsN + a]);
+                [[unroll]] for (uint a = 0; a < cmsN; a++)
+                {
+                    matA ca;
+                    coopMatLoad(ca, tileA, (sg_n * sgN + a * tN) * SHMEM_STRIDE + i / 2,
+                                SHMEM_STRIDE, gl_CooperativeMatrixLayoutRowMajor);
+
+                    [[unroll]] for (uint b = 0; b < cmsM; b++)
+                    {
+                        if (cmsN == 1)
+                        {
+                            coopMatLoad(cb[b], tileB, (sg_m * sgM + b * tM) * SHMEM_STRIDE + i / 2,
+                                        SHMEM_STRIDE, gl_CooperativeMatrixLayoutColumnMajor);
+                        }
+
+                        if (accType == DTYPE_F32) sums_f32[b * cmsN + a] = coopMatMulAdd(ca, cb[b], sums_f32[b * cmsN + a]);
+                        else               sums_f16[b * cmsN + a] = coopMatMulAdd(ca, cb[b], sums_f16[b * cmsN + a]);
+                    }
                 }
             }
-        }
 
-        barrier();
+            barrier();
+        }
     }
 
     // fp16 accumulation can overflow; clamp so inf does not reach the output.
