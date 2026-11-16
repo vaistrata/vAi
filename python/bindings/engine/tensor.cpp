@@ -90,10 +90,12 @@ void checkWritable(const vai::Tensor& dst, size_t count, const char* where)
     if (dst.baseOffset() != 0)
         throw nb::value_error(
             (std::string(where) + ": not supported on an offset view").c_str());
+    // clang-format off
     if (dst.numElements() != count)
         throw nb::value_error(
             (std::string(where) + ": array has " + std::to_string(count) + " elements, the tensor "
              + std::to_string(dst.numElements())).c_str());
+    // clang-format on
 }
 
 
@@ -105,10 +107,12 @@ void ingestFloats(vai::Tensor& dst, const NpAny& array, const char* where)
     const size_t n = array.size();
     const void* p = array.data();
 
+    // clang-format off
     if (!is(dt, Code::Float, 32) && !is(dt, Code::Float, 64) && !is(dt, Code::Float, 16))
         throw nb::type_error(
             (std::string(where) + ": got " + npName(dt) + "; only float32 / float16 / float64 "
              "arrays are accepted (token ids go through Tensor.from_u32)").c_str());
+    // clang-format on
 
     checkWritable(dst, n, where);
 
@@ -141,6 +145,7 @@ void ingestFloats(vai::Tensor& dst, const NpAny& array, const char* where)
 void ingestU32(vai::Tensor& dst, const NpAny& array, const char* where)
 {
     const nb::dlpack::dtype dt = array.dtype();
+    // clang-format off
     if (!is(dt, Code::UInt, 32) && !is(dt, Code::Int, 32))
         throw nb::type_error(
             (std::string(where) + ": got " + npName(dt) + "; pass an int32 / uint32 array "
@@ -149,6 +154,7 @@ void ingestU32(vai::Tensor& dst, const NpAny& array, const char* where)
         throw nb::value_error(
             (std::string(where) + ": uint32 payloads live in F32 (4-byte) tensors; this one is "
              + vaiName(dst.dtype())).c_str());
+    // clang-format on
 
     checkWritable(dst, array.size(), where);
     dst.setData(static_cast<const uint32_t*>(array.data()));
@@ -216,11 +222,13 @@ nb::ndarray<nb::numpy> toNumpy(vai::Tensor& t)
 
 nb::ndarray<nb::numpy> toU32(vai::Tensor& t)
 {
+    // clang-format off
     if (t.dtype() != vai::Dtype::Fp32)
         throw nb::value_error(
             (std::string("Tensor.to_u32: uint32 payloads live in F32 (4-byte) tensors; "
                          "this one is ")
              + vaiName(t.dtype())).c_str());
+    // clang-format on
     return toNdarray(t, nb::dtype<uint32_t>(), "Tensor.to_u32");
 }
 
@@ -236,7 +244,10 @@ void bindTensor(nb::module_& m)
         .value("F16", vai::Dtype::Fp16);
 
     // dynamic_attr: a forward output holds its net in `_pyvai_net` (forward.h).
-    nb::class_<vai::Tensor>(m, "Tensor", nb::dynamic_attr(),
+    nb::class_<vai::Tensor>(
+        m,
+        "Tensor",
+        nb::dynamic_attr(),
         "An F32 or F16 array of values, on the host and/or the device.\n\n"
         "from_numpy() / set() take float arrays and convert them to the tensor's "
         "dtype; to_numpy() gives them back in that dtype. uint32 indices (token "
@@ -251,15 +262,16 @@ void bindTensor(nb::module_& m)
             nb::arg("shape"),
             nb::arg("dtype") = vai::Dtype::Fp32,
             "An uninitialised tensor of `shape`; fill it with set() or hand it to "
-            "a forward as an output."
-        )
+            "a forward as an output.")
 
         .def_static(
             "from_numpy",
             [](NpAny array, std::optional<vai::Dtype> dtype) -> vai::Tensor {
+                // clang-format off
                 vai::Dtype dt = dtype ? *dtype
                               : is(array.dtype(), Code::Float, 16) ? vai::Dtype::Fp16
                                                                    : vai::Dtype::Fp32;
+                // clang-format on
                 vai::Tensor t(shapeFromNdarray(array), dt);
                 ingestFloats(t, array, "Tensor.from_numpy");
                 return t;
@@ -268,8 +280,7 @@ void bindTensor(nb::module_& m)
             nb::arg("dtype") = nb::none(),
             "A tensor holding `array`'s values: a float32 / float16 / float64 array, "
             "converted to `dtype` (default: F16 for float16, else F32). TypeError "
-            "for any other dtype; indices go through from_u32()."
-        )
+            "for any other dtype; indices go through from_u32().")
 
         .def_static(
             "from_u32",
@@ -282,16 +293,18 @@ void bindTensor(nb::module_& m)
             nb::arg("ids"),
             "A tensor carrying uint32 indices (token ids) as raw bits in F32 slots. "
             "`ids` is an int32 / uint32 array or a sequence of ints. Read it back "
-            "with to_u32(), not to_numpy()."
-        )
+            "with to_u32(), not to_numpy().")
 
-        .def_prop_ro("shape",
+        .def_prop_ro(
+            "shape",
             [](const vai::Tensor& t) { return shapeTuple(t.shape()); },
             "Dimensions as a tuple of ints; () for an empty tensor.")
-        .def_prop_ro("ndim",
+        .def_prop_ro(
+            "ndim",
             [](const vai::Tensor& t) -> size_t { return t.shape().size(); },
             "Number of dimensions; 0 for an empty tensor.")
-        .def("__len__",
+        .def(
+            "__len__",
             [](const vai::Tensor& t) -> size_t {
                 if (t.shape().empty())
                     throw nb::type_error("Tensor.__len__: tensor has no shape");
@@ -299,7 +312,8 @@ void bindTensor(nb::module_& m)
             },
             "The leading dimension. TypeError for an empty tensor.")
         // Dtype::None is not a Python enum member: an empty tensor reports None.
-        .def_prop_ro("dtype",
+        .def_prop_ro(
+            "dtype",
             [](const vai::Tensor& t) -> std::optional<vai::Dtype> {
                 if (t.dtype() == vai::Dtype::None)
                     return std::nullopt;
@@ -307,16 +321,20 @@ void bindTensor(nb::module_& m)
             },
             "The element dtype, or None for an empty tensor (Tensor()).")
         .def_prop_ro("num_elements", &vai::Tensor::numElements)
-        .def_prop_ro("num_bytes",    &vai::Tensor::numBytes)
+        .def_prop_ro("num_bytes", &vai::Tensor::numBytes)
 
         // Where the data currently lives — what the readback path looks at.
-        .def_prop_ro("has_host_data", &vai::Tensor::hasHostData,
+        .def_prop_ro(
+            "has_host_data",
+            &vai::Tensor::hasHostData,
             "True while a host copy exists: a forward's upload releases it and a "
             "device readback refills it.")
-        .def_prop_ro("gpu_buffer_bound", &vai::Tensor::gpuBufferBound,
+        .def_prop_ro(
+            "gpu_buffer_bound",
+            &vai::Tensor::gpuBufferBound,
             "True once a forward has uploaded this tensor or written it as an output.")
-        .def_prop_ro("base_offset", &vai::Tensor::baseOffset,
-            "Element offset into the bound buffer; non-zero only for a slice.")
+        .def_prop_ro(
+            "base_offset", &vai::Tensor::baseOffset, "Element offset into the bound buffer; non-zero only for a slice.")
 
         .def(
             "set",
@@ -328,8 +346,7 @@ void bindTensor(nb::module_& m)
             nb::rv_policy::reference,
             "Copy `array` into this tensor, converted to its dtype: the in-place "
             "from_numpy(). The shape must match. The next forward that takes the "
-            "tensor uploads it again. Returns self."
-        )
+            "tensor uploads it again. Returns self.")
 
         .def(
             "reshape",
@@ -353,8 +370,7 @@ void bindTensor(nb::module_& m)
             nb::arg("shape"),
             "The same data seen as `shape`: a view that shares storage and leaves "
             "this tensor as it is. A forward output can be viewed too, and reading "
-            "the view waits for its forward."
-        )
+            "the view waits for its forward.")
 
         .def(
             "permute",
@@ -382,18 +398,22 @@ void bindTensor(nb::module_& m)
                 // vai::Tensor::permute is a variadic template; dispatch by rank.
                 switch (rank)
                 {
-                    case 1: return self.permute(p[0]);
-                    case 2: return self.permute(p[0], p[1]);
-                    case 3: return self.permute(p[0], p[1], p[2]);
-                    case 4: return self.permute(p[0], p[1], p[2], p[3]);
-                    default:
-                        throw nb::value_error("Tensor.permute: rank > 4 is not supported");
+                case 1:
+                    return self.permute(p[0]);
+                case 2:
+                    return self.permute(p[0], p[1]);
+                case 3:
+                    return self.permute(p[0], p[1], p[2]);
+                case 4:
+                    return self.permute(p[0], p[1], p[2], p[3]);
+                default:
+                    throw nb::value_error("Tensor.permute: rank > 4 is not supported");
                 }
             },
-            "A new tensor with the axes reordered; this one is left as it is."
-        )
+            "A new tensor with the axes reordered; this one is left as it is.")
 
-        .def("to_numpy",
+        .def(
+            "to_numpy",
             [](vai::Tensor& t) { return toNumpy(t); },
             "A new numpy array of the values, in the tensor's dtype. A forward "
             "output is read back from the device, waiting for its forward, and a "
@@ -402,7 +422,8 @@ void bindTensor(nb::module_& m)
             "written the tensor since (a consumed input, a weight). Indices go "
             "through to_u32().")
 
-        .def("to_u32",
+        .def(
+            "to_u32",
             [](vai::Tensor& t) { return toU32(t); },
             "The uint32 indices an F32 tensor carries as raw bits (ArgmaxNode / "
             "TopKSamplingNode output, a model's `nextTokenId`), as a new uint32 "
@@ -423,11 +444,10 @@ void bindTensor(nb::module_& m)
                 return arr;
             },
             nb::arg("dtype") = nb::none(),
-            nb::arg("copy")  = nb::none(),
+            nb::arg("copy") = nb::none(),
             "numpy array protocol: the copy to_numpy() makes, cast to `dtype` when "
             "given, so np.asarray(t) and ufuncs take a Tensor. copy=False raises "
-            "ValueError."
-        )
+            "ValueError.")
 
         .def("__repr__", [](const vai::Tensor& t) -> std::string {
             std::string s = "Tensor(shape=[";

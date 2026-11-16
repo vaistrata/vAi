@@ -1,7 +1,7 @@
 #ifndef EXPERIMENTAL_YOLOX_NODES_DECODE_H
 #define EXPERIMENTAL_YOLOX_NODES_DECODE_H
 
-#include "vai/nodes/node-common.h"
+#include "vai/nodes/common.h"
 #include <cstdint>
 #include <string>
 #include <unordered_map>

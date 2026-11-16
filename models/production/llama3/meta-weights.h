@@ -34,29 +34,29 @@ inline void loadWeights(Net& net, const vai::Checkpoint& ckpt)
     // Token embedding
     net.embedding["weight"] = vai::Tensor(ckpt["model.embed_tokens.weight"], wDt);
 
-    // Layer layers
-    for (uint32_t i = 0; i < net.modelCfg.languageCfg.numLayers; ++i)
+    // Transformer blocks
+    for (uint32_t i = 0; i < net.modelCfg.trf.nBlocks; ++i)
     {
         std::string prefix = "model.layers." + std::to_string(i) + ".";
-        auto& layer = net.decoder.layers[i];
+        auto& block = net.decoder.blocks[i];
 
         // RMSNorms (params loaded at Fp32)
-        loadRMSNorm(layer.norm1, prefix + "input_layernorm.weight");
-        loadRMSNorm(layer.norm2, prefix + "post_attention_layernorm.weight");
+        loadRMSNorm(block.norm1, prefix + "input_layernorm.weight");
+        loadRMSNorm(block.norm2, prefix + "post_attention_layernorm.weight");
 
         // Self attention projections (no bias in Llama3)
-        loadLin(layer.mhAttn.projQ, prefix + "self_attn.q_proj.weight");
-        loadLin(layer.mhAttn.projK, prefix + "self_attn.k_proj.weight");
-        loadLin(layer.mhAttn.projV, prefix + "self_attn.v_proj.weight");
-        loadLin(layer.mhAttn.projOut, prefix + "self_attn.o_proj.weight");
+        loadLin(block.mhAttn.projQ, prefix + "self_attn.q_proj.weight");
+        loadLin(block.mhAttn.projK, prefix + "self_attn.k_proj.weight");
+        loadLin(block.mhAttn.projV, prefix + "self_attn.v_proj.weight");
+        loadLin(block.mhAttn.projOut, prefix + "self_attn.o_proj.weight");
 
         // FFN projections (SwiGLU). gate and value are one projection here, so
         // their rows are stacked — gate first, the half GatedMul activates.
         {
-            layer.ffn.gateValue["weight"] =
+            block.ffn.gateValue["weight"] =
                 vai::concat({ ckpt[prefix + "mlp.gate_proj.weight"], ckpt[prefix + "mlp.up_proj.weight"] }, wDt);
         }
-        loadLin(layer.ffn.out, prefix + "mlp.down_proj.weight");
+        loadLin(block.ffn.out, prefix + "mlp.down_proj.weight");
     }
 
     // Final RMSNorm

@@ -251,6 +251,7 @@ inline void NodeProfiler::print(bool doReset)
     constexpr int kNameCol = 28;
     constexpr int kBarMax  = 40;   // chars at 100%
 
+    // clang-format off
     auto printNode = [&](auto& self, const std::string& name, const TreeNode& n,
                          std::vector<bool>& trail, bool isRoot) -> void {
         if (!isRoot)
@@ -286,6 +287,7 @@ inline void NodeProfiler::print(bool doReset)
             trail.pop_back();
         }
     };
+    // clang-format on
 
     std::vector<bool> trail;
     printNode(printNode, "", root, trail, true);

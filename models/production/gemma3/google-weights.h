@@ -42,7 +42,7 @@ inline void loadWeights(Net& net, const vai::Checkpoint& parser)
     const vai::Dtype wDt = net.config().wDefaultDtype;
     const vai::Dtype normDt = vai::Dtype::Fp32;
 
-    const bool hasVision = net.modelCfg.vision.has_value();
+    const bool hasVision = net.modelCfg.vision;
 
     // Text-only checkpoints use:
     //   model.*
@@ -81,7 +81,7 @@ inline void loadWeights(Net& net, const vai::Checkpoint& parser)
 
     if (hasVision)
     {
-        const VisionEncoderConfig& cfg = *net.modelCfg.vision;
+        const VisionTransformerConfig& cfg = group::VisionEncoder::config;
         auto& vision = net.visionEncoder.value();
 
         auto loadLayerNorm = [&](auto& ln, const std::string& prefix) {
@@ -102,28 +102,28 @@ inline void loadWeights(Net& net, const vai::Checkpoint& parser)
 
             patch.project["weight"] =
                 vai::Tensor(parser[visionRoot + "embeddings.patch_embedding.weight"], wDt)
-                    .reshape({ cfg.layerCfg.embedDim, cfg.imageChannels * cfg.patchSize * cfg.patchSize });
+                    .reshape({ cfg.embedDim, cfg.imageChannels * cfg.patchSize * cfg.patchSize });
 
             patch.project["bias"] = vai::sum(parser[visionRoot + "embeddings.position_embedding.weight"],
                                              parser[visionRoot + "embeddings.patch_embedding.bias"],
                                              wDt);
         }
 
-        // Vision encoder layers
-        for (uint32_t i = 0; i < cfg.numLayers; ++i)
+        // Vision encoder blocks
+        for (uint32_t i = 0; i < cfg.nBlocks; ++i)
         {
             const std::string prefix = visionRoot + "encoder.layers." + std::to_string(i) + ".";
 
-            auto& layer = vision.encoder.layers[i];
+            auto& block = vision.encoder.blocks[i];
 
-            loadLayerNorm(layer.norm1, prefix + "layer_norm1");
-            loadLayerNorm(layer.norm2, prefix + "layer_norm2");
-            loadBiasedLin(layer.mhAttn.projQ, prefix + "self_attn.q_proj");
-            loadBiasedLin(layer.mhAttn.projK, prefix + "self_attn.k_proj");
-            loadBiasedLin(layer.mhAttn.projV, prefix + "self_attn.v_proj");
-            loadBiasedLin(layer.mhAttn.projOut, prefix + "self_attn.out_proj");
-            loadBiasedLin(layer.ffn.fc1, prefix + "mlp.fc1");
-            loadBiasedLin(layer.ffn.fc2, prefix + "mlp.fc2");
+            loadLayerNorm(block.norm1, prefix + "layer_norm1");
+            loadLayerNorm(block.norm2, prefix + "layer_norm2");
+            loadBiasedLin(block.mhAttn.projQ, prefix + "self_attn.q_proj");
+            loadBiasedLin(block.mhAttn.projK, prefix + "self_attn.k_proj");
+            loadBiasedLin(block.mhAttn.projV, prefix + "self_attn.v_proj");
+            loadBiasedLin(block.mhAttn.projOut, prefix + "self_attn.out_proj");
+            loadBiasedLin(block.ffn.fc1, prefix + "mlp.fc1");
+            loadBiasedLin(block.ffn.fc2, prefix + "mlp.fc2");
         }
 
         // Final vision LayerNorm
@@ -154,7 +154,7 @@ inline void loadWeights(Net& net, const vai::Checkpoint& parser)
     }
 
     // Decoder blocks
-    for (uint32_t i = 0; i < net.modelCfg.decoder.nBlocks; ++i)
+    for (uint32_t i = 0; i < net.modelCfg.trf.nBlocks; ++i)
     {
         const std::string prefix = textRoot + "layers." + std::to_string(i) + ".";
         auto& block = net.decoder.blocks[i];

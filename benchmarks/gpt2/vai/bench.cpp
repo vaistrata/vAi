@@ -145,12 +145,12 @@ int main(int argc, char** argv)
     auto modelCfg = size->config();
     printf("model: gpt2 %s\n", modelCfg.variant);
 
-    gpt2::Net net(
-        {
-            .device = device,
-            .wDefaultDtype = Dtype::Fp16,
-        },
-        modelCfg);
+    // clang-format off
+    gpt2::Net net({
+        .device = device,
+        .wDefaultDtype = Dtype::Fp16,
+    }, modelCfg);
+    // clang-format on
 
     loadWeights<"openai">(net);
 

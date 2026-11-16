@@ -25,7 +25,7 @@ For details, see [NeuralNet](../03-usage/neural-net.md).
 
 ### ModelConfig
 
-| Factory | `variant` | `embedDim` | `numQHeads` | `numLayers` |
+| Factory | `variant` | `embedDim` | `numQHeads` | `nBlocks` |
 |---|---|---|---|---|
 | `_124M()` | `"124M"` | 768 | 12 | 12 |
 | `_355M()` | `"355M"` | 1024 | 16 | 24 |
@@ -55,20 +55,20 @@ In vAi, a model is a DAG built by connecting nodes with `-`. For details, see [N
 input("inTokenIds") - embedding - decoder - lmHead - topkSampling - output("nextTokenId");
 ```
 
-`decoder` is the shared [`Transformer`](../../../vai/groups/transformer.h) group. It connects the layers in order and ends with `finalNorm`.
+`decoder` is the shared [`Transformer`](../../../vai/groups/transformer.h) group. It connects the blocks in order and ends with `finalNorm`.
 
 ```cpp
-for (size_t i = 1; i < layers.size(); ++i)
-    layers[i - 1] - layers[i];
-layers.back() - finalNorm;
+for (size_t i = 1; i < blocks.size(); ++i)
+    blocks[i - 1] - blocks[i];
+blocks.back() - finalNorm;
 ```
 
 ### NodeGroup
 
 GPT-2 uses these [node groups](../03-usage/node-group.md). All of them are [shared groups](../../../vai/groups/).
-`Transformer` stacks `TransformerLayer` groups, and each `TransformerLayer` contains nested `MultiHeadAttention` and `FeedForward` groups.
+`Transformer` stacks `TransformerBlock` groups, and each `TransformerBlock` contains nested `MultiHeadAttention` and `FeedForward` groups.
 
-#### TransformerLayer
+#### TransformerBlock
 
 ```cpp
 input - norm1 -    mhAttn - lastRow - gate/"then" - norm2 -    ffn;
@@ -76,7 +76,7 @@ input - "residual"/mhAttn - lastRow - gate/"then" - "residual"/ffn;
 ```
 
 The final projection in each sublayer accepts the residual through `acceptResidual` and adds it within the kernel, without a separate `Add`.
-`lastRow` and `gate` are `optional` members created by the configuration, and an absent one drops out of the connection. GPT-2 creates `lastRow` only in the last layer, so only the last row, which determines the next token, reaches the FFN.
+`lastRow` and `gate` are `optional` members created by the configuration, and an absent one drops out of the connection. GPT-2 creates `lastRow` only in the last block, so only the last row, which determines the next token, reaches the FFN.
 
 #### MultiHeadAttention
 

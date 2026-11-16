@@ -2,7 +2,7 @@
 #define VAI_NODES_TOKEN_EMBEDDING_H
 
 // Token (+ optional positional) embedding lookup.
-#include "node-common.h"
+#include "common.h"
 
 namespace vai::node {
 

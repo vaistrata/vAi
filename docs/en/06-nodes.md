@@ -1,6 +1,6 @@
 # Built-in nodes
 
-29 built-in nodes. See [Node](03-usage/node.md) for the concept and [Writing custom nodes and kernels](contributing/nodes.md) for instructions on creating new nodes.
+28 built-in nodes. See [Node](03-usage/node.md) for the concept and [Writing custom nodes and kernels](contributing/nodes.md) for instructions on creating new nodes.
 
 ## List
 
@@ -31,7 +31,6 @@
 | [Rope](#rope) | rotary position embedding (half-split rotation) | `rope.comp` |
 | [RowSliceScatter](#rowslicescatter) | write slices into rows, as torch.slice_scatter on dim 0 | None |
 | [Slice](#slice) | Take a run of consecutive indices along one axis | `slice.comp` |
-| [TimeEmbedding](#timeembedding) | sinusoidal embedding of a timestep the node counts down itself | `time-embedding.comp` |
 | [TokenEmbedding](#tokenembedding) | token embedding, optionally fused with positional embedding | `token-embedding.comp` |
 | [TopKSampling](#topksampling) | row-wise top-k sampling, one kernel run as two passes | `topk-sampling.comp` |
 | [TypeCast](#typecast) | Casts each tensor element to another dtype. | `cast.comp` |
@@ -198,7 +197,7 @@ cache in the identical state (fused append), so the graph meaning does not
 depend on which one runs.
 
 The mask's span bounds a query to its last span keys, a sliding window
-(e.g. Gemma3's local layers). A ring cache (kvCacheRing) then keeps only the
+(e.g. Gemma3's local blocks). A ring cache (kvCacheRing) then keeps only the
 last kvCacheSize positions, position p at row p % kvCacheSize; the counter
 keeps counting positions. A dispatch overwrites the rows of its Tkv oldest
 positions, so kvCacheSize >= span + Tkv - 1 keeps every query's span whole.
@@ -390,7 +389,7 @@ Source: [`vai/nodes/cyclic-table-reader.h`](../../vai/nodes/cyclic-table-reader.
 
 Run k after rewind() copies row k % numRows, so a loop whose per-step
 values depend on the step alone (e.g. pi0.5's adaRMS modulation) reads them
-with no host write, the way TimeEmbedding walks t. rewind() starts over.
+with no host write. rewind() starts over.
 
 **Kernels**
 
@@ -431,7 +430,7 @@ loader, or wired; at least one has to be. Each may broadcast over any axes as lo
 are adjacent, e.g. [1, D] over [T, D], or [C, 1, 1] over [C, H, W].
 
 An add is shift alone, a multiply scale alone, and a gated residual x + g * y
-both, EleAffine(in0 = y, scale = g, shift = x) (e.g. pi0.5's adaRMS layers).
+both, EleAffine(in0 = y, scale = g, shift = x) (e.g. pi0.5's adaRMS blocks).
 
 **Kernels**
 
@@ -1044,9 +1043,9 @@ axis is one more sweep and folds into the head count.
 Positions continue from setKvCacheCounter()'s buffer, so a KV-cache decode
 step rotates by the absolute position rather than by its offset in this forward.
 
-cfg.type picks how the frequencies are scaled: Default leaves them alone,
-Linear divides every one by factor, and Llama3 divides only the long
-wavelengths, interpolating the band between the two frequency bounds.
+cfg.type picks how the frequencies are scaled: Default divides every one by
+factor (1 leaves them alone), and Llama3 divides only the long wavelengths,
+interpolating the band between the two frequency bounds.
 
 **Kernels**
 
@@ -1127,49 +1126,6 @@ path; the caller writes the same node either way.
 **Kernels**
 
 - `vai/shaders/slice.comp`
-
----
-
-## TimeEmbedding
-
-sinusoidal embedding of a timestep the node counts down itself
-
-Source: [`vai/nodes/time-embedding.h`](../../vai/nodes/time-embedding.h)
-
-**Signature**
-
-- Input: in0 [.., rows, *] only its shape is read: one embedding per row
-- Output: out0 [.., rows, embedDim]
-
-**Slots**
-
-| Slot | Type | Notes |
-|---|---|---|
-| `in0` | input |  |
-| `out0` | output |  |
-
-**Config**
-
-| Field | Type | Default | Description |
-|---|---|---|---|
-| `embedDim` | `uint32_t` | Not specified | even; sin in the first half, cos in the second |
-| `minPeriod` | `float` | Not specified | the fastest sinusoid, in units of t |
-| `maxPeriod` | `float` | Not specified | ... and the slowest |
-| `numSteps` | `uint32_t` | Not specified | runs before t is back at 1 |
-
-**Behavior and constraints**
-
-out0[r, i]        = sin(2*pi * t / p_i)
-out0[r, half + i] = cos(2*pi * t / p_i),   p_i = minPeriod * (maxPeriod / minPeriod)^(i / (half - 1))
-
-Run k after resetTime() embeds t = 1 - (k % numSteps) / numSteps, so a
-flow-matching loop of numSteps steps walks t from 1 down with no host write.
-resetTime() starts it over (e.g. pi0 after a prefill); the count wraps after
-2^32 workgroups, so a caller that never resets does so within that.
-
-**Kernels**
-
-- `vai/shaders/time-embedding.comp`
 
 ---
 

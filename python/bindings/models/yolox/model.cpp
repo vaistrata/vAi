@@ -87,6 +87,7 @@ void bindYOLOX(nb::module_& m)
     declareBoundaries(cls, {"in0"}, {"out0"});
 
     // The input ndarray is read in place, with the GIL released.
+    // clang-format off
     m.def("yolox_postprocess",
           [](nb::ndarray<const float, nb::c_contig, nb::device::cpu> data,
              const ImageGeometry& geometry,
@@ -121,6 +122,7 @@ void bindYOLOX(nb::module_& m)
           "scores), flat or 2-D. Boxes are mapped back through `geometry`, the "
           "ImageProcessor's that letterboxed the image, and clipped to the source "
           "image. ValueError when the size is not a multiple of 5 + num_classes.");
+    // clang-format on
 }
 
 }   // namespace pyvai

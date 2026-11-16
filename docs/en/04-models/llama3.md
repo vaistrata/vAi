@@ -27,7 +27,7 @@ For details, see [NeuralNet](../03-usage/neural-net.md).
 
 ### ModelConfig
 
-| Factory | `variant` | `embedDim` | `ffnHiddenDim` | `numQHeads` | `numKVHeads` | `numLayers` |
+| Factory | `variant` | `embedDim` | `ffnHiddenDim` | `numQHeads` | `numKVHeads` | `nBlocks` |
 |---|---|---|---|---|---|---|
 | `_3_2_1B()` | `"3.2-1B"` | 2048 | 8192 | 32 | 8 | 16 |
 | `_3_2_3B()` | `"3.2-3B"` | 3072 | 8192 | 24 | 8 | 28 |
@@ -56,20 +56,20 @@ In vAi, a model is a DAG built by connecting nodes with `-`. For details, see [N
 input("inTokenIds") - embedding - decoder - lmHead - topkSampling - output("nextTokenId");
 ```
 
-`decoder` is the shared [`Transformer`](../../../vai/groups/transformer.h) group. It connects the layers in order and ends with `finalNorm`.
+`decoder` is the shared [`Transformer`](../../../vai/groups/transformer.h) group. It connects the blocks in order and ends with `finalNorm`.
 
 ```cpp
-for (size_t i = 1; i < layers.size(); ++i)
-    layers[i - 1] - layers[i];
-layers.back() - finalNorm;
+for (size_t i = 1; i < blocks.size(); ++i)
+    blocks[i - 1] - blocks[i];
+blocks.back() - finalNorm;
 ```
 
 ### NodeGroup
 
 Llama 3 uses these [node groups](../03-usage/node-group.md). All of them are [shared groups](../../../vai/groups/).
-`Transformer` stacks `TransformerLayer` groups, and each `TransformerLayer` contains nested `MultiHeadAttention` and `GatedFeedForward` groups.
+`Transformer` stacks `TransformerBlock` groups, and each `TransformerBlock` contains nested `MultiHeadAttention` and `GatedFeedForward` groups.
 
-#### TransformerLayer
+#### TransformerBlock
 
 ```cpp
 input - norm1 -    mhAttn - lastRow - gate/"then" - norm2 -    ffn;
@@ -77,7 +77,7 @@ input - "residual"/mhAttn - lastRow - gate/"then" - "residual"/ffn;
 ```
 
 The final projection in each sublayer accepts the residual through `acceptResidual` and adds it within the kernel, without a separate `Add`.
-`lastRow` and `gate` are `optional` members created by the configuration, and an absent one drops out of the connection. Llama 3 creates `lastRow` only in the last layer, so only the last row, which determines the next token, reaches the FFN. `gate` is created in the last layer when `prefillChunk` is set; it closes for a chunk that produces no token and skips the computation from the FFN on.
+`lastRow` and `gate` are `optional` members created by the configuration, and an absent one drops out of the connection. Llama 3 creates `lastRow` only in the last block, so only the last row, which determines the next token, reaches the FFN. `gate` is created in the last block when `prefillChunk` is set; it closes for a chunk that produces no token and skips the computation from the FFN on.
 
 #### MultiHeadAttention
 

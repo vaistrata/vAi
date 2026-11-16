@@ -1,7 +1,7 @@
 #ifndef VAI_NODES_IDENTITY_H
 #define VAI_NODES_IDENTITY_H
 
-#include "node-common.h"
+#include "common.h"
 
 namespace vai::node {
 

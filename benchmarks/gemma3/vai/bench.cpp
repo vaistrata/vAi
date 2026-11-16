@@ -39,12 +39,12 @@ inline std::vector<int> makePrompt(
     const int image = tokenizer.pieceToId(imageSoftToken);
 
     if (tokenizer.pieceToId(startOfImageToken) < 0 || tokenizer.pieceToId(endOfImageToken) < 0 || image < 0 ||
-        static_cast<uint32_t>(image) != modelCfg.vision->imageTokenId)
+        static_cast<uint32_t>(image) != gemma3::ModelConfig::imageTokenId)
         throw std::runtime_error("tokenizer image tokens do not match the model");
 
     std::vector<int> tokens = tokenizer.encode(std::string(userPromptPrefix) + startOfImageToken);
 
-    tokens.insert(tokens.end(), modelCfg.vision->tokensPerImage, image);
+    tokens.insert(tokens.end(), gemma3::group::VisionEncoder::tokensPerImage, image);
 
     const auto afterImage = tokenizer.encode(std::string(endOfImageToken) + textAfterImage);
     tokens.insert(tokens.end(), afterImage.begin(), afterImage.end());
@@ -106,18 +106,20 @@ int main(int argc, char** argv)
 
     gemma3::ModelConfig modelCfg = gemma3::ModelConfig::get(size);
 
-    const bool hasVision = modelCfg.vision.has_value();
+    const bool hasVision = modelCfg.vision;
 
     printf("model: gemma3 %s (%s)\n",
            modelCfg.variant, args.precision.c_str());
 
-    gemma3::Net net(
-        {
-            .device = device,
-            .wDefaultDtype = precision,
-        },
-        modelCfg,
-        { .kvCacheDtype = precision, .maxRuntimeContext = gemma3_bench::runtimeContext });
+    // clang-format off
+    gemma3::Net net({
+        .device = device,
+        .wDefaultDtype = precision,
+    }, modelCfg, {
+        .kvCacheDtype = precision,
+        .maxRuntimeContext = gemma3_bench::runtimeContext,
+    });
+    // clang-format on
 
     loadWeights<"google">(net);
 
@@ -130,7 +132,7 @@ int main(int argc, char** argv)
     Tensor inImage;
 
     if (hasVision) {
-        const auto& v = modelCfg.vision.value();
+        const auto& v = gemma3::group::VisionEncoder::config;
 
         if (v.imageChannels != gemma3_bench::syntheticImageChannels ||
             v.imageSize != gemma3_bench::syntheticImageSize)
@@ -143,16 +145,20 @@ int main(int argc, char** argv)
         if(args.imagepath == "")
         {
             const auto random = gemma3_bench::makeRandom(v.imageSize, v.imageSize, v.imageChannels);
+            // clang-format off
             rgb = ImageProcessor(random.data(), v.imageSize, v.imageSize, v.imageChannels)
                 .normalize(-1.0f, 1.0f)
                 .chw();
+            // clang-format on
         } 
         else
         {
+            // clang-format off
             rgb = ImageProcessor(args.imagepath)
                 .resize(v.imageSize, Resize::BilinearAntialiasInt16)
                 .normalize(-1.0f, 1.0f)
                 .chw();
+            // clang-format on
         }
 
         inImage = Tensor({v.imageChannels, v.imageSize, v.imageSize}).setFloats(std::move(rgb));

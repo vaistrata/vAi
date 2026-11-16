@@ -5,8 +5,8 @@
  - O (typeO) and TABLE (typeI) are fp32 or fp16 via same-binding buffer
    aliases; a row converts as it is copied when the two differ.
  - aligned == 1 (elemsPerRow % 4 == 0): one thread moves a vec4.
- - WORKGROUP_COUNTER counts workgroups since the host last zeroed it, as in
-   time-embedding.comp: every workgroup of the k-th dispatch draws a ticket in
+ - WORKGROUP_COUNTER counts workgroups since the host last zeroed it: every
+   workgroup of the k-th dispatch draws a ticket in
    [k*W, (k+1)*W), so workgroupOrdinal / W is k for all of them.
 
  Dispatch (host): dispatch2(aligned ? elemsPerRow / 4 : elemsPerRow).

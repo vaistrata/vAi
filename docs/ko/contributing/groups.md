@@ -4,7 +4,7 @@
 
 그룹은 `vai::NodeGroup`을 상속하도록 합니다. 앞서 커스텀 노드 작성 문서에서 `Node`는 그래프의 계산 단위라고 했습니다. `Node`를 하나로 묶은 구현체이기 때문에 실제로 계산할 때 실행되는 것은 그룹 안의 `Node`들입니다. 그룹은 이 `Node`들을 쌓아 만든 하나의 작은 모델이라고 생각하면 됩니다. 새 GPU 계산이 필요하면 `Node`와 커널을 새로 만들어야하고 이 때는 [커스텀 노드와 커널 작성](nodes.md)을 참조하면 됩니다.
 
-이 문서에서 커스텀 그룹 구현의 이해를 돕기 위해 따라갈 기본 예제는 `Transformer`의 `Classic` 구성이 사용하는 [`FeedForward`](../../../vai/groups/feed-forward.h)입니다. 기여자가 정한 설정을 받아 두 `Linear` `Node`를 만들고, 내부를 연결한 뒤 그룹의 입출력을 공개하는 순서로 구현 내용을 따라갑니다. 기여자가 정하고 싶은 설정에 따라 일부 `Node`를 추가하거나 생략하는 방법은 [`MultiHeadAttention`](../../../vai/groups/multi-head-attention.h)의 정규화 `Node`로 설명합니다. 같은 블록을 여러 개 생성하고 차례로 연결하는 방법은 [`Transformer`](../../../vai/groups/transformer.h)의 층 구성으로 설명합니다.
+이 문서에서 커스텀 그룹 구현의 이해를 돕기 위해 따라갈 기본 예제는 `Transformer`의 `Classic` 구성이 사용하는 [`FeedForward`](../../../vai/groups/feed-forward.h)입니다. 기여자가 정한 설정을 받아 두 `Linear` `Node`를 만들고, 내부를 연결한 뒤 그룹의 입출력을 공개하는 순서로 구현 내용을 따라갑니다. 기여자가 정하고 싶은 설정에 따라 일부 `Node`를 추가하거나 생략하는 방법은 [`MultiHeadAttention`](../../../vai/groups/multi-head-attention.h)의 정규화 `Node`로 설명합니다. 같은 블록을 여러 개 생성하고 차례로 연결하는 방법은 [`Transformer`](../../../vai/groups/transformer.h)의 블록 구성으로 설명합니다.
 
 ## 1. 그룹으로 묶을 범위와 입출력 정하기
 
@@ -22,7 +22,7 @@
 
 `...`는 앞쪽의 축을 유지한다는 뜻입니다. 예를 들어 입력이 `[T, inDim]`이면 출력은 `[T, outDim]`입니다. dtype과 차원 크기에 제한이 있으면 내부 `Node`가 지원하는 조건에 맞춰 명시합니다.
 
-그룹은 `Node`뿐 아니라 다른 그룹도 구성요소로 사용할 수 있습니다. 예를 들어 `TransformerLayer`는 `attention`과 `FeedForward`를 각각 하위 그룹으로 사용합니다. 각 하위 그룹은 내부 `Node`를 연결하고, 부모 그룹은 이 하위 그룹들을 다른 구성요소와 연결합니다.
+그룹은 `Node`뿐 아니라 다른 그룹도 구성요소로 사용할 수 있습니다. 예를 들어 `TransformerBlock`는 `attention`과 `FeedForward`를 각각 하위 그룹으로 사용합니다. 각 하위 그룹은 내부 `Node`를 연결하고, 부모 그룹은 이 하위 그룹들을 다른 구성요소와 연결합니다.
 
 ## 2. 설정과 구성 차이 구분하기
 
@@ -50,7 +50,7 @@ struct Config {
 
 | 달라지는 내용 | 작성 방법 | `Transformer` 계열 예시 |
 |---|---|---|
-| 차원이나 반복 횟수 | `Config`의 값으로 받습니다. | `hiddenDim`, `numLayers` |
+| 차원이나 반복 횟수 | `Config`의 값으로 받습니다. | `hiddenDim`, `nBlocks` |
 | 특정 `Node`의 사용 여부 | `std::optional`로 두고 필요한 경우에만 생성합니다. | 어텐션의 선택적 정규화 |
 | 멤버 종류나 연결 구조의 큰 차이 | 템플릿 등으로 타입을 나누는 방법을 고려합니다. | `TransformerType`, `QkvLayout` |
 
@@ -58,7 +58,7 @@ struct Config {
 
 ### 2.2 노드·하위 그룹의 타입 선택
 
-같은 연결 구조에서 `Node`나 하위 그룹의 타입만 바꿀 수 있습니다. [`TransformerLayer`](../../../vai/groups/transformer-layer.h)의 `Classic`과 `Default`는 연결 구조를 공유하지만, 정규화 `Node`와 `FeedForward` 그룹의 타입이 다릅니다.
+같은 연결 구조에서 `Node`나 하위 그룹의 타입만 바꿀 수 있습니다. [`TransformerBlock`](../../../vai/groups/transformer.h)의 `Classic`과 `Default`는 연결 구조를 공유하지만, 정규화 `Node`와 `FeedForward` 그룹의 타입이 다릅니다.
 
 다음은 `vai::group` 네임스페이스에 있는 타입 선택 코드입니다.
 
@@ -71,12 +71,12 @@ template<> struct BranchFfn<TransformerType::Default> { using Type = GatedFeedFo
 첫 줄은 `BranchFfn` 템플릿을 선언합니다. 그리고 뒤의 두 줄은 `Classic`과 `Default`에 사용할 정의를 지정합니다. 이처럼 특정 템플릿 인자에 대한 정의를 따로 작성하는 것을 **템플릿 특수화**라고 합니다.
 
 `Classic`의 `Type`은 `FeedForward`이고, `Default`의 `Type`은 `GatedFeedForward`입니다.
-정규화 `Node`를 고르는 `BranchNorm`도 같은 방식으로 `Classic`에는 `LayerNorm`, `Default`에는 `RmsNorm`을 지정합니다. `TransformerLayer`는 선택된 타입으로 멤버를 선언하므로, 구성마다 생성자와 연결 코드를 따로 작성할 필요가 없습니다.
+정규화 `Node`를 고르는 `BranchNorm`도 같은 방식으로 `Classic`에는 `LayerNorm`, `Default`에는 `RmsNorm`을 지정합니다. `TransformerBlock`는 선택된 타입으로 멤버를 선언하므로, 구성마다 생성자와 연결 코드를 따로 작성할 필요가 없습니다.
 
-모델이나 부모 그룹에서는 다음과 같이 사용할 레이어 구성을 지정합니다.
+모델이나 부모 그룹에서는 다음과 같이 사용할 블록 구성을 지정합니다.
 
 ```cpp
-using ClassicLayer = vai::group::TransformerLayer<
+using ClassicBlock = vai::group::TransformerBlock<
     vai::TransformerType::Classic, vai::QkvLayout::Separate>;
 ```
 
@@ -141,7 +141,7 @@ struct FeedForward : public vai::NodeGroup
 
 ### 3.2 타입별 하위 그룹 생성
 
-2절에서 선택한 하위 그룹의 타입으로 멤버를 선언합니다. 다음은 `TransformerLayer`가 선택한 타입으로 `ffn` 멤버를 선언하는 코드입니다.
+2절에서 선택한 하위 그룹의 타입으로 멤버를 선언합니다. 다음은 `TransformerBlock`가 선택한 타입으로 `ffn` 멤버를 선언하는 코드입니다.
 
 ```cpp
 typename BranchFfn<layout>::Type ffn;
@@ -152,14 +152,14 @@ typename BranchFfn<layout>::Type ffn;
 멤버를 생성할 때는 선택한 타입에 맞는 설정을 전달합니다. 다음은 생성자에서 `ffn`을 생성하는 부분입니다. 다른 멤버의 초기화는 생략했습니다.
 
 ```cpp
-TransformerLayer(Config config)
-: ffn(ffnConfig(config))
+TransformerBlock(Config config)
+: ffn(ffnConfig(config.base))
 {
     // ... 내부 연결과 슬롯 공개
 }
 ```
 
-`ffnConfig(config)`는 부모 그룹의 설정을 받아 하위 그룹에 전달할 설정을 만드는 방식을 보여줍니다. 바깥의 `ffn(...)`은 그 설정으로 `ffn` 멤버를 생성합니다. 타입마다 설정 구조체가 달라도, 이렇게 설정을 만드는 함수를 두면 부모 그룹의 생성 코드를 공유할 수 있습니다.
+`ffnConfig(config.base)`는 부모 그룹의 설정을 받아 하위 그룹에 전달할 설정을 만드는 방식을 보여줍니다. 바깥의 `ffn(...)`은 그 설정으로 `ffn` 멤버를 생성합니다. 타입마다 설정 구조체가 달라도, 이렇게 설정을 만드는 함수를 두면 부모 그룹의 생성 코드를 공유할 수 있습니다.
 
 정리하면, 부모 그룹은 하위 그룹에 전달할 설정값을 정합니다. 그리고 하위 그룹 내부의 `Node` 생성과 연결은 해당 하위 그룹이 담당합니다.
 
@@ -184,22 +184,27 @@ if (config.qkNormEps > 0.0f)
 
 ### 3.4 반복 그룹 생성과 주소 유지
 
-반복되는 블록은 벡터에 담을 수 있습니다. `Transformer`는 `std::vector<Layer> layers`를 멤버로 가집니다. 여기서 `Layer`는 선택한 `TransformerLayer` 타입의 별칭입니다. 다음은 `Transformer` 생성자에서 블록 생성 코드입니다. 층별 설정을 적용하는 부분은 생략했습니다.
+반복되는 블록은 벡터에 담을 수 있습니다. `Transformer`는 `std::vector<Block> blocks`를 멤버로 가집니다. 여기서 `Block`은 선택한 `TransformerBlock` 타입의 별칭입니다. 다음은 `Transformer` 생성자에서 블록 생성 코드입니다. 블록별 설정을 적용하는 부분은 생략했습니다.
 
 ```cpp
-VAI_ASSERT(config.numLayers >= 1);
+const uint32_t L = config.base.nBlocks;
+VAI_ASSERT(L >= 1);
 
-layers.reserve(config.numLayers);
-for (uint32_t i = 0; i < config.numLayers; ++i)
+blocks.reserve(L);
+for (uint32_t i = 0; i < L; ++i)
 {
-    // ... 이 층에 적용할 설정 계산
-    layers.emplace_back(config.layerCfg);
+    const bool last = i == L - 1;
+    blocks.emplace_back(typename Block::Config{
+        .base = config.base,
+        // ...
+        .sliceLastRow = config.sliceLastRow && last,
+    });
 }
 ```
 
 `reserve()`로 필요한 전체 공간을 먼저 확보하고, `emplace_back()`으로 그 위치에 그룹을 만듭니다. 이후 원소가 이동하거나 벡터가 재할당되는 작업은 피합니다. 주소를 유지하는 것은 엔진 동작에 필요한 조건입니다. 더 참고할 다른 소유 방식은 [컨테이너 사용 시 주의할 점](../03-usage/node-group.md#4-컨테이너-사용-시-주의할-점)을 확인하시면 됩니다.
 
-반복 수와 자식별 설정은 부모 그룹이 정합니다. 예를 들어 마지막 층에만 적용할 옵션은 부모가 해당 층을 생성하기 전에 설정하면 됩니다.
+반복 수와 자식별 설정은 부모 그룹이 정합니다. 예를 들어 마지막 블록에만 적용할 옵션은 부모가 해당 블록을 생성하기 전에 설정하면 됩니다.
 
 ## 4. 내부 경로 연결하기
 
@@ -217,14 +222,14 @@ fc1 - fc2;
 
 ### 4.2 반복 그룹의 순차 연결
 
-벡터에 담은 반복 그룹은 반복문을 사용해서 앞 원소의 출력을 다음 원소의 입력에 연결할 수 있습니다. 다음은 [`Transformer`](../../../vai/groups/transformer.h)에서 생성한 그룹들을 차례로 연결하는 부분입니다. 3절의 `layers` 벡터에 모든 그룹을 생성한 뒤 이 반복문으로 연결합니다.
+벡터에 담은 반복 그룹은 반복문을 사용해서 앞 원소의 출력을 다음 원소의 입력에 연결할 수 있습니다. 다음은 [`Transformer`](../../../vai/groups/transformer.h)에서 생성한 그룹들을 차례로 연결하는 부분입니다. 3절의 `blocks` 벡터에 모든 그룹을 생성한 뒤 이 반복문으로 연결합니다.
 
 ```cpp
-for (size_t i = 1; i < layers.size(); ++i)
-    layers[i - 1] - layers[i];
+for (size_t i = 1; i < blocks.size(); ++i)
+    blocks[i - 1] - blocks[i];
 ```
 
-각 연결은 `layers[i - 1]`의 `out0`과 `layers[i]`의 `in0`을 잇습니다.
+각 연결은 `blocks[i - 1]`의 `out0`과 `blocks[i]`의 `in0`을 잇습니다.
 
 ### 4.3 이름으로 슬롯 선택
 
@@ -347,10 +352,10 @@ defineSlot("out0", ffn.slot("out0"));
 
 **타입별 설정을 만드는 도우미**
 
-선택한 부품마다 설정 타입이 다르면 `if constexpr`로 해당 설정을 만드는 함수를 둘 수 있습니다. 다음은 필드별 값을 생략한 `TransformerLayer::ffnConfig()`입니다.
+선택한 부품마다 설정 타입이 다르면 `if constexpr`로 해당 설정을 만드는 함수를 둘 수 있습니다. 다음은 필드별 값을 생략한 `TransformerBlock::ffnConfig()`입니다.
 
 ```cpp
-static auto ffnConfig(const Config& config)
+static auto ffnConfig(const TransformerConfig& base)
 {
     if constexpr (layout == TransformerType::Classic)
         return FeedForward::Config{/* ... */};
@@ -363,13 +368,13 @@ static auto ffnConfig(const Config& config)
 
 **지원하는 선택값과 초기화 순서**
 
-`TransformerLayer`의 공통 구현은 `Classic`과 `Default`를 함께 처리합니다. 지원하는 선택값은 `BranchNorm`과 `BranchFfn`에 정의를 둔 값으로 정해지고, 정의가 없는 값을 쓰면 컴파일되지 않습니다. `MultiHeadAttention`처럼 기본 템플릿은 선언만 두고, 지원할 선택값에 대해서만 그룹을 정의할 수도 있습니다. 템플릿 특수화는 구현을 나누는 작성 방법이며, 엔진이 요구하는 형식은 아닙니다.
+`TransformerBlock`의 공통 구현은 `Classic`과 `Default`를 함께 처리합니다. 지원하는 선택값은 `BranchNorm`과 `BranchFfn`에 정의를 둔 값으로 정해지고, 정의가 없는 값을 쓰면 컴파일되지 않습니다. `MultiHeadAttention`처럼 기본 템플릿은 선언만 두고, 지원할 선택값에 대해서만 그룹을 정의할 수도 있습니다. 템플릿 특수화는 구현을 나누는 작성 방법이며, 엔진이 요구하는 형식은 아닙니다.
 
 여러 멤버가 사용하는 파생값은 사용하는 멤버보다 먼저 선언하고 초기화합니다. C++ 멤버는 초기화 목록의 나열 순서가 아니라 멤버 선언 순서로 초기화됩니다.
 
 **반복 블록의 설정 변경 순서**
 
-층마다 달라지는 설정은 적용 순서와 변경값의 유지 범위를 명시합니다. `Transformer`는 생성자의 반복문에서 같은 `config.layerCfg`를 고쳐 가며 레이어를 만들기 때문에, 고친 값이 다음 층에도 남습니다. 그래서 `sliceLastRow`처럼 마지막 층에만 켜는 값은 층마다 다시 대입합니다. 부모가 보장할 조건은 자식을 만들기 전에 확정합니다. 다음은 `FeedForward`의 설명 주석에서 발췌한 예시입니다.
+블록마다 달라지는 설정은 적용 순서와 변경값의 유지 범위를 명시합니다. `Transformer`는 블록마다 새 `Block::Config`를 만들어 넘기므로 한 블록의 설정이 다음 블록에 남지 않습니다. `sliceLastRow`처럼 마지막 블록에만 켜는 값은 `last` 조건으로 정합니다. 부모가 보장할 조건은 자식을 만들기 전에 확정합니다. 다음은 `FeedForward`의 설명 주석에서 발췌한 예시입니다.
 
 ```cpp
 /////////////////////////////////////////////////////////////////////////////////////////

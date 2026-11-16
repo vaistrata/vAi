@@ -6,7 +6,7 @@
 #ifndef PRODUCTION_PALIGEMMA_NET_H
 #define PRODUCTION_PALIGEMMA_NET_H
 
-#include "models/config-base.h"
+#include "models/common.h"
 #include "vai/nodes/token-embedding.h"
 #include "vai/groups/patch-embedding.h"
 #include "vai/nodes/concat.h"
@@ -33,15 +33,13 @@ using LanguageTransformer = vai::group::Transformer<vai::TransformerType::Defaul
 struct ModelConfig
 {
     const char* variant;   // checkpoint folder under data/ckpts/paligemma/google/
-    VisionModelConfig visionCfg;
-    LanguageModelConfig languageCfg = {
-        gemma::ModelConfig::_2B().languageCfg,
-        257152,   // vocabSize: 256000 text, 1024 <loc*> and 128 <seg*>
-        8192,     // maxTrainedContext
-    };
+    VisionTransformerConfig visionTrf;
+    vai::TransformerConfig languageTrf = common::gemma("2B");
+    uint32_t vocabSize = 257152;   // 256000 text, 1024 <loc*> and 128 <seg*>
+    uint32_t maxTrainedContext = 8192;
 
-    static ModelConfig _3B_224() { return { .variant = "3B-224", .visionCfg = siglip::so400m14(224) }; }
-    static ModelConfig _3B_448() { return { .variant = "3B-448", .visionCfg = siglip::so400m14(448) }; }
+    static constexpr ModelConfig _3B_224() { return { .variant = "3B-224", .visionTrf = common::so400m14(224) }; }
+    static constexpr ModelConfig _3B_448() { return { .variant = "3B-448", .visionTrf = common::so400m14(448) }; }
 };
 
 
@@ -74,24 +72,28 @@ struct Net : public vai::NeuralNet
     : NeuralNet(netCfg)
     , modelCfg(modelCfg)
     , runtimeCfg(runtimeCfg)
-    , maxRuntimeContext(std::min(runtimeCfg.maxRuntimeContext, modelCfg.languageCfg.maxTrainedContext))
+    , maxRuntimeContext(std::min(runtimeCfg.maxRuntimeContext, modelCfg.maxTrainedContext))
     , patchEmbed({
-          .imageChannels = modelCfg.visionCfg.imageChannels,
-          .imageSize = modelCfg.visionCfg.imageSize,
-          .patchSize = modelCfg.visionCfg.patchSize,
-          .embedDim = modelCfg.visionCfg.layerCfg.embedDim,
+          .imageChannels = modelCfg.visionTrf.imageChannels,
+          .imageSize = modelCfg.visionTrf.imageSize,
+          .patchSize = modelCfg.visionTrf.patchSize,
+          .embedDim = modelCfg.visionTrf.embedDim,
       })
-    , encoder(modelCfg.visionCfg.with({ .kvCacheDtype = runtimeCfg.kvCacheDtype }))
-    , projector({ .inDim = modelCfg.visionCfg.layerCfg.embedDim, .outDim = modelCfg.languageCfg.layerCfg.embedDim })
+    , encoder({ .base = modelCfg.visionTrf })
+    , projector({ .inDim = modelCfg.visionTrf.embedDim, .outDim = modelCfg.languageTrf.embedDim })
     , catTokens({ .allowPartialInputs = true })
     , embedding({
-          .vocabSize = modelCfg.languageCfg.vocabSize,
-          .embedDim = modelCfg.languageCfg.layerCfg.embedDim,
-          .scale = std::sqrt(float(modelCfg.languageCfg.layerCfg.embedDim)),
+          .vocabSize = modelCfg.vocabSize,
+          .embedDim = modelCfg.languageTrf.embedDim,
+          .scale = std::sqrt(float(modelCfg.languageTrf.embedDim)),
       })
-    , decoder(modelCfg.languageCfg.with(
-          { .kvCacheSize = maxRuntimeContext, .kvCacheDtype = runtimeCfg.kvCacheDtype, .sliceLastRow = true }))
-    , lmHead({ .inDim = modelCfg.languageCfg.layerCfg.embedDim, .outDim = modelCfg.languageCfg.vocabSize })
+    , decoder({
+          .base = modelCfg.languageTrf,
+          .kvCacheSize = maxRuntimeContext,
+          .kvCacheDtype = runtimeCfg.kvCacheDtype,
+          .sliceLastRow = true,
+      })
+    , lmHead({ .inDim = modelCfg.languageTrf.embedDim, .outDim = modelCfg.vocabSize })
     {
         this->runtimeCfg.maxRuntimeContext = maxRuntimeContext;
 
@@ -135,7 +137,7 @@ private:
         sync();   // The GPU may still be reading kvCacheCounter.
 
         *(uint32_t*)kvCacheCounter.map() = tokensSoFar_;
-        tokensSoFar_ += inTokenIds.shape()[0] + (inImage.validShape() ? modelCfg.visionCfg.numPatches() : 0);
+        tokensSoFar_ += inTokenIds.shape()[0] + (inImage.validShape() ? modelCfg.visionTrf.numPatches() : 0);
 
         topkSampling.setUniform((float)std::rand() / ((float)RAND_MAX + 1.0f));
 

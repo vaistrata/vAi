@@ -11,7 +11,9 @@
 #define VAI_COMMON_ACTIVATION_H
 #include "spec_constants.h"
 
+// clang-format off
 layout(constant_id = SPEC_ID_EPILOGUE) const uint epilogue = 0;   // 0: none, 1: relu, 2: gelu, 3: gelu (tanh), 4: silu, 5: sigmoid
+// clang-format on
 
 // GLSL has no erf: Abramowitz-Stegun 7.1.26, within 1.5e-7 of it.
 float erfApprox(float x)
@@ -45,22 +47,26 @@ vec4 sigmoid(vec4 x)   { return vec4(1.0) / (vec4(1.0) + exp(-x)); }
 
 float applyEpilogue(float x)
 {
+    // clang-format off
     return (epilogue == 0) ? x :
            (epilogue == 1) ? max(x, 0.0) :
            (epilogue == 2) ? gelu(x) :
            (epilogue == 3) ? geluTanh(x) :
            (epilogue == 4) ? silu(x) :
            (epilogue == 5) ? sigmoid(x) : x;
+    // clang-format on
 }
 
 vec4 applyEpilogue(vec4 x)
 {
+    // clang-format off
     return (epilogue == 0) ? x :
            (epilogue == 1) ? max(x, vec4(0.0)) :
            (epilogue == 2) ? gelu(x) :
            (epilogue == 3) ? geluTanh(x) :
            (epilogue == 4) ? silu(x) :
            (epilogue == 5) ? sigmoid(x) : x;
+    // clang-format on
 }
 
 #endif // VAI_COMMON_ACTIVATION_H

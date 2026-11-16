@@ -92,9 +92,11 @@ static void bindAttention(nb::module_& m)
             [](PyAttention& self, uint32_t bits, const std::vector<uint32_t>& block_end) {
                 // The core asserts the order; the list is a fixed-size array there.
                 constexpr size_t maxEnds = std::tuple_size_v<vai::CausalBlockEnd>;
+                // clang-format off
                 if (block_end.size() > maxEnds)
                     throw nb::value_error(("AttentionNode.update_causality: at most "
                         + std::to_string(maxEnds) + " segment ends").c_str());
+                // clang-format on
                 vai::CausalBlockEnd ends = {};
                 for (size_t i = 0; i < block_end.size(); ++i)
                 {

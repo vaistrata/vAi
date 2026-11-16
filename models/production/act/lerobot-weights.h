@@ -268,17 +268,16 @@ inline void loadWeights(Net& net, const vai::Checkpoint& ckpt)
     // nn.MultiheadAttention stacks Q, K and V into one in_proj [3D, D]. A fused projection
     // takes count of them from first, in that order; the leading withPos of them read
     // x + pos, which reaches them as bias rows, so the projection reads x alone.
-    auto loadInProj = [&](vai::node::Linear& lin,
-                          const std::vector<float>& inW,
-                          const std::vector<float>& inB,
-                          uint32_t first,
-                          uint32_t count,
-                          uint32_t withPos) {
+    // clang-format off
+    auto loadInProj = [&](vai::node::Linear& lin, const std::vector<float>& inW, const std::vector<float>& inB,
+                          uint32_t first, uint32_t count, uint32_t withPos)
+    {
         auto weight = rows(inW, D, first * D, count * D);
         const auto bias = rows(inB, 1, first * D, count * D);
         lin["bias"] = tensor({ cfg.encoderTokens(), count * D }, wDt, projBias(weight, bias, withPos * D));
         lin["weight"] = tensor({ count * D, D }, wDt, std::move(weight));
     };
+    // clang-format on
 
     for (uint32_t i = 0; i < cfg.numEncoderBlocks; ++i)
     {

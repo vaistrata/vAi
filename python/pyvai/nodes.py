@@ -39,7 +39,6 @@ from ._pyvai import (
     GroupNormNode,
     # transformer
     TokenEmbeddingNode,
-    TimeEmbeddingNode,
     CyclicTableReaderNode,
     RopeNode,
     AttentionNode,
@@ -74,7 +73,6 @@ __all__ = [
     "RmsNormNode",
     "GroupNormNode",
     "TokenEmbeddingNode",
-    "TimeEmbeddingNode",
     "CyclicTableReaderNode",
     "RopeNode",
     "AttentionNode",

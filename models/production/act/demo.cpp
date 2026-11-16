@@ -96,11 +96,11 @@ int main()
         .actionChunk = 50,
     });
     printf("Loading ACT %s model...\n", modelCfg.variant);
-    act::Net net(
-        {
-            .wDefaultDtype = Dtype::Fp16,
-        },
-        modelCfg);
+    // clang-format off
+    act::Net net({
+        .wDefaultDtype = Dtype::Fp16,
+    }, modelCfg);
+    // clang-format on
 
     // Configure the per-node GPU execution-time profiler
     setProfileTags(net);
@@ -127,10 +127,12 @@ int main()
     for (const auto& [name, path] : cameraImages)
     {
         printf("Loading image %s: %s\n", name.c_str(), path);
+        // clang-format off
         std::vector<float> chw = utils::ImageProcessor(path)
-                                     .normalize(0.0f, 1.0f)
-                                     .standardize(net.imageMean.at(name), net.imageStd.at(name))
-                                     .chw();
+            .normalize(0.0f, 1.0f)
+            .standardize(net.imageMean.at(name), net.imageStd.at(name))
+            .chw();
+        // clang-format on
         VAI_ASSERT(chw.size() == size_t(3) * H * W);
         pixels.insert(pixels.end(), chw.begin(), chw.end());
     }
@@ -153,12 +155,13 @@ int main()
 
     // Forward — every camera and the state in one pass, to the whole chunk.
     {
-        utils::TimeChecker totalTimer("\n"
-                                      "────────────────────────────────────────\n"
-                                      "▶ Forward {} images + state -> {} actions in {}ms \n"
-                                      "────────────────────────────────────────",
-                                      B,
-                                      modelCfg.actionChunk);
+        utils::TimeChecker totalTimer(
+            "\n"
+            "────────────────────────────────────────\n"
+            "▶ Forward {} images + state -> {} actions in {}ms \n"
+            "────────────────────────────────────────",
+            B,
+            modelCfg.actionChunk);
 
         net.predict(inImages, inState, &actions);
 

@@ -28,11 +28,11 @@ inline void loadWeights(Net& net, const vai::Checkpoint& ckpt)
     const vai::Dtype wDt = net.config().wDefaultDtype;
 
     // Match the checkpoint's BN epsilon and the previous weight-dtype rounding.
-    auto loadBatchNorm = [&](auto& conv,
-                             const vai::Tensor& gamma,
-                             const vai::Tensor& beta,
-                             const vai::Tensor& mean,
-                             const vai::Tensor& variance) {
+    // clang-format off
+    auto loadBatchNorm = [&](auto& conv, const vai::Tensor& gamma,
+                            const vai::Tensor& beta, const vai::Tensor& mean,
+                            const vai::Tensor& variance)
+    {
         constexpr float eps = 1e-3f;
         const uint32_t channels = conv.config_.outChannels;
         std::vector<float> gammaData(channels), betaData(channels);
@@ -56,6 +56,7 @@ inline void loadWeights(Net& net, const vai::Checkpoint& ckpt)
         conv["scale"] = vai::Tensor(std::vector<uint32_t>{ channels }, wDt).setFloats(std::move(scale));
         conv["bias"] = vai::Tensor(std::vector<uint32_t>{ channels }, wDt).setFloats(std::move(bias));
     };
+    // clang-format on
 
     auto loadBaseConv = [&](auto& conv, const std::string& path) {
         conv["weight"] = vai::Tensor(ckpt[path + ".conv.weight"], wDt);

@@ -11,13 +11,40 @@
 
 #include "net.h"
 #include "vai/engine/weights.h"
-#include "vai/nodes/time-embedding.h"
 #include <algorithm>
+#include <cmath>
 #include <string>
 #include <vector>
 
 
 namespace model::production::pi0::lerobot {
+
+/////////////////////////////////////////////////////////////////////////////////////////
+// Timestep embedding - the flow-matching time t as sinusoids, sin half then cos half
+//
+// emb[i] = sin(2*pi * t / p_i),  emb[D/2 + i] = cos(2*pi * t / p_i),
+// p_i = minPeriod * (maxPeriod / minPeriod)^(i / (D/2 - 1))
+//
+// The periods are the ones the checkpoint was trained with (openpi: 4e-3 and 4.0).
+// The time MLP only fits those, so they are constants here, not settings.
+/////////////////////////////////////////////////////////////////////////////////////////
+inline std::vector<float> timeEmbedding(double t, uint32_t embedDim)
+{
+    constexpr double minPeriod = 4e-3;
+    constexpr double maxPeriod = 4.0;
+
+    const uint32_t half = embedDim / 2;
+    std::vector<float> out(embedDim);
+    for (uint32_t i = 0; i < half; ++i)
+    {
+        const double period = minPeriod * std::pow(maxPeriod / minPeriod, double(i) / (half - 1));
+        const double angle = 2.0 * 3.14159265358979323846 * t / period;
+        out[i] = float(std::sin(angle));
+        out[half + i] = float(std::cos(angle));
+    }
+    return out;
+}
+
 
 /////////////////////////////////////////////////////////////////////////////////////////
 // Weight loading - maps HuggingFace safetensors key names to model members
@@ -28,7 +55,6 @@ inline void loadWeights(Net& net, const vai::Checkpoint& ckpt)
     const vai::Dtype wDt = net.config().wDefaultDtype;
     const vai::Dtype normDt = vai::Dtype::Fp32;
 
-    // Each tensor is loaded at the dtype declared by its owning node.
     auto loadLin = [&](auto& lin, const std::string& prefix) {
         lin["weight"] = vai::Tensor(ckpt[prefix + ".weight"], wDt);
         lin["bias"] = vai::Tensor(ckpt[prefix + ".bias"], wDt);
@@ -68,27 +94,27 @@ inline void loadWeights(Net& net, const vai::Checkpoint& ckpt)
         patch.project["weight"] =
             vai::Tensor(ckpt[root + "embeddings.patch_embedding.weight"], wDt)
                 .reshape({
-                    modelCfg.visionCfg.layerCfg.embedDim,
-                    modelCfg.visionCfg.imageChannels * modelCfg.visionCfg.patchSize * modelCfg.visionCfg.patchSize,
+                    modelCfg.visionTrf.embedDim,
+                    modelCfg.visionTrf.imageChannels * modelCfg.visionTrf.patchSize * modelCfg.visionTrf.patchSize,
                 });
         patch.project["bias"] = vai::sum(
             ckpt[root + "embeddings.position_embedding.weight"], ckpt[root + "embeddings.patch_embedding.bias"], wDt);
 
-        for (uint32_t i = 0; i < modelCfg.visionCfg.numLayers; ++i)
+        for (uint32_t i = 0; i < modelCfg.visionTrf.nBlocks; ++i)
         {
             std::string prefix = root + "encoder.layers." + std::to_string(i) + ".";
-            auto& layer = net.visionEncoder.layers[i];
+            auto& block = net.visionEncoder.blocks[i];
 
-            loadLayerNorm(layer.norm1, prefix + "layer_norm1");
-            loadLayerNorm(layer.norm2, prefix + "layer_norm2");
+            loadLayerNorm(block.norm1, prefix + "layer_norm1");
+            loadLayerNorm(block.norm2, prefix + "layer_norm2");
 
-            loadLin(layer.mhAttn.projQ, prefix + "self_attn.q_proj");
-            loadLin(layer.mhAttn.projK, prefix + "self_attn.k_proj");
-            loadLin(layer.mhAttn.projV, prefix + "self_attn.v_proj");
-            loadLin(layer.mhAttn.projOut, prefix + "self_attn.out_proj");
+            loadLin(block.mhAttn.projQ, prefix + "self_attn.q_proj");
+            loadLin(block.mhAttn.projK, prefix + "self_attn.k_proj");
+            loadLin(block.mhAttn.projV, prefix + "self_attn.v_proj");
+            loadLin(block.mhAttn.projOut, prefix + "self_attn.out_proj");
 
-            loadLin(layer.ffn.fc1, prefix + "mlp.fc1");
-            loadLin(layer.ffn.fc2, prefix + "mlp.fc2");
+            loadLin(block.ffn.fc1, prefix + "mlp.fc1");
+            loadLin(block.ffn.fc2, prefix + "mlp.fc2");
         }
 
         loadLayerNorm(net.visionEncoder.finalNorm, root + "post_layernorm");
@@ -102,31 +128,31 @@ inline void loadWeights(Net& net, const vai::Checkpoint& ckpt)
     // pi0 never decodes text, so no head of our own reads it back.
     net.promptEmbed["weight"] = vai::Tensor(ckpt["paligemma_with_expert.paligemma.lm_head.weight"], wDt);
 
-    // Both Gemma stacks, layer by layer. They read one stack of key names each and
+    // Both Gemma stacks, block by block. They read one stack of key names each and
     // are otherwise identical, so one loop loads the pair.
     auto loadGemma = [&](auto& gemma, const std::string& root) {
-        for (uint32_t i = 0; i < net.modelCfg.languageCfg.numLayers; ++i)
+        for (uint32_t i = 0; i < net.modelCfg.languageTrf.nBlocks; ++i)
         {
             std::string prefix = root + "layers." + std::to_string(i) + ".";
-            auto& layer = gemma.layers[i];
+            auto& block = gemma.blocks[i];
 
             // RMSNorms (params loaded at Fp32)
-            loadRMSNorm(layer.norm1, prefix + "input_layernorm.weight");
-            loadRMSNorm(layer.norm2, prefix + "post_attention_layernorm.weight");
+            loadRMSNorm(block.norm1, prefix + "input_layernorm.weight");
+            loadRMSNorm(block.norm2, prefix + "post_attention_layernorm.weight");
 
             // Self attention projections
-            loadLinNoBias(layer.mhAttn.projQ, prefix + "self_attn.q_proj");
-            loadLinNoBias(layer.mhAttn.projK, prefix + "self_attn.k_proj");
-            loadLinNoBias(layer.mhAttn.projV, prefix + "self_attn.v_proj");
-            loadLinNoBias(layer.mhAttn.projOut, prefix + "self_attn.o_proj");
+            loadLinNoBias(block.mhAttn.projQ, prefix + "self_attn.q_proj");
+            loadLinNoBias(block.mhAttn.projK, prefix + "self_attn.k_proj");
+            loadLinNoBias(block.mhAttn.projV, prefix + "self_attn.v_proj");
+            loadLinNoBias(block.mhAttn.projOut, prefix + "self_attn.o_proj");
 
             // FFN projections (GeGLU). gate and value are one projection here, so
             // their rows are stacked — gate first, the half GatedMul activates.
             {
-                layer.ffn.gateValue["weight"] =
+                block.ffn.gateValue["weight"] =
                     vai::concat({ ckpt[prefix + "mlp.gate_proj.weight"], ckpt[prefix + "mlp.up_proj.weight"] }, wDt);
             }
-            loadLinNoBias(layer.ffn.out, prefix + "mlp.down_proj");
+            loadLinNoBias(block.ffn.out, prefix + "mlp.down_proj");
         }
 
         loadRMSNorm(gemma.finalNorm, root + "norm.weight");
@@ -146,7 +172,7 @@ inline void loadWeights(Net& net, const vai::Checkpoint& ckpt)
     // W_t · emb(t_k) + b at t_k = 1 - k / denoiseSteps.
     {
         const uint32_t S = net.runtimeCfg.denoiseSteps;
-        const uint32_t D = net.modelCfg.actionCfg.layerCfg.embedDim;
+        const uint32_t D = net.modelCfg.actionTrf.embedDim;
 
         vai::Tensor wTen(ckpt["action_time_mlp_in.weight"], vai::Dtype::Fp32);
         vai::Tensor bTen(ckpt["action_time_mlp_in.bias"], vai::Dtype::Fp32);
@@ -162,8 +188,7 @@ inline void loadWeights(Net& net, const vai::Checkpoint& ckpt)
         std::vector<float> table(size_t(S) * D);
         for (uint32_t k = 0; k < S; ++k)
         {
-            const std::vector<float> emb = vai::node::timeEmbedding(
-                1.0 - double(k) / S, D, net.modelCfg.timeMinPeriod, net.modelCfg.timeMaxPeriod);
+            const std::vector<float> emb = timeEmbedding(1.0 - double(k) / S, D);
             for (uint32_t j = 0; j < D; ++j)
             {
                 const float* wTime = w + size_t(j) * 2 * D + D;

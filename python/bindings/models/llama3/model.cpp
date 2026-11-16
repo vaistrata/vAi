@@ -29,49 +29,52 @@ void bindLlama3(nb::module_& m)
     auto cfgCls = nb::class_<llama3::ModelConfig>(
         m, "Llama3Config", "A Llama 3 checkpoint (models/production/llama3/net.h), built by preset(variant).");
     bindPresets(cfgCls, "Llama3Config", llama3Presets());
-    cfgCls.def_rw("language_cfg", &llama3::ModelConfig::languageCfg,
-                  "The decoder stack and its token table (LanguageModelConfig); every "
-                  "layer carries the Llama 3 RoPE scaling.");
+    cfgCls
+        .def_rw("trf",
+                &llama3::ModelConfig::trf,
+                "The decoder stack (TransformerConfig); every block carries the Llama 3 RoPE scaling.")
+        .def_rw("vocab_size", &llama3::ModelConfig::vocabSize)
+        .def_rw("max_trained_context",
+                &llama3::ModelConfig::maxTrainedContext,
+                "The trained context, which caps the KV cache.");
 
-    auto cls = nb::class_<llama3::Net, vai::NeuralNet>(m, "Llama3Model")
-                   .def(
-                       "__init__",
-                       [](llama3::Net* self,
-                          const llama3::ModelConfig& config,
-                          vai::Dtype w_default_dtype,
-                          vai::Dtype o_default_dtype,
-                          std::optional<eva::Device>
-                              device,
-                          std::optional<uint32_t>
-                              max_runtime_context,
-                          uint32_t prefill_chunk,
-                          vai::Dtype kv_cache_dtype) {
-                           checkLanguageConfig(config.languageCfg,
-                                               "Llama3Model",
-                                               "config.language_cfg",
-                                               /*clampsContext*/ true);
-                           const uint32_t context =
-                               runtimeContext<llama3::RuntimeConfig>(max_runtime_context, "Llama3Model");
-                           const vai::NeuralNetConfig cfg = netConfig(w_default_dtype, o_default_dtype, device);
-                           new (self) llama3::Net(cfg,
-                                                  config,
-                                                  {
-                                                      .kvCacheDtype = kv_cache_dtype,
-                                                      .maxRuntimeContext = context,
-                                                      .prefillChunk = prefill_chunk,
-                                                  });
-                       },
-                       nb::arg("config") = llama3::ModelConfig::_3_2_1B(),
-                       nb::arg("w_default_dtype") = vai::Dtype::Fp16,
-                       nb::arg("o_default_dtype") = vai::Dtype::Fp32,
-                       nb::arg("device") = nb::none(),
-                       nb::arg("max_runtime_context") = nb::none(),
-                       nb::arg("prefill_chunk") = 0u,
-                       nb::arg("kv_cache_dtype") = vai::Dtype::Fp16,
-                       "Build a Llama 3 model (default config: Llama3Config.preset('3.2-1B')). "
-                       "`max_runtime_context` bounds the KV cache, clamped to the checkpoint's "
-                       "max_trained_context (None: all of it, 128K, so set a real budget). A "
-                       "prompt longer than `prefill_chunk` runs as several forwards (0: as one).");
+    auto cls =
+        nb::class_<llama3::Net, vai::NeuralNet>(m, "Llama3Model")
+            .def(
+                "__init__",
+                [](llama3::Net* self,
+                   const llama3::ModelConfig& config,
+                   vai::Dtype w_default_dtype,
+                   vai::Dtype o_default_dtype,
+                   std::optional<eva::Device>
+                       device,
+                   std::optional<uint32_t>
+                       max_runtime_context,
+                   uint32_t prefill_chunk,
+                   vai::Dtype kv_cache_dtype) {
+                    checkLanguageConfig(config, "Llama3Model");
+                    const uint32_t context = runtimeContext<llama3::RuntimeConfig>(max_runtime_context, "Llama3Model");
+                    const vai::NeuralNetConfig cfg = netConfig(w_default_dtype, o_default_dtype, device);
+                    new (self) llama3::Net(
+                        cfg,
+                        config,
+                        {
+                            .kvCacheDtype = kv_cache_dtype,
+                            .maxRuntimeContext = context,
+                            .prefillChunk = prefill_chunk,
+                        });
+                },
+                nb::arg("config") = llama3::ModelConfig::_3_2_1B(),
+                nb::arg("w_default_dtype") = vai::Dtype::Fp16,
+                nb::arg("o_default_dtype") = vai::Dtype::Fp32,
+                nb::arg("device") = nb::none(),
+                nb::arg("max_runtime_context") = nb::none(),
+                nb::arg("prefill_chunk") = 0u,
+                nb::arg("kv_cache_dtype") = vai::Dtype::Fp16,
+                "Build a Llama 3 model (default config: Llama3Config.preset('3.2-1B')). "
+                "`max_runtime_context` bounds the KV cache, clamped to the checkpoint's "
+                "max_trained_context (None: all of it, 128K, so set a real budget). A "
+                "prompt longer than `prefill_chunk` runs as several forwards (0: as one).");
     bindWeightsAndTags<llama3::Net>(cls,
                                     "Llama3Model",
                                     llama3::meta::loadWeights,

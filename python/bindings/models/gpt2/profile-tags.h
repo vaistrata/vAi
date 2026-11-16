@@ -16,16 +16,16 @@ namespace {
 
 void setProfileTags(gpt2::Net& net)
 {
-    const uint32_t D = net.modelCfg.languageCfg.layerCfg.embedDim;
-    const uint32_t V = net.modelCfg.languageCfg.vocabSize;
+    const uint32_t D = net.modelCfg.trf.embedDim;
+    const uint32_t V = net.modelCfg.vocabSize;
 
     auto lin = [](uint32_t in, uint32_t out) {
         return "Linear.[" + std::to_string(in) + "x" + std::to_string(out) + "]";
     };
 
-    for (uint32_t i = 0; i < net.modelCfg.languageCfg.numLayers; ++i)
+    for (uint32_t i = 0; i < net.modelCfg.trf.nBlocks; ++i)
     {
-        auto& b = net.decoder.layers[i];
+        auto& b = net.decoder.blocks[i];
         b.norm1.setProfileTag("LayerNorm");
         b.mhAttn.projQKV.setProfileTag(lin(D, 3 * D));
         b.mhAttn.attn.setProfileTag("Attn");

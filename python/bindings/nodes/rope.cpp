@@ -8,13 +8,11 @@ namespace pyvai {
 
 namespace {
 
-// The core struct has no defaults, so plain RoPE is spelled here; the scaling
-// knobs sit at Llama 3's values, idle until a type reads them.
+// The core struct defaults the type and factor only, so the base is spelled
+// here; the frequency bounds sit at Llama 3's values, idle until LLAMA3 reads them.
 const vai::RopeConfig plainRope = {
-    .type           = vai::RopeType::Default,
-    .base           = 10000.0f,
-    .factor         = 1.0f,
-    .lowFreqFactor  = 1.0f,
+    .base = 10000.0f,
+    .lowFreqFactor = 1.0f,
     .highFreqFactor = 4.0f,
     .originalMaxPos = 8192,
 };
@@ -23,62 +21,64 @@ const vai::RopeConfig plainRope = {
 // Bound before RopeNode, whose signature refers to them.
 void bindRopeConfig(nb::module_& m)
 {
-    nb::enum_<vai::RopeType>(m, "RopeType",
-        "How RopeConfig scales the frequencies: DEFAULT reads base only, LINEAR "
-        "divides every frequency by factor, LLAMA3 divides only the long "
-        "wavelengths and interpolates the band between the two frequency bounds.")
+    nb::enum_<vai::RopeType>(
+        m,
+        "RopeType",
+        "How RopeConfig scales the frequencies: DEFAULT divides every frequency "
+        "by factor (1: unscaled), LLAMA3 divides only the long wavelengths and "
+        "interpolates the band between the two frequency bounds.")
         .value("DEFAULT", vai::RopeType::Default)
-        .value("LINEAR",  vai::RopeType::Linear)
-        .value("LLAMA3",  vai::RopeType::Llama3);
+        .value("LLAMA3", vai::RopeType::Llama3);
 
-    auto cls = nb::class_<vai::RopeConfig>(m, "RopeConfig")
-        .def(
-            "__init__",
-            [](vai::RopeConfig* self, vai::RopeType type,
-               float base, float factor, float low_freq_factor, float high_freq_factor,
-               uint32_t original_max_pos)
-            {
-                new (self) vai::RopeConfig{
-                    .type           = type,
-                    .base           = base,
-                    .factor         = factor,
-                    .lowFreqFactor  = low_freq_factor,
-                    .highFreqFactor = high_freq_factor,
-                    .originalMaxPos = original_max_pos,
-                };
-            },
-            nb::arg("type")             = plainRope.type,
-            nb::arg("base")             = plainRope.base,
-            nb::arg("factor")           = plainRope.factor,
-            nb::arg("low_freq_factor")  = plainRope.lowFreqFactor,
-            nb::arg("high_freq_factor") = plainRope.highFreqFactor,
-            nb::arg("original_max_pos") = plainRope.originalMaxPos,
-            "RoPE frequencies of a model. factor, the frequency bounds and "
-            "original_max_pos are read by LINEAR / LLAMA3 only. Consumers require "
-            "base > 0, factor > 0 where it is read, and low_freq_factor != "
-            "high_freq_factor for LLAMA3."
-        )
-        .def_rw("type",             &vai::RopeConfig::type)
-        .def_rw("base",             &vai::RopeConfig::base)
-        .def_rw("factor",           &vai::RopeConfig::factor)
-        .def_rw("low_freq_factor",  &vai::RopeConfig::lowFreqFactor)
-        .def_rw("high_freq_factor", &vai::RopeConfig::highFreqFactor)
-        .def_rw("original_max_pos", &vai::RopeConfig::originalMaxPos)
-        .def("__eq__",
-             [](const vai::RopeConfig& self, const vai::RopeConfig& other) {
-                 return self.type == other.type && self.base == other.base
-                     && self.factor == other.factor
-                     && self.lowFreqFactor == other.lowFreqFactor
-                     && self.highFreqFactor == other.highFreqFactor
-                     && self.originalMaxPos == other.originalMaxPos;
-             },
-             nb::arg("other"), nb::is_operator())
-        .def("__repr__", [](const vai::RopeConfig& c) {
-            return nb::str("RopeConfig(type={}, base={}, factor={}, low_freq_factor={}, "
-                           "high_freq_factor={}, original_max_pos={})")
-                .format(c.type, c.base, c.factor, c.lowFreqFactor, c.highFreqFactor,
-                        c.originalMaxPos);
-        });
+    auto cls =
+        nb::class_<vai::RopeConfig>(m, "RopeConfig")
+            .def(
+                "__init__",
+                [](vai::RopeConfig* self,
+                   vai::RopeType type,
+                   float base,
+                   float factor,
+                   float low_freq_factor,
+                   float high_freq_factor,
+                   uint32_t original_max_pos) {
+                    new (self) vai::RopeConfig{
+                        .type = type,
+                        .base = base,
+                        .factor = factor,
+                        .lowFreqFactor = low_freq_factor,
+                        .highFreqFactor = high_freq_factor,
+                        .originalMaxPos = original_max_pos,
+                    };
+                },
+                nb::arg("type") = plainRope.type,
+                nb::arg("base") = plainRope.base,
+                nb::arg("factor") = plainRope.factor,
+                nb::arg("low_freq_factor") = plainRope.lowFreqFactor,
+                nb::arg("high_freq_factor") = plainRope.highFreqFactor,
+                nb::arg("original_max_pos") = plainRope.originalMaxPos,
+                "RoPE frequencies of a model. The frequency bounds and original_max_pos "
+                "are read by LLAMA3 only. Consumers require base > 0, factor > 0, and "
+                "low_freq_factor != high_freq_factor for LLAMA3.")
+            .def_rw("type", &vai::RopeConfig::type)
+            .def_rw("base", &vai::RopeConfig::base)
+            .def_rw("factor", &vai::RopeConfig::factor)
+            .def_rw("low_freq_factor", &vai::RopeConfig::lowFreqFactor)
+            .def_rw("high_freq_factor", &vai::RopeConfig::highFreqFactor)
+            .def_rw("original_max_pos", &vai::RopeConfig::originalMaxPos)
+            .def(
+                "__eq__",
+                [](const vai::RopeConfig& self, const vai::RopeConfig& other) {
+                    return self.type == other.type && self.base == other.base && self.factor == other.factor &&
+                           self.lowFreqFactor == other.lowFreqFactor && self.highFreqFactor == other.highFreqFactor &&
+                           self.originalMaxPos == other.originalMaxPos;
+                },
+                nb::arg("other"),
+                nb::is_operator())
+            .def("__repr__", [](const vai::RopeConfig& c) {
+                return nb::str("RopeConfig(type={}, base={}, factor={}, low_freq_factor={}, "
+                               "high_freq_factor={}, original_max_pos={})")
+                    .format(c.type, c.base, c.factor, c.lowFreqFactor, c.highFreqFactor, c.originalMaxPos);
+            });
     // A mutable value type with __eq__ is unhashable, as Python's rule has it.
     cls.attr("__hash__") = nb::none();
 }

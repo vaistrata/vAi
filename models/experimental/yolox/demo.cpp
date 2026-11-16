@@ -93,12 +93,11 @@ int main()
         .confThreshold = 0.25f,
         .iouThreshold = 0.45f,
     };
-    yolox::Net net(
-        {
-            .wDefaultDtype = Dtype::Fp16,
-        },
-        cfg,
-        runtimeCfg);
+    // clang-format off
+    yolox::Net net({
+        .wDefaultDtype = Dtype::Fp16,
+    }, cfg, runtimeCfg);
+    // clang-format on
 
     std::printf("Loading YOLOX-%s weights...\n", yolox::tierName(tier));
     loadWeights<"megvii">(net);

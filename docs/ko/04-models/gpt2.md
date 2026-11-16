@@ -25,7 +25,7 @@ GPT-2는 기본값을 그대로 쓰고, 로더가 각 `LayerNorm`의 계수만 f
 
 ### ModelConfig
 
-| 팩토리 | `variant` | `embedDim` | `numQHeads` | `numLayers` |
+| 팩토리 | `variant` | `embedDim` | `numQHeads` | `nBlocks` |
 |---|---|---|---|---|
 | `_124M()` | `"124M"` | 768 | 12 | 12 |
 | `_355M()` | `"355M"` | 1024 | 16 | 24 |
@@ -55,20 +55,20 @@ vAi에서 모델은 노드를 `-`로 이어 만든 DAG입니다. 세부사항은
 input("inTokenIds") - embedding - decoder - lmHead - topkSampling - output("nextTokenId");
 ```
 
-`decoder`는 공통 그룹 [`Transformer`](../../../vai/groups/transformer.h)입니다. 레이어를 차례로 잇고 마지막에 `finalNorm`을 둡니다.
+`decoder`는 공통 그룹 [`Transformer`](../../../vai/groups/transformer.h)입니다. 블록을 차례로 잇고 마지막에 `finalNorm`을 둡니다.
 
 ```cpp
-for (size_t i = 1; i < layers.size(); ++i)
-    layers[i - 1] - layers[i];
-layers.back() - finalNorm;
+for (size_t i = 1; i < blocks.size(); ++i)
+    blocks[i - 1] - blocks[i];
+blocks.back() - finalNorm;
 ```
 
 ### NodeGroup
 
 GPT-2가 사용하는 [노드그룹](../03-usage/node-group.md)입니다. 모두 [공통 그룹](../../../vai/groups/)에 있습니다.
-`Transformer`가 `TransformerLayer`를 쌓고, `TransformerLayer`가 `MultiHeadAttention`과 `FeedForward`를 담는 중첩 구조입니다.
+`Transformer`가 `TransformerBlock`를 쌓고, `TransformerBlock`가 `MultiHeadAttention`과 `FeedForward`를 담는 중첩 구조입니다.
 
-#### TransformerLayer
+#### TransformerBlock
 
 ```cpp
 input - norm1 -    mhAttn - lastRow - gate/"then" - norm2 -    ffn;
@@ -76,7 +76,7 @@ input - "residual"/mhAttn - lastRow - gate/"then" - "residual"/ffn;
 ```
 
 별도 `Add`를 두지 않고 각 서브층의 마지막 투영이 `acceptResidual`로 받아 커널 안에서 더합니다.
-`lastRow`와 `gate`는 설정에 따라 생기는 `optional` 멤버이고, 없으면 연결에서 빠집니다. GPT-2는 마지막 레이어에만 `lastRow`를 두어, 다음 토큰을 정하는 마지막 행만 FFN으로 보냅니다.
+`lastRow`와 `gate`는 설정에 따라 생기는 `optional` 멤버이고, 없으면 연결에서 빠집니다. GPT-2는 마지막 블록에만 `lastRow`를 두어, 다음 토큰을 정하는 마지막 행만 FFN으로 보냅니다.
 
 #### MultiHeadAttention
 

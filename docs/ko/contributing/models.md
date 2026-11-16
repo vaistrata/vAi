@@ -47,15 +47,19 @@ Net(const vai::NeuralNetConfig& netCfg, const ModelConfig& modelCfg, const Runti
 : NeuralNet(netCfg)                       // 엔진 설정
 , modelCfg(modelCfg)
 , runtimeCfg(runtimeCfg)
-, maxRuntimeContext(std::min(runtimeCfg.maxRuntimeContext, modelCfg.languageCfg.maxTrainedContext))
+, maxRuntimeContext(std::min(runtimeCfg.maxRuntimeContext, modelCfg.maxTrainedContext))
 , embedding({                             // 모델 구조 설정
-      .vocabSize = modelCfg.languageCfg.vocabSize,
-      .embedDim = modelCfg.languageCfg.layerCfg.embedDim,
-      .posTableSize = modelCfg.languageCfg.maxTrainedContext,
+      .vocabSize = modelCfg.vocabSize,
+      .embedDim = modelCfg.trf.embedDim,
+      .posTableSize = modelCfg.maxTrainedContext,
   })
-, decoder(modelCfg.languageCfg.with(      // 구조 설정에 실행 설정 적용
-      { .kvCacheSize = maxRuntimeContext, .kvCacheDtype = runtimeCfg.kvCacheDtype, .sliceLastRow = true }))
-, lmHead({ .inDim = modelCfg.languageCfg.layerCfg.embedDim, .outDim = modelCfg.languageCfg.vocabSize })
+, decoder({                               // 구조 설정에 실행 설정 추가
+      .base = modelCfg.trf,
+      .kvCacheSize = maxRuntimeContext,
+      .kvCacheDtype = runtimeCfg.kvCacheDtype,
+      .sliceLastRow = true,
+  })
+, lmHead({ .inDim = modelCfg.trf.embedDim, .outDim = modelCfg.vocabSize })
 {
     // ...
 }
@@ -281,7 +285,7 @@ cmake --build build --target demo-gpt2 --config Release
 
 **모델과 그룹의 선언**
 
-타입 이름은 `PascalCase`로 씁니다. 각 단어의 첫 글자를 대문자로 씁니다. (예: `ModelConfig`, `RuntimeConfig`.) 함수와 변수 이름은 `camelCase`로 씁니다. 첫 단어는 소문자로 시작하고 다음 단어의 첫 글자는 대문자로 씁니다. (예: `resetState()`, `numLayers`, `modelCfg`.) 함수와 구조체의 여는 중괄호는 다음 줄에 둡니다.
+타입 이름은 `PascalCase`로 씁니다. 각 단어의 첫 글자를 대문자로 씁니다. (예: `ModelConfig`, `RuntimeConfig`.) 함수와 변수 이름은 `camelCase`로 씁니다. 첫 단어는 소문자로 시작하고 다음 단어의 첫 글자는 대문자로 씁니다. (예: `resetState()`, `nBlocks`, `modelCfg`.) 함수와 구조체의 여는 중괄호는 다음 줄에 둡니다.
 
 다음은 `net.h`의 작성 형식을 보여주는 예제입니다. `Node` 구성과 생성자는 생략했습니다. `model_name`과 주석의 모델명과 작성자 이메일은 기여자의 정보로 바꾸면 됩니다. 이때 구조체 이름 `Net`은 유지합니다.
 
@@ -300,7 +304,7 @@ struct Block : public vai::NodeGroup
 
 struct Net : public vai::NeuralNet
 {
-    uint32_t numLayers = 0;
+    uint32_t nBlocks = 0;
 
     void resetState()
     {

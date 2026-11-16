@@ -34,7 +34,7 @@ vai::node::Activation activation{{.epilogue = vai::Epilogue::Relu}};
 
 ### 2.1 생성자의 슬롯 등록과 설정 보관
 
-커스텀 노드 클래스는 `vai::Node`를 `public`으로 상속하고, `prepare()`와 `run()`을 구현합니다. `Node` 헤더는 `vai/nodes/node-common.h`를 포함합니다. `Node`를 모델의 멤버로 생성하고 그래프에 연결하는 방법은 [커스텀 모델 작성](models.md)을 참조하면 됩니다.
+커스텀 노드 클래스는 `vai::Node`를 `public`으로 상속하고, `prepare()`와 `run()`을 구현합니다. `Node` 헤더는 `vai/nodes/common.h`를 포함합니다. `Node`를 모델의 멤버로 생성하고 그래프에 연결하는 방법은 [커스텀 모델 작성](models.md)을 참조하면 됩니다.
 
 다음은 `Activation`의 선언과 생성자에서 발췌한 코드입니다. 생성자는 설정을 보관하고, 입력과 출력을 받을 슬롯을 등록합니다. 이 코드는 `vai::node` 네임스페이스 안에서 확인할 수 있습니다.
 

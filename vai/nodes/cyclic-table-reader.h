@@ -1,7 +1,7 @@
 #ifndef VAI_NODES_CYCLIC_TABLE_READER_H
 #define VAI_NODES_CYCLIC_TABLE_READER_H
 
-#include "node-common.h"
+#include "common.h"
 
 namespace vai::node {
 
@@ -13,7 +13,7 @@ namespace vai::node {
 
   Run k after rewind() copies row k % numRows, so a loop whose per-step
   values depend on the step alone (e.g. pi0.5's adaRMS modulation) reads them
-  with no host write, the way TimeEmbedding walks t. rewind() starts over.
+  with no host write. rewind() starts over.
 =============================================================================*/
 class CyclicTableReader : public vai::Node
 {

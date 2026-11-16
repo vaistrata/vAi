@@ -1,5 +1,5 @@
-#ifndef PRODUCTION_PI05_GROUPS_ACTION_TRANSFORMER_H
-#define PRODUCTION_PI05_GROUPS_ACTION_TRANSFORMER_H
+#ifndef PRODUCTION_PI05_GROUPS_ACTION_DECODER_H
+#define PRODUCTION_PI05_GROUPS_ACTION_DECODER_H
 
 #include "vai/groups/transformer.h"
 #include "vai/nodes/identity.h"
@@ -13,8 +13,8 @@ namespace model::production::pi05::group {
 
 
 /////////////////////////////////////////////////////////////////////////////////////////
-// ActionTransformerLayer - Gemma's layer, its norms and residuals set by a condition
-// Input: in0  [Tq, embedDim], or [B, Tq, embedDim] with allowBatch
+// ActionTransformerBlock - Gemma's block, its norms and residuals set by a condition
+// Input: in0  [Tq, embedDim]
 //        cond [6, embedDim]   scale1 shift1 g1 scale2 shift2 g2, one row each, shared by every token
 // Output: out0 the shape of in0
 //
@@ -26,9 +26,14 @@ namespace model::production::pi05::group {
 // (g * branch + x): a projection that folded the residual in would add before the
 // gate has scaled the branch.
 /////////////////////////////////////////////////////////////////////////////////////////
-struct ActionTransformerLayer : public vai::NodeGroup
+struct ActionTransformerBlock : public vai::NodeGroup
 {
-    using Config = vai::TransformerLayerConfig;
+    struct Config
+    {
+        vai::TransformerConfig base;
+        uint32_t kvCacheSize;
+        vai::Dtype kvCacheDtype;
+    };
 
     vai::node::Identity input;
     vai::node::Identity cond;
@@ -40,33 +45,31 @@ struct ActionTransformerLayer : public vai::NodeGroup
     vai::group::GatedFeedForward ffn;
     vai::node::EleAffine fma2;
 
-    ActionTransformerLayer(Config config)
+    ActionTransformerBlock(Config config)
     : condRows{ { { { .start = 0 } },
                   { { .start = 1 } },
                   { { .start = 2 } },
                   { { .start = 3 } },
                   { { .start = 4 } },
                   { { .start = 5 } } }, }
-    , norm1({ .eps = config.normEps, .coeffsAsInputs = true })
+    , norm1({ .eps = config.base.normEps, .coeffsAsInputs = true })
     , mhAttn({
-          .embedDim = config.embedDim,
-          .headDim = config.headDim,
-          .numQHeads = config.numQHeads,
-          .numKVHeads = config.numKVHeads,
+          .embedDim = config.base.embedDim,
+          .headDim = config.base.headDim,
+          .numQHeads = config.base.numQHeads,
+          .numKVHeads = config.base.numKVHeads,
           .kvCacheSize = config.kvCacheSize,
           .kvCacheDtype = config.kvCacheDtype,
-          .kvCacheRing = config.kvCacheRing,
-          .qkNormEps = config.withQkNorm ? config.normEps : 0.0f,
-          .ropeCfg = config.ropeCfg,
-          .allowBatch = config.allowBatch,
+          .qkNormEps = config.base.withQkNorm ? config.base.normEps : 0.0f,
+          .ropeCfg = config.base.ropeCfg,
       })
     , fma1({ .scaleAsInput = true, .shiftAsInput = true })
-    , norm2({ .eps = config.normEps, .coeffsAsInputs = true })
+    , norm2({ .eps = config.base.normEps, .coeffsAsInputs = true })
     , ffn({
-          .inDim = config.embedDim,
-          .hiddenDim = config.ffnHiddenDim,
-          .outDim = config.embedDim,
-          .activation = config.ffnActivation,
+          .inDim = config.base.embedDim,
+          .hiddenDim = config.base.ffnHiddenDim,
+          .outDim = config.base.embedDim,
+          .activation = config.base.ffnActivation,
       })
     , fma2({ .scaleAsInput = true, .shiftAsInput = true })
     {
@@ -90,38 +93,48 @@ struct ActionTransformerLayer : public vai::NodeGroup
 
 
 /////////////////////////////////////////////////////////////////////////////////////////
-// ActionTransformer - pi0.5's action expert: a stack of ActionTransformerLayer and
+// ActionDecoder - pi0.5's action expert: a stack of ActionTransformerBlock and
 // the conditioned norm that closes it
-// Input:  in0  [T, embedDim], or [B, T, embedDim] with layerCfg.allowBatch
-//         cond [6 * numLayers + 2, embedDim]   each layer's six rows in order, then
+// Input:  in0  [T, embedDim]
+//         cond [6 * nBlocks + 2, embedDim]   each block's six rows in order, then
 //              scale and shift of the final norm
 // Output: out0 the shape of in0
 /////////////////////////////////////////////////////////////////////////////////////////
-struct ActionTransformer : public vai::NodeGroup
+struct ActionDecoder : public vai::NodeGroup
 {
-    using Layer = ActionTransformerLayer;
-    using Config = vai::TransformerConfig;
+    using Block = ActionTransformerBlock;
 
-    std::vector<Layer> layers;
+    std::vector<Block> blocks;
     vai::node::RmsNorm finalNorm;
 
     vai::node::Identity cond;
-    std::vector<vai::node::Slice> condSubTables;   // each layer's [6], then the final norm's [scale], [shift]
+    std::vector<vai::node::Slice> condSubTables;   // each block's [6], then the final norm's [scale], [shift]
 
-    ActionTransformer(Config config)
-    : finalNorm({ .eps = config.layerCfg.normEps, .coeffsAsInputs = true })
+    struct Config
     {
-        VAI_ASSERT(config.numLayers >= 1);
-        const uint32_t L = config.numLayers;
+        vai::TransformerConfig base;
+        uint32_t kvCacheSize;
+        vai::Dtype kvCacheDtype;
+    };
 
-        layers.reserve(L);
+    ActionDecoder(Config config)
+    : finalNorm({ .eps = config.base.normEps, .coeffsAsInputs = true })
+    {
+        const uint32_t L = config.base.nBlocks;
+        VAI_ASSERT(L >= 1);
+
+        blocks.reserve(L);
         for (uint32_t i = 0; i < L; ++i)
-            layers.emplace_back(config.layerCfg);
+            blocks.emplace_back(Block::Config{
+                .base = config.base,
+                .kvCacheSize = config.kvCacheSize,
+                .kvCacheDtype = config.kvCacheDtype,
+            });
 
         // clang-format off
-        for (size_t i = 1; i < layers.size(); ++i)
-            layers[i - 1] - layers[i];
-        layers.back() - finalNorm;
+        for (size_t i = 1; i < blocks.size(); ++i)
+            blocks[i - 1] - blocks[i];
+        blocks.back() - finalNorm;
         // clang-format on
 
         condSubTables.reserve(L + 2);
@@ -132,24 +145,24 @@ struct ActionTransformer : public vai::NodeGroup
 
         // clang-format off
         for (uint32_t i = 0; i < L; ++i)
-            cond - condSubTables[i] - "cond"/layers[i];
+            cond - condSubTables[i] - "cond"/blocks[i];
         cond - condSubTables[L]     - "scale"/finalNorm;
         cond - condSubTables[L + 1] - "shift"/finalNorm;
         // clang-format on
 
-        defineSlot("in0", layers[0].slot("in0"));
+        defineSlot("in0", blocks[0].slot("in0"));
         defineSlot("cond", cond.slot("in0"));
         defineSlot("out0", finalNorm.slot("out0"));
     }
 
     void setKvCacheCounter(eva::Buffer buffer)
     {
-        for (auto& layer : layers)
-            layer.mhAttn.setKvCacheCounter(buffer);
+        for (auto& block : blocks)
+            block.mhAttn.setKvCacheCounter(buffer);
     }
 };
 
 
 }   // namespace model::production::pi05::group
 
-#endif   // PRODUCTION_PI05_GROUPS_ACTION_TRANSFORMER_H
+#endif   // PRODUCTION_PI05_GROUPS_ACTION_DECODER_H

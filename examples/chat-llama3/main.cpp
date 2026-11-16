@@ -150,14 +150,13 @@ int main()
     // Load model
     auto modelCfg = llama3::ModelConfig::_3_2_1B();
     printf("Loading Llama-%s model...\n", modelCfg.variant);
-    llama3::Net net(
-        {
-            .wDefaultDtype = Dtype::Fp16,
-        },
-        modelCfg,
-        {
-            .maxRuntimeContext = 4096,
-        });
+    // clang-format off
+    llama3::Net net({
+        .wDefaultDtype = Dtype::Fp16,
+    }, modelCfg, {
+        .maxRuntimeContext = 4096,
+    });
+    // clang-format on
 
     // Load weights
     printf("Loading weights...\n");

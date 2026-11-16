@@ -38,19 +38,21 @@ namespace model::production::gemma3 {
 struct ModelConfig
 {
     const char* variant;   // checkpoint folder under data/
-    TransformerConfig decoder;
+    TransformerConfig trf;
     uint32_t vocabSize;
     uint32_t maxTrainedContext;
-    std::optional<VisionEncoderConfig> vision;
+    bool vision;   // 4B / 12B: images in the prompt, through group::VisionEncoder
+
+    static constexpr uint32_t imageTokenId = 262144;   // <image_soft_token>, the placeholder an image's tokens replace
 
     static constexpr ModelConfig get(std::string_view variant)
     {
         constexpr ModelConfig variants[] = {
-            //  variant  {blocks  D  Hq  Hkv  Dff  window  global_RoPE}  vocab  maxContext  vision
-            { "270M", { 18, 640, 4, 1, 2048, 512, 1.0f }, 262144, 32768, std::nullopt },
-            { "1B", { 26, 1152, 4, 1, 6912, 512, 1.0f }, 262144, 32768, std::nullopt },
-            { "4B", { 34, 2560, 8, 4, 10240, 1024, 8.0f }, 262208, 131072, VisionEncoderConfig() },
-            { "12B", { 48, 3840, 16, 8, 15360, 1024, 8.0f }, 262208, 131072, VisionEncoderConfig() },
+            //  variant  {blocks  D  Hq  Hkv  Dff  window  ropeFactor}  vocab  maxContext  vision
+            { "270M", { 18, 640, 4, 1, 2048, 512, 1.0f }, 262144, 32768, false },
+            { "1B", { 26, 1152, 4, 1, 6912, 512, 1.0f }, 262144, 32768, false },
+            { "4B", { 34, 2560, 8, 4, 10240, 1024, 8.0f }, 262208, 131072, true },
+            { "12B", { 48, 3840, 16, 8, 15360, 1024, 8.0f }, 262208, 131072, true },
         };
         for (const ModelConfig& v : variants)
             if (variant == v.variant)
@@ -64,7 +66,7 @@ struct RuntimeConfig
 {
     vai::Dtype kvCacheDtype = vai::Dtype::Fp16;
     uint32_t maxRuntimeContext = uint32_t(-1);
-    uint32_t prefillChunk = 512;   // 0: the whole prompt in one forward; an image never splits
+    uint32_t prefillChunk = 512;   // 0: the sliding window; an image never splits
 };
 
 
@@ -73,6 +75,7 @@ struct Net : public vai::NeuralNet
     ModelConfig modelCfg;
     RuntimeConfig runtimeCfg;
     uint32_t maxRuntimeContext;
+    uint32_t prefillChunk;
 
     std::optional<group::VisionEncoder> visionEncoder;
     std::optional<vai::node::Linear> projector;   // image tokens to the decoder's width
@@ -100,35 +103,36 @@ struct Net : public vai::NeuralNet
     , modelCfg(modelCfg)
     , runtimeCfg(runtimeCfg)
     , maxRuntimeContext(std::min(runtimeCfg.maxRuntimeContext, modelCfg.maxTrainedContext))
+    , prefillChunk(runtimeCfg.prefillChunk ? runtimeCfg.prefillChunk : modelCfg.trf.slidingWindow)
 #ifdef TEST_INDEX_COPY
-    , imageRows({ -1, int64_t(modelCfg.decoder.embedDim) })
+    , imageRows({ -1, int64_t(modelCfg.trf.embedDim) })
 #else
-    , imageScatter({ .sliceSize = modelCfg.vision ? modelCfg.vision->tokensPerImage : 0 })
+    , imageScatter({ .sliceSize = modelCfg.vision ? group::VisionEncoder::tokensPerImage : 0 })
 #endif
     , embedding({
           .vocabSize = modelCfg.vocabSize,
-          .embedDim = modelCfg.decoder.embedDim,
-          .scale = std::sqrt(float(modelCfg.decoder.embedDim)),
+          .embedDim = modelCfg.trf.embedDim,
+          .scale = std::sqrt(float(modelCfg.trf.embedDim)),
       })
     , decoder({
-          .base = modelCfg.decoder,
+          .base = modelCfg.trf,
           .kvCacheSize = maxRuntimeContext,
           .kvCacheDtype = runtimeCfg.kvCacheDtype,
-          .maxForwardTokens = runtimeCfg.prefillChunk ? runtimeCfg.prefillChunk : maxRuntimeContext,
-          .gatingLastOut = runtimeCfg.prefillChunk > 0,
+          .maxForwardTokens = prefillChunk,
       })
-    , lmHead({ .inDim = modelCfg.decoder.embedDim, .outDim = modelCfg.vocabSize })
+    , lmHead({ .inDim = modelCfg.trf.embedDim, .outDim = modelCfg.vocabSize })
     {
         this->runtimeCfg.maxRuntimeContext = maxRuntimeContext;
+        this->runtimeCfg.prefillChunk = prefillChunk;
 
         if (modelCfg.vision)
         {
             // A chunk holds its images whole.
-            VAI_ASSERT(runtimeCfg.prefillChunk == 0 || runtimeCfg.prefillChunk >= modelCfg.vision->tokensPerImage);
-            visionEncoder.emplace(*modelCfg.vision);
+            VAI_ASSERT(prefillChunk >= group::VisionEncoder::tokensPerImage);
+            visionEncoder.emplace();
             projector.emplace(vai::node::Linear::Config{
-                .inDim = modelCfg.vision->layerCfg.embedDim,
-                .outDim = modelCfg.decoder.embedDim,
+                .inDim = group::VisionEncoder::config.embedDim,
+                .outDim = modelCfg.trf.embedDim,
             });
         }
 
@@ -148,7 +152,7 @@ struct Net : public vai::NeuralNet
         decoder.setKvCacheCounter(kvCacheCounter);
 
         causalMask = vai::createCausalMask(device(), 1);
-        localMask = vai::createCausalMask(device(), 1, {}, modelCfg.decoder.slidingWindow);
+        localMask = vai::createCausalMask(device(), 1, {}, modelCfg.trf.slidingWindow);
         decoder.setCausalMask(causalMask, localMask);
 
         // K / V reach the attention in f16 (the cache's dtype); its precision was verified on NVIDIA / AMD.
@@ -170,7 +174,7 @@ struct Net : public vai::NeuralNet
         {
 #ifdef TEST_INDEX_COPY
             imageIndex = device().createBuffer({
-                .size = MAX_CAUSAL_BLOCKS * modelCfg.vision->tokensPerImage * sizeof(uint32_t),
+                .size = MAX_CAUSAL_BLOCKS * group::VisionEncoder::tokensPerImage * sizeof(uint32_t),
                 .usage = eva::BUFFER_USAGE::STORAGE_BUFFER,
                 .reqMemProps = eva::MEMORY_PROPERTY::HOST_VISIBLE | eva::MEMORY_PROPERTY::HOST_COHERENT,
             });
@@ -196,7 +200,7 @@ struct Net : public vai::NeuralNet
         {
             if (!modelCfg.vision || !visionEncoder)
                 throw std::runtime_error("image input is not supported by this Gemma 3 checkpoint");
-            const auto& cfg = *modelCfg.vision;
+            const auto& cfg = group::VisionEncoder::config;
             VAI_ASSERT(shape.size() == 3 || shape.size() == 4);
             VAI_ASSERT(shape[shape.size() - 3] == cfg.imageChannels);
             VAI_ASSERT(shape[shape.size() - 2] == cfg.imageSize);
@@ -213,15 +217,14 @@ struct Net : public vai::NeuralNet
         };
         std::vector<Block> blocks;
         std::vector<uint32_t> imageStarts;
-        const uint32_t tokensPerImage = modelCfg.vision ? modelCfg.vision->tokensPerImage : 0;
+        const uint32_t tokensPerImage = modelCfg.vision ? group::VisionEncoder::tokensPerImage : 0;
         {
-            const uint32_t imageTokenId = modelCfg.vision ? modelCfg.vision->imageTokenId : 0;
             const uint32_t* ids = modelCfg.vision ? static_cast<const uint32_t*>(promptTokenIds.hostData()) : nullptr;
             uint32_t last = 0;
 
             for (uint32_t pos = 0; ids && pos < total;)
             {
-                if (ids[pos] != imageTokenId)
+                if (ids[pos] != ModelConfig::imageTokenId)
                 {
                     ++pos;
                     continue;
@@ -229,7 +232,9 @@ struct Net : public vai::NeuralNet
 
                 if (imageCount <= imageStarts.size() || total - pos < tokensPerImage ||
                     !std::all_of(
-                        ids + pos, ids + pos + tokensPerImage, [&](uint32_t id) { return id == imageTokenId; }))
+                        ids + pos,
+                        ids + pos + tokensPerImage,
+                        [&](uint32_t id) { return id == ModelConfig::imageTokenId; }))
                     throw std::runtime_error("Gemma 3 image placeholders do not match the image batch");
 
                 if (last < pos)
@@ -248,7 +253,7 @@ struct Net : public vai::NeuralNet
                 blocks.push_back({ total, true });
         }
 
-        const uint32_t chunk = runtimeCfg.prefillChunk ? runtimeCfg.prefillChunk : total;
+        const uint32_t chunk = prefillChunk;
 
         // Reuse the buffer: a single chunk may have no host data after upload.
         vai::Tensor chunkInput = promptTokenIds;
@@ -310,7 +315,7 @@ struct Net : public vai::NeuralNet
 
             sync();   // The GPU may still be reading the masks and imageIndex.
             vai::writeCausalMask(causalMask, causalBits, blockEnd);
-            vai::writeCausalMask(localMask, causalBits, blockEnd, modelCfg.decoder.slidingWindow);
+            vai::writeCausalMask(localMask, causalBits, blockEnd, modelCfg.trf.slidingWindow);
 
 #ifdef TEST_INDEX_COPY
             uint32_t* rows = imageIndex ? (uint32_t*)imageIndex.map() : nullptr;

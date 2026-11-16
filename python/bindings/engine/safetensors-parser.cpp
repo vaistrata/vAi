@@ -28,11 +28,13 @@ void ensureKeyExists(const vai::SafetensorRef& ref, const std::string& key)
 void ensureLoadableDtype(const vai::SafetensorRef& ref, const std::string& key)
 {
     const std::string dt = ref.getDataType();
+    // clang-format off
     if (dt != "F32" && dt != "F16" && dt != "BF16")
         throw nb::type_error(
             ("SafetensorsParser: '" + key + "' has dtype " + dt
              + "; pyvai loads F32 / F16 / BF16 only (ref('" + key
              + "') still inspects it without loading)").c_str());
+    // clang-format on
 }
 
 }   // namespace

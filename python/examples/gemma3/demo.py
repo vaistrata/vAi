@@ -76,7 +76,7 @@ def parse_args():
 def main():
     args = parse_args()
     if args.image_path is None:
-        has_vision = Gemma3Config.preset(args.preset).vision is not None
+        has_vision = Gemma3Config.preset(args.preset).vision
         args.image_path = IMAGE_PATHS if has_vision else []
     for path in (args.weights_dir, args.tokenizer_path, *args.image_path):
         if not os.path.exists(path):

@@ -22,7 +22,7 @@ vAi로 LLM을 배포하면 런타임 바이너리가 2MB 남짓입니다. on-dev
 
 ```cpp
 template<TransformerType layout, QkvLayout qkv>
-struct TransformerLayer : public vai::NodeGroup
+struct TransformerBlock : public vai::NodeGroup
 {
     vai::node::Identity input;
     typename BranchNorm<layout>::Type norm1;
@@ -32,7 +32,7 @@ struct TransformerLayer : public vai::NodeGroup
     typename BranchNorm<layout>::Type norm2;
     typename BranchFfn<layout>::Type ffn;
 
-    TransformerLayer(...)
+    TransformerBlock(...)
     {
         input - norm1 -    mhAttn - lastRow - gate/"then" - norm2 -    ffn;
         input - "residual"/mhAttn - lastRow - gate/"then" - "residual"/ffn;

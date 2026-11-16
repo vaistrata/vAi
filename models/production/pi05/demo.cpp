@@ -35,13 +35,13 @@ void setProfileTags(pi05::Net& net)
         return std::string(tower) + ".Linear.[" + std::to_string(in) + "x" + std::to_string(out) + "]";
     };
 
-    // Vision tower — SigLIP, one shape for every layer.
+    // Vision tower — SigLIP, one shape for every block.
     const auto& modelCfg = net.modelCfg;
-    const auto& vitCfg = modelCfg.visionCfg;
-    const uint32_t Dv = vitCfg.layerCfg.embedDim;         // 1152
-    const uint32_t Dvff = vitCfg.layerCfg.ffnHiddenDim;   // 4304
+    const auto& vitCfg = modelCfg.visionTrf;
+    const uint32_t Dv = vitCfg.embedDim;         // 1152
+    const uint32_t Dvff = vitCfg.ffnHiddenDim;   // 4304
 
-    for (auto& b : net.visionEncoder.layers)
+    for (auto& b : net.visionEncoder.blocks)
     {
         b.norm1.setProfileTag("Vision.LayerNorm");
         b.mhAttn.projQ.setProfileTag(lin("Vision", Dv, Dv));
@@ -56,15 +56,15 @@ void setProfileTags(pi05::Net& net)
     net.patchEmbed.perPatches.setProfileTag("Vision.Permute");
     net.patchEmbed.project.setProfileTag(lin("Vision", vitCfg.imageChannels * vitCfg.patchSize * vitCfg.patchSize, Dv));
     net.visionEncoder.finalNorm.setProfileTag("Vision.LayerNorm");
-    net.projector.setProfileTag(lin("Vision", Dv, modelCfg.languageCfg.layerCfg.embedDim));
+    net.projector.setProfileTag(lin("Vision", Dv, modelCfg.languageTrf.embedDim));
 
     // The two Gemma stacks — same tag scheme, and their widths tell them apart.
-    const auto& langCfg = modelCfg.languageCfg.layerCfg;
+    const auto& langCfg = modelCfg.languageTrf;
     const uint32_t Dq = langCfg.numQHeads * langCfg.headDim;     // 2048  (Q projection)
     const uint32_t Dkv = langCfg.numKVHeads * langCfg.headDim;   //  256  (K/V projection)
 
     auto tagGemma = [&](auto& gemma, const char* tower, uint32_t D, uint32_t Dff) {
-        for (auto& b : gemma.layers)
+        for (auto& b : gemma.blocks)
         {
             b.norm1.setProfileTag(std::string(tower) + ".RmsNorm");
             b.mhAttn.projQ.setProfileTag(lin(tower, D, Dq));
@@ -83,11 +83,10 @@ void setProfileTags(pi05::Net& net)
     };
 
     tagGemma(net.languageEncoder, "Language", langCfg.embedDim, langCfg.ffnHiddenDim);
-    tagGemma(
-        net.actionDecoder, "Action", modelCfg.actionCfg.layerCfg.embedDim, modelCfg.actionCfg.layerCfg.ffnHiddenDim);
+    tagGemma(net.actionDecoder, "Action", modelCfg.actionTrf.embedDim, modelCfg.actionTrf.ffnHiddenDim);
 
     // The expert's gated residuals, EleAffine in place of Gemma's folded adds.
-    for (auto& b : net.actionDecoder.layers)
+    for (auto& b : net.actionDecoder.blocks)
     {
         b.fma1.setProfileTag("Action.EleAffine");
         b.fma2.setProfileTag("Action.EleAffine");
@@ -105,11 +104,11 @@ int main()
     // Construct model
     auto modelCfg = pi05::ModelConfig::_3B();
     printf("Loading pi0.5-%s model...\n", modelCfg.variant);
-    pi05::Net net(
-        {
-            .wDefaultDtype = Dtype::Fp16,
-        },
-        modelCfg);
+    // clang-format off
+    pi05::Net net({
+        .wDefaultDtype = Dtype::Fp16,
+    }, modelCfg);
+    // clang-format on
 
     // Configure the per-node GPU execution-time profiler
     setProfileTags(net);
@@ -130,8 +129,8 @@ int main()
         VAI_DATA_DIR "/images/cam_right_wrist.jpg",
     };
     const uint32_t B = (uint32_t)std::size(imagePaths);
-    const uint32_t C = modelCfg.visionCfg.imageChannels;
-    const uint32_t S = modelCfg.visionCfg.imageSize;
+    const uint32_t C = modelCfg.visionTrf.imageChannels;
+    const uint32_t S = modelCfg.visionTrf.imageSize;
 
     // Preprocess the images and stack them into [B, C, S, S]
     std::vector<float> pixels;
@@ -139,12 +138,12 @@ int main()
     for (uint32_t k = 0; k < B; ++k)
     {
         printf("Loading image %u: %s\n", k, imagePaths[k]);
-        std::vector<float> chw =
-            utils::ImageProcessor(imagePaths[k])
-                .letterbox(
-                    S, utils::Align::Center, 0.0f)   // LeRobot resize_with_pad_torch: no antialias, unlike openpi's JAX
-                .normalize(-1.0f, 1.0f)
-                .chw();
+        // clang-format off
+        std::vector<float> chw = utils::ImageProcessor(imagePaths[k])
+            .letterbox(S, utils::Align::Center, 0.0f)  // LeRobot resize_with_pad_torch: no antialias, unlike openpi's JAX
+            .normalize(-1.0f, 1.0f)
+            .chw();
+        // clang-format on
         pixels.insert(pixels.end(), chw.begin(), chw.end());
     }
 
@@ -175,12 +174,13 @@ int main()
 
     // Prefill — every image and the prompt in one forward pass, filling the KV cache.
     {
-        utils::TimeChecker totalTimer("\n"
-                                      "────────────────────────────────────────\n"
-                                      "▶ Prefill {} image + {} prompt tokens in {}ms \n"
-                                      "────────────────────────────────────────",
-                                      B * modelCfg.visionCfg.numPatches(),
-                                      promptLength);
+        utils::TimeChecker totalTimer(
+            "\n"
+            "────────────────────────────────────────\n"
+            "▶ Prefill {} image + {} prompt tokens in {}ms \n"
+            "────────────────────────────────────────",
+            B * modelCfg.visionTrf.numPatches(),
+            promptLength);
 
         net.prefill(inImages, promptTokenIds);
 
@@ -194,12 +194,13 @@ int main()
     {
         const uint32_t steps = net.runtimeCfg.denoiseSteps;
 
-        utils::TimeChecker totalTimer("\n"
-                                      "────────────────────────────────────────\n"
-                                      "▶ Denoise {} steps over a {}-step chunk in {}ms \n"
-                                      "────────────────────────────────────────",
-                                      steps,
-                                      modelCfg.actionChunk);
+        utils::TimeChecker totalTimer(
+            "\n"
+            "────────────────────────────────────────\n"
+            "▶ Denoise {} steps over a {}-step chunk in {}ms \n"
+            "────────────────────────────────────────",
+            steps,
+            modelCfg.actionChunk);
 
         net.decode(&nextAction);
 

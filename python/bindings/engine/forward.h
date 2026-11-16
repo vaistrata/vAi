@@ -113,11 +113,13 @@ inline void checkInputKeys(nb::handle net, nb::dict inputs)
             "NeuralNet.__call__: the net has no input boundary — call net.input(name) "
             "while building it");
 
+    // clang-format off
     for (auto [k, v] : inputs)
         if (!expected.contains(k))
             throw nb::key_error(
                 ("NeuralNet.__call__: unknown input " + nb::cast<std::string>(nb::repr(k))
                  + "; the inputs are " + nb::cast<std::string>(nb::repr(expected))).c_str());
+    // clang-format on
 }
 
 // Host-byte copy into a same-shape, same-dtype tensor; setData() also marks
@@ -162,10 +164,12 @@ inline vai::TensorDict stageInputs(nb::handle net, nb::dict inputs,
         if (!user.validShape())
             throw nb::value_error(
                 (at + "input '" + name + "' has no shape").c_str());
+        // clang-format off
         if (!user.hasHostData())
             throw std::runtime_error(
                 (at + "input '" + name + "' has no host data — its host "
                  "copy was released by an upload; set() it again").c_str());
+        // clang-format on
 
         vai::Tensor* staged = nullptr;
         nb::object stagedObj;
@@ -329,6 +333,7 @@ inline CallArgs parseCallArgs(nb::handle net, nb::args args, nb::kwargs kwargs)
         if (nb::isinstance<vai::Tensor>(a))
         {
             nb::set names = inputNamesOf(net);
+            // clang-format off
             if (names.size() != 1)
                 throw nb::type_error(
                     ("NeuralNet.__call__: net(x) needs a net with exactly one input; "
@@ -336,6 +341,7 @@ inline CallArgs parseCallArgs(nb::handle net, nb::args args, nb::kwargs kwargs)
                      + std::to_string(names.size()) + " ("
                      + nb::cast<std::string>(nb::repr(names)) + ") — name them, "
                      "e.g. net(in0=x, in1=y)").c_str());
+            // clang-format on
             for (nb::handle n : names)
                 c.inputs[n] = a;
             return c;

@@ -64,27 +64,27 @@ inline void loadWeights(Net& net, const vai::Checkpoint& ckpt)
         patch.project["weight"] =
             vai::Tensor(ckpt[root + "embeddings.patch_embedding.weight"], wDt)
                 .reshape({
-                    modelCfg.visionCfg.layerCfg.embedDim,
-                    modelCfg.visionCfg.imageChannels * modelCfg.visionCfg.patchSize * modelCfg.visionCfg.patchSize,
+                    modelCfg.visionTrf.embedDim,
+                    modelCfg.visionTrf.imageChannels * modelCfg.visionTrf.patchSize * modelCfg.visionTrf.patchSize,
                 });
         patch.project["bias"] = vai::sum(
             ckpt[root + "embeddings.position_embedding.weight"], ckpt[root + "embeddings.patch_embedding.bias"], wDt);
 
-        for (uint32_t i = 0; i < modelCfg.visionCfg.numLayers; ++i)
+        for (uint32_t i = 0; i < modelCfg.visionTrf.nBlocks; ++i)
         {
             std::string prefix = root + "encoder.layers." + std::to_string(i) + ".";
-            auto& layer = net.encoder.layers[i];
+            auto& block = net.encoder.blocks[i];
 
-            loadLayerNorm(layer.norm1, prefix + "layer_norm1");
-            loadLayerNorm(layer.norm2, prefix + "layer_norm2");
+            loadLayerNorm(block.norm1, prefix + "layer_norm1");
+            loadLayerNorm(block.norm2, prefix + "layer_norm2");
 
-            loadLin(layer.mhAttn.projQ, prefix + "self_attn.q_proj");
-            loadLin(layer.mhAttn.projK, prefix + "self_attn.k_proj");
-            loadLin(layer.mhAttn.projV, prefix + "self_attn.v_proj");
-            loadLin(layer.mhAttn.projOut, prefix + "self_attn.out_proj");
+            loadLin(block.mhAttn.projQ, prefix + "self_attn.q_proj");
+            loadLin(block.mhAttn.projK, prefix + "self_attn.k_proj");
+            loadLin(block.mhAttn.projV, prefix + "self_attn.v_proj");
+            loadLin(block.mhAttn.projOut, prefix + "self_attn.out_proj");
 
-            loadLin(layer.ffn.fc1, prefix + "mlp.fc1");
-            loadLin(layer.ffn.fc2, prefix + "mlp.fc2");
+            loadLin(block.ffn.fc1, prefix + "mlp.fc1");
+            loadLin(block.ffn.fc2, prefix + "mlp.fc2");
         }
 
         loadLayerNorm(net.encoder.finalNorm, root + "post_layernorm");
@@ -97,31 +97,31 @@ inline void loadWeights(Net& net, const vai::Checkpoint& ckpt)
     // vocabulary were never trained, so they never reach the tied head that would
     // otherwise sample them.
     net.embedding["weight"] =
-        vai::slice(ckpt["language_model.model.embed_tokens.weight"], 0, net.modelCfg.languageCfg.vocabSize, wDt);
+        vai::slice(ckpt["language_model.model.embed_tokens.weight"], 0, net.modelCfg.vocabSize, wDt);
 
-    // Layer layers
-    for (uint32_t i = 0; i < net.modelCfg.languageCfg.numLayers; ++i)
+    // Transformer blocks
+    for (uint32_t i = 0; i < net.modelCfg.languageTrf.nBlocks; ++i)
     {
         std::string prefix = "language_model.model.layers." + std::to_string(i) + ".";
-        auto& layer = net.decoder.layers[i];
+        auto& block = net.decoder.blocks[i];
 
         // RMSNorms (params loaded at Fp32)
-        loadRMSNorm(layer.norm1, prefix + "input_layernorm.weight");
-        loadRMSNorm(layer.norm2, prefix + "post_attention_layernorm.weight");
+        loadRMSNorm(block.norm1, prefix + "input_layernorm.weight");
+        loadRMSNorm(block.norm2, prefix + "post_attention_layernorm.weight");
 
         // Self attention projections
-        loadLinNoBias(layer.mhAttn.projQ, prefix + "self_attn.q_proj");
-        loadLinNoBias(layer.mhAttn.projK, prefix + "self_attn.k_proj");
-        loadLinNoBias(layer.mhAttn.projV, prefix + "self_attn.v_proj");
-        loadLinNoBias(layer.mhAttn.projOut, prefix + "self_attn.o_proj");
+        loadLinNoBias(block.mhAttn.projQ, prefix + "self_attn.q_proj");
+        loadLinNoBias(block.mhAttn.projK, prefix + "self_attn.k_proj");
+        loadLinNoBias(block.mhAttn.projV, prefix + "self_attn.v_proj");
+        loadLinNoBias(block.mhAttn.projOut, prefix + "self_attn.o_proj");
 
         // FFN projections (GeGLU). gate and value are one projection here, so
         // their rows are stacked — gate first, the half GatedMul activates.
         {
-            layer.ffn.gateValue["weight"] =
+            block.ffn.gateValue["weight"] =
                 vai::concat({ ckpt[prefix + "mlp.gate_proj.weight"], ckpt[prefix + "mlp.up_proj.weight"] }, wDt);
         }
-        loadLinNoBias(layer.ffn.out, prefix + "mlp.down_proj");
+        loadLinNoBias(block.ffn.out, prefix + "mlp.down_proj");
     }
 
     // Final RMSNorm

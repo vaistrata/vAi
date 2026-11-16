@@ -1,7 +1,7 @@
 #ifndef VAI_NODES_SLICE_H
 #define VAI_NODES_SLICE_H
 
-#include "node-common.h"
+#include "common.h"
 
 namespace vai::node {
 
@@ -27,7 +27,7 @@ class Slice : public Node
     uint32_t outer = 0;     // elements ahead of the sliced axis, flattened
     uint32_t inner = 0;     // elements behind it, flattened
     uint32_t axisSize = 0;  // the sliced axis as the input has it
-    bool aliased = false;   // out0 views in0 -> nothing for run() to record
+    bool skip = false;      // out0 is in0 or views it -> nothing for run() to record
 
 public:
     struct PipeParams {
@@ -77,6 +77,14 @@ inline void Slice::prepare()
     VAI_ASSERT(start >= 0 && uint64_t(start) + config_.count <= axisSize);
     startIdx = uint32_t(start);
 
+    // The whole axis is the input itself.
+    skip = (startIdx == 0 && config_.count == axisSize && oDtype == iDtype);
+    if (skip)
+    {
+        (*this)["out0"] = inTen;
+        return;
+    }
+
     std::vector<uint32_t> outShape = shape;
     outShape[config_.axis] = config_.count;
 
@@ -104,7 +112,6 @@ inline void Slice::prepare()
         }
 
         (*this)["out0"] = Tensor(outShape, oDtype);
-        aliased = false;
         return;
     }
 
@@ -114,8 +121,8 @@ inline void Slice::prepare()
 
     Tensor sliced = inTen.view(outShape, inTen.baseOffset() + startIdx * inner);
 
-    aliased = (sliced.byteOffset() % device().minStorageBufferOffsetAlignment() == 0);
-    if (aliased)
+    skip = (sliced.byteOffset() % device().minStorageBufferOffsetAlignment() == 0);
+    if (skip)
         (*this)["out0"] = std::move(sliced);
     else
         (*this)["out0"] = Tensor(outShape, inTen.dtype());
@@ -123,7 +130,8 @@ inline void Slice::prepare()
 
 inline void Slice::run(eva::CommandBuffer cmdBuff)
 {
-    if (aliased) return;
+    if (skip)
+        return;
 
     const Tensor& inTen = (*this)["in0"];
     auto inBuf  = inTen.buffer();

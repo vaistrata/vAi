@@ -139,10 +139,12 @@ PyNodeFlow connectFlowToFlow(const PyNodeFlow& src, const PyNodeFlow& dst)
     vai::NodeSlot& srcSlot = src.slotByName(src.outSlotName);
     vai::NodeSlot& dstSlot = dst.slotByName(dst.inSlotName);
     // The core connect() asserts (aborts) on slot-type mismatch.
+    // clang-format off
     if (srcSlot.type() != vai::NodeSlot::output || dstSlot.type() != vai::NodeSlot::input)
         throw nb::value_error(
             ("connect: '" + src.outSlotName + "' must be an output slot and '" +
              dst.inSlotName + "' an input slot").c_str());
+    // clang-format on
     vai::NodeSlot::connect(srcSlot, dstSlot);
 
     nb::object net = anchorNetOf(src);

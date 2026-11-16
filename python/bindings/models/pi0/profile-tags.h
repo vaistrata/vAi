@@ -25,13 +25,13 @@ void setProfileTags(pi0::Net& net)
         return std::string(tower) + ".Linear.[" + std::to_string(in) + "x" + std::to_string(out) + "]";
     };
 
-    // Vision tower — SigLIP, one shape for every layer.
+    // Vision tower — SigLIP, one shape for every block.
     const auto& modelCfg = net.modelCfg;
-    const auto& vitCfg = modelCfg.visionCfg;
-    const uint32_t Dv = vitCfg.layerCfg.embedDim;         // 1152
-    const uint32_t Dvff = vitCfg.layerCfg.ffnHiddenDim;   // 4304
+    const auto& vitCfg = modelCfg.visionTrf;
+    const uint32_t Dv = vitCfg.embedDim;         // 1152
+    const uint32_t Dvff = vitCfg.ffnHiddenDim;   // 4304
 
-    for (auto& b : net.visionEncoder.layers)
+    for (auto& b : net.visionEncoder.blocks)
     {
         b.norm1.setProfileTag("Vision.LayerNorm");
         b.mhAttn.projQ.setProfileTag(lin("Vision", Dv, Dv));
@@ -46,15 +46,15 @@ void setProfileTags(pi0::Net& net)
     net.patchEmbed.perPatches.setProfileTag("Vision.Permute");
     net.patchEmbed.project.setProfileTag(lin("Vision", vitCfg.imageChannels * vitCfg.patchSize * vitCfg.patchSize, Dv));
     net.visionEncoder.finalNorm.setProfileTag("Vision.LayerNorm");
-    net.projector.setProfileTag(lin("Vision", Dv, modelCfg.languageCfg.layerCfg.embedDim));
+    net.projector.setProfileTag(lin("Vision", Dv, modelCfg.languageTrf.embedDim));
 
     // The two Gemma stacks — same tag scheme, and their widths tell them apart.
-    const auto& langCfg = modelCfg.languageCfg.layerCfg;
+    const auto& langCfg = modelCfg.languageTrf;
     const uint32_t Dq = langCfg.numQHeads * langCfg.headDim;     // 2048  (Q projection)
     const uint32_t Dkv = langCfg.numKVHeads * langCfg.headDim;   //  256  (K/V projection)
 
     auto tagGemma = [&](auto& gemma, const char* tower, uint32_t D, uint32_t Dff) {
-        for (auto& b : gemma.layers)
+        for (auto& b : gemma.blocks)
         {
             b.norm1.setProfileTag(std::string(tower) + ".RmsNorm");
             b.mhAttn.projQ.setProfileTag(lin(tower, D, Dq));
@@ -73,8 +73,7 @@ void setProfileTags(pi0::Net& net)
     };
 
     tagGemma(net.languageEncoder, "Language", langCfg.embedDim, langCfg.ffnHiddenDim);
-    tagGemma(
-        net.actionDecoder, "Action", modelCfg.actionCfg.layerCfg.embedDim, modelCfg.actionCfg.layerCfg.ffnHiddenDim);
+    tagGemma(net.actionDecoder, "Action", modelCfg.actionTrf.embedDim, modelCfg.actionTrf.ffnHiddenDim);
 
     net.promptEmbed.setProfileTag("Language.Embedding");
     net.stateProj.setProfileTag("Action.StateProj");
