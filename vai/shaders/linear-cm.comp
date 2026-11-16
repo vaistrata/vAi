@@ -39,6 +39,12 @@
  splitSize)) and writes its partials to P[z, M, N] on binding 0;
  linear-reduce.comp folds the partials and applies bias / epilogue.
 
+ AMD options (host-gated, Linear's AMD section): rowMajor != 0 visits the
+ tiles M-first, rowMajor being the M tile count, so consecutive workgroups
+ share a W tile. prefetch replaces the k loop with the Strix Point loop: raw
+ fp16 I / W loads one k-block ahead, fp32 accumulation, the 16x16x16 coopmat,
+ whole wgN and wgK tiles (only the last M tile is clamped), K not split.
+
  Dispatch (host): (ceil(N / wgN), ceil(M / wgM), ceil(K / splitSize))
 =============================================================================*/
 #version 450
@@ -66,8 +72,8 @@ layout(constant_id = 9)  const uint tK       = 16;   // coopmat tile along K (= 
 layout(constant_id = 11) const uint accType  = 0;    // accumulator dtype (0: fp32, 1: fp16)
 layout(constant_id = 12) const uint robustBufferAccess  = 0;    // robust buffer access (0: disabled, 1: enabled)
 
-layout(constant_id = 14) const uint rowMajor = 0; // 0: N-first tile order; else M tile count for M-first order
-layout(constant_id = 15) const uint prefetch = 0;
+layout(constant_id = 14) const uint rowMajor = 0;    // 0: N-first tile order; else M tile count for M-first order
+layout(constant_id = 15) const uint prefetch = 0;    // 1: the prefetch loop (see the header)
 
 layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0;  // O (output) dtype
 layout(constant_id = SPEC_ID_TYPE_I) const uint typeI = 0;  // I (input) dtype
@@ -122,6 +128,7 @@ shared f16vec2 tileB[wgM * SHMEM_STRIDE];
 // Per-subgroup scratch for the staged store paths (always fp32, see header).
 shared float cmStage[(wgSize / sgSize) * tN * tM];
 
+// Eight fp16 values into four f16vec2 slots of tileA / tileB.
 void storeWeightPack(uint offset, f16mat2x4 value)
 {
     tileA[offset] = value[0].xy;
@@ -182,7 +189,9 @@ void I_to_tileB(const uint pos_b, const uint row, const uint col, const uint idx
     }
 }
 
-// The Point wave32 specialization uses raw FP16 operands, full N/K tiles and an M tail.
+// The prefetch loop (Strix Point, wave32): raw fp16 operands, whole N / K tiles
+// and a clamped M tail. Each thread loads wLoads W packs and iLoads I packs
+// of 8 fp16 per k-block.
 const uint packRows = wgSize / (wgK / 8u);
 const uint wLoads = prefetch != 0u ? wgN / packRows : 1u;
 const uint iLoads = prefetch != 0u ? wgM / packRows : 1u;
@@ -199,9 +208,9 @@ void fetchBlock(uint firstM, uint firstN, uint block, out f16mat2x4 w[wLoads], o
 
 void main()
 {
-    uint nTile = gl_WorkGroupID.x;
-    uint mTile = gl_WorkGroupID.y;
-    if (rowMajor != 0u)
+    uint nTile = gl_WorkGroupID.x;   // which wgN-wide slice of N this workgroup owns
+    uint mTile = gl_WorkGroupID.y;   // which wgM-wide slice of M this workgroup owns
+    if (rowMajor != 0u)              // M-first: walk the M tiles of one N tile
     {
         const uint id = mTile * gl_NumWorkGroups.x + nTile;
         mTile = id % rowMajor;
