@@ -1,0 +1,41 @@
+/*=============================================================================
+ conv1d-cm-transform.comp: one-time weight packing for conv1d-cm
+     W [Co, Ci, K] -> Wp [Mp/16][Kp/16][16][16], Mp = ceil16(Co), Kp = ceil16(Ci·K)
+
+ W is the [Co, Ci·K] matrix of the GEMM's A operand (k = ci·K + j, the order
+ conv1d-cm gathers its input in). Each 16x16 fragment becomes one contiguous
+ row-major 512B block, so the GEMM's coopMatLoad reads it linearly; the Co and
+ Ci·K tails are zero-filled, so the GEMM needs no bounds on A.
+ One thread per packed fp16 element. Bindings: Wp=0, W=1.
+ Dispatch (host): dispatch2(Mp * Kp). Push constants: Co, CiK.
+=============================================================================*/
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_16bit_storage : require
+
+layout(local_size_x = 128) in;
+
+layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_F16 { float16_t bufferO_f16[]; };
+layout(set = 0, binding = 1) restrict readonly buffer I_BUF_F16 { float16_t bufferI_f16[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint Co;
+    uint CiK;   // Ci * K: the reduction length
+};
+
+void main()
+{
+    const uint index = gl_GlobalInvocationID.x;
+    const uint Mp = ((Co + 15u) / 16u) * 16u;
+    const uint Kp = ((CiK + 15u) / 16u) * 16u;
+    if (index >= Mp * Kp)
+        return;
+
+    const uint fragment = index >> 8u;          // 16x16 = 256 halves per fragment
+    const uint inFragment = index & 255u;
+    const uint kTiles = Kp >> 4u;
+    const uint m = (fragment / kTiles) * 16u + (inFragment >> 4u);
+    const uint k = (fragment % kTiles) * 16u + (inFragment & 15u);
+
+    bufferO_f16[index] = (m < Co && k < CiK) ? bufferI_f16[m * CiK + k] : float16_t(0.0);
+}

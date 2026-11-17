@@ -1,0 +1,68 @@
+/*=============================================================================
+ ddpm-step.comp: one DDPM denoising step (diffusers' DDPMScheduler.step)
+     x0      = (X − sqrt(1 − ᾱ_t) · E) / sqrt(ᾱ_t)         (epsilon; E itself for sample)
+     x0      = clamp(x0, −clipRange, clipRange)              (clipSample)
+     O       = c_x0 · x0 + c_xt · X + σ_t · Z[k]
+
+ S holds the step's row { k, sqrt(ᾱ_t), sqrt(1 − ᾱ_t), c_x0, c_xt, σ_t }
+ (DdpmSchedule); Z is the loop's noise, [steps, N], row k this step's. Element-
+ wise, so O may alias X. Math is fp32.
+ - O (typeO), X (typeI), E (typeE) are fp32 or fp16; S and Z are fp32.
+ Bindings: O=0, X=1, E=2, S=3, Z=4.
+ Dispatch (host): dispatch2(N). Push constants: N, clipRange.
+=============================================================================*/
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_16bit_storage : require
+#include "common/spec_constants.h"
+
+layout(local_size_x = 256) in;
+
+layout(constant_id = 0) const uint predictSample = 0;   // 0: E is the noise ε, 1: E is x0
+layout(constant_id = 1) const uint clipSample = 1;
+layout(constant_id = 2) const uint typeE = 0;           // E (model output) dtype
+layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0;
+layout(constant_id = SPEC_ID_TYPE_I) const uint typeI = 0;
+
+layout(set = 0, binding = 0) buffer O_BUF_F32 { float bufferO_f32[]; };
+layout(set = 0, binding = 0) buffer O_BUF_F16 { float16_t bufferO_f16[]; };
+layout(set = 0, binding = 1) readonly buffer X_BUF_F32 { float bufferX_f32[]; };
+layout(set = 0, binding = 1) readonly buffer X_BUF_F16 { float16_t bufferX_f16[]; };
+layout(set = 0, binding = 2) readonly buffer E_BUF_F32 { float bufferE_f32[]; };
+layout(set = 0, binding = 2) readonly buffer E_BUF_F16 { float16_t bufferE_f16[]; };
+layout(set = 0, binding = 3) readonly buffer S_BUF { float bufferS[]; };
+layout(set = 0, binding = 4) readonly buffer Z_BUF { float bufferZ[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint N;            // elements of one sample
+    float clipRange;
+};
+
+float readX(uint i) { return (typeI == DTYPE_F32) ? bufferX_f32[i] : float(bufferX_f16[i]); }
+float readE(uint i) { return (typeE == DTYPE_F32) ? bufferE_f32[i] : float(bufferE_f16[i]); }
+void writeO(uint i, float v) { if (typeO == DTYPE_F32) bufferO_f32[i] = v; else bufferO_f16[i] = float16_t(v); }
+
+void main()
+{
+    const uint i = gl_GlobalInvocationID.x;
+    if (i >= N) return;
+
+    const uint k = uint(bufferS[0] + 0.5);
+    const float sqrtAlphaProd = bufferS[1];
+    const float sqrtBetaProd = bufferS[2];
+    const float cX0 = bufferS[3];
+    const float cXt = bufferS[4];
+    const float sigma = bufferS[5];
+
+    const float x = readX(i);
+    const float e = readE(i);
+    float x0 = (predictSample == 1u) ? e : (x - sqrtBetaProd * e) / sqrtAlphaProd;
+    if (clipSample == 1u)
+        x0 = clamp(x0, -clipRange, clipRange);
+
+    float prev = cX0 * x0 + cXt * x;
+    if (sigma > 0.0)
+        prev += sigma * bufferZ[k * N + i];
+    writeO(i, prev);
+}
