@@ -133,14 +133,9 @@ endif()
 if(VAI_BUILD_BENCH)
     message(STATUS "[vAi] Building benchmark projects...")
 
-    # Vision benchmarks
-    # add_subdirectory(benchmarks/yolox)
-
     # LLM benchmarks
     add_subdirectory(benchmarks/gpt2)
     add_subdirectory(benchmarks/llama3)
-
-    # VLM benchmarks
     add_subdirectory(benchmarks/gemma3)
 
     message(STATUS "[vAi] Benchmark projects build configuration completed.")

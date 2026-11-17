@@ -1,341 +1,349 @@
 #include "llama.h"
 #include "ggml-backend.h"
-#include "mtmd.h"
-#include "bench-common.h"
-#include "vai/utils/stb_image.h"
-
+#include "bench-inputs.h"
+#include "bench-utils.h"
 #include <algorithm>
-#include <chrono>
-#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <iostream>
 #include <string>
 #include <vector>
 
-using namespace gemma3_bench;
 
-[[noreturn]] static void fail(const char* msg)
+// --size names a folder under data/benchmarks/gemma3/, the same names as the vAi bench.
+constexpr const char* modelSizes[] = { "1B", "270M", "4B" };
+
+void usage(const char* argv0)
+{
+    fprintf(stderr, "usage: %s [N ...] [--size NAME] [--showText]\n", argv0);
+    fprintf(stderr, "  N           prompt lengths in tokens, one table row each (default: 128 256 512 1024 2048)\n");
+    fprintf(stderr, "  --size      model folder under data/benchmarks/gemma3/ (default: %s), one of:", modelSizes[0]);
+    for (const char* s : modelSizes)
+        fprintf(stderr, " %s", s);
+    fprintf(stderr, "\n");
+    fprintf(stderr, "  --showText  print rep 0's generated text for the last length after the table\n");
+}
+
+
+void fail(const char* msg)
 {
     fprintf(stderr, "error: %s\n", msg);
     exit(1);
 }
 
-static void nullLog(ggml_log_level, const char*, void*) {}
 
-static std::string tokensToString(const llama_vocab* vocab,
-                                  const std::vector<llama_token>& tokens,
-                                  int count)
+// Silences llama.cpp's logging, as llama-bench does; BENCH_VERBOSE=1 brings it back.
+void nullLog(ggml_log_level, const char*, void*) {}
+
+
+// The GPUs llama.cpp offloads to (dedicated and integrated), picked from stdin the way eva's
+// selector does for the vAi bench: EOF keeps the first, anything else invalid asks again.
+ggml_backend_dev_t pickGpu()
 {
-    std::string text;
-    std::vector<char> piece(256);
-    for (int i = 0; i < count; ++i)
+    std::vector<ggml_backend_dev_t> gpus;
+    for (size_t i = 0; i < ggml_backend_dev_count(); ++i)
     {
-        int n = llama_token_to_piece(vocab, tokens[i], piece.data(),
-                                     static_cast<int32_t>(piece.size()), 0, false);
-        if (n < 0)
-        {
-            piece.resize(static_cast<size_t>(-n));
-            n = llama_token_to_piece(vocab, tokens[i], piece.data(),
-                                     static_cast<int32_t>(piece.size()), 0, false);
-        }
-        if (n > 0) text.append(piece.data(), static_cast<size_t>(n));
+        ggml_backend_dev_t d = ggml_backend_dev_get(i);
+        const auto type = ggml_backend_dev_type(d);
+        if (type == GGML_BACKEND_DEVICE_TYPE_GPU || type == GGML_BACKEND_DEVICE_TYPE_IGPU)
+            gpus.push_back(d);
     }
-    return text;
+    if (gpus.empty())
+        fail("no GPU found");
+
+    printf("**************************************************************\n");
+    printf("Detected %zu GPUs:\n", gpus.size());
+    for (size_t i = 0; i < gpus.size(); ++i)
+        printf("[GPU %zu] %s\n", i, ggml_backend_dev_description(gpus[i]));
+    fflush(stdout);
+
+    int selected = 0;
+    std::string line;
+    while (gpus.size() > 1)
+    {
+        printf("Select a GPU (0-%zu): ", gpus.size() - 1);
+        fflush(stdout);
+        if (!std::getline(std::cin, line))
+        {
+            selected = 0;
+            printf("\n");
+            break;
+        }
+        if (parseInt(line.c_str(), selected) && 0 <= selected && selected < (int)gpus.size())
+            break;
+        fprintf(stderr, "Invalid selection! Please select again.\n");
+    }
+    printf("[GPU %d] is Selected.\n", selected);
+    printf("**************************************************************\n\n");
+    fflush(stdout);
+    return gpus[selected];
 }
 
-static std::string visionPrompt(const char* imageMarker, const std::string& question)
-{
-    return std::string(gemma3_bench::userPromptPrefix) + imageMarker
-        + gemma3_bench::textAfterImage + question + gemma3_bench::modelPromptSuffix;
-}
 
 int main(int argc, char** argv)
 {
     if (!getenv("BENCH_VERBOSE"))
-    {
         llama_log_set(nullLog, nullptr);
-        mtmd_log_set(nullLog, nullptr);
-    }
 
-    constexpr int nGen = gemma3_bench::decodeTokens;
-    constexpr int nReps = gemma3_bench::decodeRepetitions;
-    constexpr int nPPReps = gemma3_bench::prefillRepetitions;
-    constexpr int nWarmPre = gemma3_bench::warmupPrefills;
-    constexpr int nWarmGen = gemma3_bench::warmupDecodeTokens;
-    constexpr int nCtx = gemma3_bench::runtimeContext;
-    constexpr uint32_t seed = gemma3_bench::randomSeed;
+    constexpr int nGen = 128;     // decode tokens per timed run
+    constexpr int nReps = 5;      // timed decode runs per length
+    constexpr int nPPReps = 5;    // timed prefill runs per length
+    constexpr int nWarmPre = 1;   // untimed prefills per length after the decode warm-up
+    constexpr int nWarmGen = 8;   // untimed decode steps per length
+    constexpr int nCtx = 4096;    // = the vAi bench's maxRuntimeContext
+    constexpr int topK = 40;      // = vAi TopKSampling::Options::k
+    constexpr uint32_t seed = 42;
 
-    gemma3_bench::BenchmarkArgumentParser args(true);
-    if (!args.parse(argc, argv))
+    // N takes the first N tokens of llmParagraph in bench-inputs.h.
+    bool showText = false;
+    const char* sizeName = modelSizes[0];
+
+    std::vector<int> lengths;
+    for (int i = 1; i < argc; ++i)
     {
-        args.printErrorAndUsage();
+        if (!strcmp(argv[i], "--showText"))
+        {
+            showText = true;
+            continue;
+        }
+        if (!strcmp(argv[i], "--size"))
+        {
+            if (++i == argc)
+            {
+                fprintf(stderr, "error: --size needs a name\n");
+                usage(argv[0]);
+                return 1;
+            }
+            sizeName = argv[i];
+            continue;
+        }
+        int n = 0;
+        if (!parseInt(argv[i], n) || n <= 0)
+        {
+            usage(argv[0]);
+            return 1;
+        }
+        lengths.push_back(n);
+    }
+    if (lengths.empty())
+        lengths = { 128, 256, 512, 1024, 2048 };
+
+    const char* size = nullptr;
+    for (const char* s : modelSizes)
+        if (!strcmp(s, sizeName))
+        {
+            size = s;
+            break;
+        }
+    if (!size)
+    {
+        fprintf(stderr, "error: unknown --size '%s'\n", sizeName);
+        usage(argv[0]);
         return 1;
     }
+    const std::string modelPath = std::string(VAI_DATA_DIR "/benchmarks/gemma3/") + sizeName + "/model.gguf";
 
-    if (args.listDevices)
-    {
-        ggml_backend_load_all();
-        llama_backend_init();
-        for (size_t i = 0; i < ggml_backend_dev_count(); ++i)
-        {
-            ggml_backend_dev_t d = ggml_backend_dev_get(i);
-            printf("[DEV %zu] %s — %s\n", i, ggml_backend_dev_name(d), ggml_backend_dev_description(d));
-        }
-        llama_backend_free();
-        return 0;
-    }
+    // No kernel path pinned: llama.cpp picks its own, NV_coopmat2 on NVIDIA where the
+    // driver has it. GGML_VK_DISABLE_COOPMAT2=1 turns that off.
 
-    enum ggml_type cacheType;
-    const char* filePrecision = nullptr;
-    if (args.precision == "fp16") { cacheType = GGML_TYPE_F16; filePrecision = "f16"; }
-    else { cacheType = GGML_TYPE_F32; filePrecision = "f32"; }
-
-    const bool hasVision = args.size == "4B";
-    const std::string dataDir = std::string(VAI_DATA_DIR "/gemma3/") + args.size + "/" + "GGUF/";
-    const std::string modelPath = dataDir + "model-" + filePrecision + ".gguf";
-    const std::string mmprojPath = dataDir + "mmproj-" + filePrecision + ".gguf";
-
+    // No-op for a static llama.cpp; loads the backend plugins under GGML_BACKEND_DL.
     ggml_backend_load_all();
     llama_backend_init();
-    const int nDev = static_cast<int>(ggml_backend_dev_count());
-    printf("**************************************************************\nDetected %d devices:\n", nDev);
-    for (int i = 0; i < nDev; ++i)
-    {
-        ggml_backend_dev_t d = ggml_backend_dev_get(i);
-        printf("[DEV %d] %s — %s\n", i, ggml_backend_dev_name(d), ggml_backend_dev_description(d));
-    }
-    fflush(stdout);
-    int selected = 0;
-    if (nDev > 1)
-    {
-        printf("Select a device (0-%d): ", nDev - 1);
-        fflush(stdout);
-        if (scanf("%d", &selected) != 1 || selected < 0 || selected >= nDev) selected = 0;
-    }
-    ggml_backend_dev_t dev = ggml_backend_dev_get(selected);
-    printf("[DEV %d] is Selected.\n**************************************************************\n\n", selected);
+
+    ggml_backend_dev_t dev = pickGpu();
+
+    // llama.cpp keeps its input layer on the CPU by default and copies the embeddings to
+    // the GPU each call. Moved to the GPU, where vAi runs them, as this is faster.
+    const llama_model_tensor_buft_override overrides[] = {
+        { "token_embd", ggml_backend_dev_buffer_type(dev) },
+        { nullptr, nullptr },
+    };
 
     ggml_backend_dev_t devices[2] = { dev, nullptr };
+
     llama_model_params mparams = llama_model_default_params();
     mparams.devices = devices;
     mparams.n_gpu_layers = 999;
-    printf("model: gemma3 %s (%s)\n", args.size.c_str(), args.precision.c_str());
+    mparams.tensor_buft_overrides = overrides;
+
+    // Load model
+    printf("model: gemma3 %s\n", sizeName);
+
     llama_model* model = llama_model_load_from_file(modelPath.c_str(), mparams);
-    if (!model) fail("failed to load model GGUF");
+    if (!model)
+        fail("failed to load model");
+
     const llama_vocab* vocab = llama_model_get_vocab(model);
 
-    llama_sampler* chain = llama_sampler_chain_init(llama_sampler_chain_default_params());
-    llama_sampler_chain_add(chain, llama_sampler_init_top_k(40));   // vAi TopKSampling default
-    llama_sampler_chain_add(chain, llama_sampler_init_dist(seed));
-    llama_sampler_seq_config samplerCfg = { 0, chain };
-
-    llama_context_params cparams = llama_context_default_params();
-    cparams.n_ctx = nCtx;
-    cparams.n_batch = nCtx;
-    cparams.n_ubatch = nCtx;
-    cparams.n_outputs_max = 1;
-    cparams.type_k = cacheType;
-    cparams.type_v = cacheType;
-    cparams.samplers = &samplerCfg;
-    cparams.n_samplers = 1;
-    llama_context* ctx = llama_init_from_model(model, cparams);
-    if (!ctx) fail("failed to create context");
-
-    mtmd_context* mctx = nullptr;
-    mtmd_bitmap* bitmap = nullptr;
-    std::vector<uint8_t> imagePixels;
-
-    if (hasVision)
+    const char* paragraph = llmParagraph;
+    std::vector<llama_token> paragraphTokens(strlen(paragraph) + 16);
+    const int nParagraph = llama_tokenize(
+        vocab,
+        paragraph,
+        (int32_t)strlen(paragraph),
+        paragraphTokens.data(),
+        (int32_t)paragraphTokens.size(),
+        /*add_special=*/true,
+        /*parse_special=*/false);
+    if (nParagraph <= 0)
+        fail("tokenization failed");
+    paragraphTokens.resize(nParagraph);
+    for (int n : lengths)
     {
-        // At the pinned b10426, mtmd has no device field; it picks its backend
-        // from MTMD_BACKEND_DEVICE, so point it at the same device as the model.
-#ifdef _WIN32
-        _putenv_s("MTMD_BACKEND_DEVICE", ggml_backend_dev_name(dev));
-#else
-        setenv("MTMD_BACKEND_DEVICE", ggml_backend_dev_name(dev), 1);
-#endif
-        mtmd_context_params mp = mtmd_context_params_default();
-        mp.use_gpu = true;
-        mp.warmup = false;
-        mctx = mtmd_init_from_file(mmprojPath.c_str(), model, mp);
-        if (!mctx || !mtmd_support_vision(mctx)) fail("failed to load vision mmproj GGUF");
-
-        std::vector<uint8_t> imagePixels;
-
-        if(args.imagepath == "") imagePixels = gemma3_bench::makeRandom(gemma3_bench::syntheticImageSize, gemma3_bench::syntheticImageSize, 3);
-        else
+        if (n > nParagraph)
         {
-            int width, height, channels;
-            uint8_t* pixels = stbi_load(args.imagepath.c_str(), &width, &height, &channels, 3);
-            if (!pixels) fail("failed to load image");
-            imagePixels.assign(pixels, pixels + size_t(width) * height * 3);
-            stbi_image_free(pixels);
+            fprintf(stderr, "error: the prompt has %d tokens, %d requested\n", nParagraph, n);
+            return 1;
         }
-
-        bitmap = mtmd_bitmap_init(gemma3_bench::syntheticImageSize,
-                                  gemma3_bench::syntheticImageSize,
-                                  imagePixels.data());
-        if (!bitmap) fail("failed to create image bitmap");
-    }
-
-    const std::string vqaPrompt = gemma3_bench::vqaPrompt();
-    std::vector<llama_token> vqaTokens(vqaPrompt.size() + 16);
-    const int nVqa = llama_tokenize(vocab, vqaPrompt.c_str(),
-                                    static_cast<int32_t>(vqaPrompt.size()),
-                                    vqaTokens.data(), static_cast<int32_t>(vqaTokens.size()),
-                                    false, false);
-    if (nVqa <= 0) fail("VQA prompt tokenization failed");
-    vqaTokens.resize(nVqa);
-    for (int n : args.promptLengths)
-    {
-        if (n > nVqa)
+        if (n + nGen > nCtx)
         {
-            fprintf(stderr, "error: the VQA prompt has %d tokens, %d requested\n", nVqa, n);
+            fprintf(stderr, "error: prompt %d + generation exceeds the %d-token context\n", n, nCtx);
             return 1;
         }
     }
-    printHeader(nGen, nReps, nPPReps);
-    std::vector<llama_token> sanity;
-    int sanityText = 0, sanityTotal = 0;
-    for (const int nText : args.promptLengths)
+
+    // GPU sampler chain: top-k then softmax draw, T=1.0 like vAi. This backend sampling
+    // API is [EXPERIMENTAL] in llama.h and may change between builds, hence the v0.8.0 pin.
+    llama_sampler* chain = llama_sampler_chain_init(llama_sampler_chain_default_params());
+    llama_sampler_chain_add(chain, llama_sampler_init_top_k(topK));
+    llama_sampler_chain_add(chain, llama_sampler_init_dist(seed));
+
+    llama_sampler_seq_config samplerCfg = { /*seq_id=*/0, chain };
+
+    llama_context_params cparams = llama_context_default_params();
+    cparams.n_ctx = nCtx;
+    cparams.n_batch = nCtx;      // one llama_process per prefill
+    cparams.n_ubatch = nCtx;     // one graph execution per prefill, like vAi's single forward
+    cparams.n_outputs_max = 1;   // last position only, as vAi slices the last row before its lm head
+    cparams.samplers = &samplerCfg;
+    cparams.n_samplers = 1;
+
+    llama_context* ctx = llama_init_from_model(model, cparams);
+    if (!ctx)
+        fail("failed to create context");
+
+    // Every call goes through llama_process() on one reused batch, as llama-bench does with
+    // common_batch_get_one(): positions continue from the memory, the last token is the only
+    // output. llama_decode() would convert a llama_batch into a new batch on every call.
+    llama_batch_ext* batch = llama_batch_ext_init(ctx);
+
+    auto process = [&](const llama_token* tokens, int n, const char* failure) -> llama_token {
+        const llama_pos pos0 = llama_memory_seq_pos_max(llama_get_memory(ctx), 0) + 1;
+        llama_batch_ext_clear(batch);
+        for (int i = 0; i < n; ++i)
+        {
+            const llama_pos pos = pos0 + i;
+            const int32_t idx = llama_batch_ext_add_token(batch, 0, tokens[i]);
+            if (idx < 0 || !llama_batch_ext_set_pos(batch, idx, &pos))
+                fail("cannot add a token to the batch");
+        }
+        if (!llama_batch_ext_set_output_logits(batch, n - 1, true))
+            fail("cannot mark the last token as the output");
+        if (llama_process(ctx, LLAMA_PROCESS_TYPE_DECODE, batch))
+            fail(failure);
+        llama_synchronize(ctx);
+        const llama_token next = llama_get_sampled_token_ith(ctx, -1);
+        if (next == LLAMA_TOKEN_NULL)
+            fail("backend sampling is inactive (chain fell back to CPU): "
+                 "the GPU comparison against vAi would be apples to oranges");
+        return next;
+    };
+
+    auto decodeOne = [&](llama_token tok) -> llama_token { return process(&tok, 1, "llama_process failed (decode)"); };
+
+    std::vector<llama_token> sanity;   // --showText: rep 0 of the last length, printed at the end
+    int sanityLen = 0;
+
+    // Warm-up at the longest length: pipeline creation, buffer allocation and the GPU
+    // clock ramp are paid here instead of in the first row.
     {
-        mtmd_input_chunks* chunks = nullptr;
-        std::vector<llama_token> textTokens;
-        int nPrompt = 0;
-        if (hasVision)
-        {
-            const std::string question = tokensToString(vocab, vqaTokens, nText);
-            const std::string prompt = visionPrompt(mtmd_get_marker(mctx), question);
-            chunks = mtmd_input_chunks_init();
-            mtmd_input_text inputText = { prompt.c_str(), prompt.size(), false, true };
-            const mtmd_bitmap* bitmaps[] = { bitmap };
-            if (mtmd_tokenize(mctx, chunks, &inputText, bitmaps, 1))
-                fail("multimodal tokenization failed");
-            for (size_t i = 0; i < mtmd_input_chunks_size(chunks); ++i)
-                nPrompt += static_cast<int>(mtmd_input_chunk_get_n_tokens(mtmd_input_chunks_get(chunks, i)));
-        }
-        else
-        {
-            textTokens.assign(vqaTokens.begin(), vqaTokens.begin() + nText);
-            nPrompt = nText;
-        }
-        if (nPrompt + nGen > nCtx) fail("prompt + generation exceeds the context");
+        const int nMax = *std::max_element(lengths.begin(), lengths.end());
+        std::vector<llama_token> maxPrompt(paragraphTokens.begin(), paragraphTokens.begin() + nMax);
 
+        llama_memory_clear(llama_get_memory(ctx), /*data=*/false);
+        llama_token tok = process(maxPrompt.data(), nMax, "llama_process failed (warm-up prefill)");
+
+        for (int i = 0; i < nWarmGen; ++i)
+            tok = decodeOne(tok);
+    }
+
+    printLLMHeader(nGen, nReps, nPPReps);
+
+    for (const int nPrompt : lengths)
+    {
+        std::vector<llama_token> promptTokens(paragraphTokens.begin(), paragraphTokens.begin() + nPrompt);
+
+        // data=false resets the cache metadata without clearing the KV buffers, as vAi's
+        // resetCache() does.
         auto prefill = [&]() -> llama_token {
-            llama_memory_clear(llama_get_memory(ctx), false);
-            if (hasVision)
-            {
-                llama_pos nPast = 0;
-                for (size_t i = 0; i < mtmd_input_chunks_size(chunks); ++i)
-                {
-                    const mtmd_input_chunk* chunk = mtmd_input_chunks_get(chunks, i);
-                    const size_t nChunk = mtmd_input_chunk_get_n_tokens(chunk);
-                    if (mtmd_input_chunk_get_type(chunk) == MTMD_INPUT_CHUNK_TYPE_TEXT)
-                    {
-                        size_t count = 0;
-                        const llama_token* text = mtmd_input_chunk_get_tokens_text(chunk, &count);
-                        llama_batch batch = llama_batch_get_one(const_cast<llama_token*>(text), static_cast<int32_t>(count));
-                        // Prefix chunks seed KV only; compute/sample logits once,
-                        // at the final text token, as the vAi graph does.
-                        std::vector<int8_t> logits(count, 0);
-                        if (i + 1 == mtmd_input_chunks_size(chunks)) logits.back() = 1;
-                        batch.logits = logits.data();
-                        if (llama_decode(ctx, batch)) fail("multimodal text prefill failed");
-                        llama_synchronize(ctx);
-                    }
-                    else
-                    {
-                        if (mtmd_encode_chunk(mctx, chunk)) fail("vision encoding failed");
-                        const int nEmbd = llama_model_n_embd_inp(model);
-                        llama_batch batch = llama_batch_init(static_cast<int32_t>(nChunk), nEmbd, 1);
-                        memcpy(batch.embd, mtmd_get_output_embd(mctx), nChunk * nEmbd * sizeof(float));
-                        for (size_t j = 0; j < nChunk; ++j)
-                        {
-                            batch.pos[j] = nPast + static_cast<llama_pos>(j);
-                            batch.n_seq_id[j] = 1;
-                            batch.seq_id[j][0] = 0;
-                            batch.logits[j] = false;
-                        }
-                        batch.n_tokens = static_cast<int32_t>(nChunk);
-                        llama_set_causal_attn(ctx, !mtmd_decode_use_non_causal(mctx, chunk));
-                        const int rc = llama_decode(ctx, batch);
-                        llama_synchronize(ctx);
-                        llama_set_causal_attn(ctx, true);
-                        llama_batch_free(batch);
-                        if (rc) fail("multimodal image prefill failed");
-                    }
-                    nPast += mtmd_input_chunk_get_n_pos(chunk);
-                }
-            }
-            else
-            {
-                llama_batch batch = llama_batch_get_one(textTokens.data(), static_cast<int32_t>(textTokens.size()));
-                if (llama_decode(ctx, batch)) fail("text prefill failed");
-                llama_synchronize(ctx);
-            }
-            const llama_token tok = llama_get_sampled_token_ith(ctx, -1);
-            if (tok == LLAMA_TOKEN_NULL) fail("backend sampling is inactive");
-            return tok;
-        };
-        auto decodeOne = [&](llama_token tok) -> llama_token {
-            llama_batch batch = llama_batch_get_one(&tok, 1);
-            if (llama_decode(ctx, batch)) fail("decode failed");
-            llama_synchronize(ctx);
-            return llama_get_sampled_token_ith(ctx, -1);
+            llama_memory_clear(llama_get_memory(ctx), /*data=*/false);
+            return process(promptTokens.data(), nPrompt, "llama_process failed (prefill)");
         };
 
-        llama_token tok = LLAMA_TOKEN_NULL;
-        for (int i = 0; i < nWarmPre; ++i) tok = prefill();
-        for (int i = 0; i < nWarmGen; ++i) tok = decodeOne(tok);
+        // Warm-up for this length. The last prefill seeds the decode that opens the timed
+        // prefills.
+        llama_token tok = prefill();   // seeds the cache the decode warm-up reads
+        for (int i = 0; i < nWarmGen; ++i)
+            tok = decodeOne(tok);
 
-        // Prefill, timed on its own: vision encoder + LLM prefill per sample.
-        std::vector<double> ppTps;
+        for (int i = 0; i < nWarmPre; ++i)
+            tok = prefill();
+
+        std::vector<double> ppTps, tgTps;
+        std::vector<llama_token> generated;
+
+        // Each prefill follows a decode, as in generation, so it rebuilds its graph.
+        // decodeOne() waits for the decode, keeping it out of the timed span.
         for (int rep = 0; rep < nPPReps; ++rep)
         {
-            const double t0 = nowSec();
-            prefill();
+            decodeOne(tok);
+
+            double t0 = nowSec();
+            tok = prefill();
             ppTps.push_back(nPrompt / (nowSec() - t0));
         }
 
-        // Decode, timed on its own: the prefill that seeds each run is not counted.
-        std::vector<double> tgTps;
-        std::vector<llama_token> generated;
         for (int rep = 0; rep < nReps; ++rep)
         {
             tok = prefill();
-            const bool keep = args.showText && rep == 0;
-            if (keep) generated.push_back(tok);
-            const double t1 = nowSec();
+
+            bool keep = showText && rep == 0;
+            if (keep)
+            {
+                generated = promptTokens;
+                generated.push_back(tok);
+            }
+
+            double t1 = nowSec();
             for (int gen = 0; gen < nGen; ++gen)
             {
                 tok = decodeOne(tok);
-                if (keep) generated.push_back(tok);
+                if (keep)
+                    generated.push_back(tok);
             }
             tgTps.push_back(nGen / (nowSec() - t1));
         }
 
-        printRow("llama.cpp", nText, nPrompt, stats(ppTps), stats(tgTps));
-        sanity = std::move(generated);
-        sanityText = nText;
-        sanityTotal = nPrompt;
-        if (chunks) mtmd_input_chunks_free(chunks);
+        printLLMRow("llama.cpp", nPrompt, ppTps, tgTps);
+        sanity = generated;
+        sanityLen = nPrompt;
     }
-    if (args.showText)
+
+    if (showText)
     {
-        printf("\n=== Generated Text (text=%d, total=%d, rep 0) ===\n",
-               sanityText, sanityTotal);
+        printf("\n=== Generated Text (N=%d, rep 0) ===\n", sanityLen);
         for (llama_token t : sanity)
         {
             char buf[256];
-            const int n = llama_token_to_piece(vocab, t, buf, sizeof(buf), 0, false);
-            if (n > 0) printf("%.*s", n, buf);
+            int n = llama_token_to_piece(vocab, t, buf, sizeof(buf), 0, false);
+            if (n > 0)
+                printf("%.*s", n, buf);
         }
         printf("\n");
     }
 
-    if (bitmap) mtmd_bitmap_free(bitmap);
-    if (mctx) mtmd_free(mctx);
+    llama_batch_ext_free(batch);
     llama_free(ctx);
     llama_sampler_free(chain);
     llama_model_free(model);

@@ -38,7 +38,7 @@ Build options:
 |---|---|---|
 | `VAI_BUILD_MODEL_DEMO` | `ON` | Model demos (`demo-gpt2`, `demo-yolox`, etc.) |
 | `VAI_BUILD_EXAMPLES` | `OFF` | Examples outside the models (`demo-mnist`, `chat-llama3`, `chat-gemma3`) |
-| `VAI_BUILD_BENCH` | `OFF` | Benchmarks against frameworks such as llama.cpp and ncnn |
+| `VAI_BUILD_BENCH` | `OFF` | Benchmarks against other inference frameworks |
 | `VAI_BUILD_PYTHON` | `OFF` | Python bindings |
 
 ### 1.4 Run

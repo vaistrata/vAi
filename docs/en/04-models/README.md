@@ -49,20 +49,3 @@ For new models, see [Writing custom models](../contributing/models.md).
 |---|---|
 | [GPT-2](gpt2.md) | 124M, 355M, 774M, 1.5B |
 | [Llama 3](llama3.md) | 3.2-1B, 3.2-3B |
-
-## Combined benchmarks
-
-### LLM
-
-vAi measurements with a **512-token prompt**.
-
-| Model | Metric | 890M (Strix Point) | 8060S (Strix Halo) | UHD Graphics (TGL GT1) | RTX 3060 Laptop | RTX 5070 | RTX 4090 | RTX 5090 |
-|---|---|---:|---:|---:|---:|---:|---:|---:|
-| GPT-2 124M | prefill (t/s) | 10,899 | 50,777 | 1,201 | 61,236 | 154,785 | 269,911 | 308,638 |
-|  | decode (t/s) | 130.5 | 500.9 | 94.06 | 743.2 | 1,319 | 1,631 | 1,756 |
-| Llama 3 3.2-1B | prefill (t/s) | 1,653 | 4,932 | 123.1 | 8,761 | 25,313 | 51,332 | 56,603 |
-|  | decode (t/s) | 16.46 | 81.66 | 9.63 | 115.3 | 213.2 | 311.0 | 455.4 |
-| Llama 3 3.2-3B | prefill (t/s) | - | 1,726 | - | - | 9,091 | 17,219 | 21,013 |
-|  | decode (t/s) | - | 33.87 | - | - | 87.74 | 128.0 | 194.0 |
-
-Comparisons with other frameworks are in the benchmark summaries for [YOLOX](yolox.md#benchmark-summary), [GPT-2](gpt2.md#benchmark-summary), and [Llama 3](llama3.md#benchmark-summary). For measurement environments, conditions, and reproduction instructions, see [`benchmarks/`](../../../benchmarks/).

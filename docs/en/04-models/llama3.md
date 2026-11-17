@@ -203,25 +203,3 @@ The demo generates text that continues the text in `prompt` in [`demo.cpp`](../.
 ```
 
 This runs a multi-turn conversation from [`main.cpp`](../../../examples/chat-llama3/main.cpp). Conversation history stays in the KV cache, and the session ends on an empty line or when the cache is full.
-
-## Benchmark summary
-
-These results compare llama.cpp (Vulkan) and vAi with a **512-token prompt**. For full results by GPU and prompt length, measurement environments and conditions, and reproduction instructions, see [`benchmarks/llama3/README.md`](../../../benchmarks/llama3/README.md).
-
-**Llama 3.2-1B**
-
-| | | 890M (Strix Point) | 8060S (Strix Halo) | UHD Graphics (TGL GT1) | RTX 3060 Laptop | RTX 5070 | RTX 4090 | RTX 5090 |
-|---|---|---:|---:|---:|---:|---:|---:|---:|
-| vAi | prefill (t/s) | 1,653 | 4,932 | 123.1 | 8,761 | 25,313 | 51,332 | 56,603 |
-|  | decode (t/s) | 16.46 | 81.66 | 9.63 | 115.3 | 213.2 | 311.0 | 455.4 |
-| llama.cpp | prefill (t/s) | 1,290 | 2,975 | 122.3 | 10,020 | 29,671 | 50,166 | 66,053 |
-|  | decode (t/s) | 16.09 | 66.83 | 9.39 | 110.5 | 221.5 | 290.6 | 424.0 |
-
-**Llama 3.2-3B**
-
-| | | 8060S (Strix Halo) | RTX 5070 | RTX 4090 | RTX 5090 |
-|---|---|---:|---:|---:|---:|
-| vAi | prefill (t/s) | 1,726 | 9,091 | 17,219 | 21,013 |
-|  | decode (t/s) | 33.87 | 87.74 | 128.0 | 194.0 |
-| llama.cpp | prefill (t/s) | 1,609 | 12,644 | 22,849 | 27,118 |
-|  | decode (t/s) | 32.63 | 88.81 | 124.8 | 185.7 |
