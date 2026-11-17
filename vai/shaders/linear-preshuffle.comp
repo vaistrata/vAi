@@ -1,0 +1,74 @@
+// Copy row weights or convert them to the selected GEMM layout.
+#version 450
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#include "common/spec_constants.h"
+
+layout(local_size_x = 256) in;
+
+layout(constant_id = SPEC_ID_TYPE_W) const uint typeW = 0;
+layout(constant_id = 0) const uint weightLayout = 1;   // 0: rows, 1: fragments, 2: permute N, 3: KN
+
+layout(set = 0, binding = 0) writeonly buffer DST { float16_t dst[]; };
+layout(set = 0, binding = 1) readonly buffer W_F32 { float wF32[]; };
+layout(set = 0, binding = 1) readonly buffer W_F16 { float16_t wF16[]; };
+
+layout(set = 0, binding = 0) writeonly buffer PACKED_WORDS { uint packedWords[]; };
+layout(set = 0, binding = 1) readonly buffer WEIGHT_WORDS { uint weightWords[]; };
+shared uint knPackTile[weightLayout == 3u ? 64u * 33u : 1u];
+
+layout(push_constant) uniform PushConstants { uint N; uint K; uint numKb; };
+
+void main()
+{
+    if (weightLayout == 3u)
+    {
+        const uint sourceK = gl_WorkGroupID.x * 64u;
+        const uint sourceN = gl_WorkGroupID.y * 64u;
+
+        for (uint word = gl_LocalInvocationID.x; word < 64u * 32u; word += 256u)
+        {
+            const uint rowN = word / 32u;
+            const uint pairK = word % 32u;
+            knPackTile[rowN * 33u + pairK] =
+                weightWords[(sourceN + rowN) * (K / 2u) + sourceK / 2u + pairK];
+        }
+        barrier();
+
+        for (uint word = gl_LocalInvocationID.x; word < 64u * 32u; word += 256u)
+        {
+            const uint rowK = word / 32u;
+            const uint pairN = word % 32u;
+            const uint shift = (rowK & 1u) * 16u;
+            const uint a = knPackTile[(2u * pairN) * 33u + rowK / 2u];
+            const uint b = knPackTile[(2u * pairN + 1u) * 33u + rowK / 2u];
+            packedWords[(sourceK + rowK) * (N / 2u) + sourceN / 2u + pairN] =
+                ((a >> shift) & 0xffffu) | (((b >> shift) & 0xffffu) << 16u);
+        }
+        return;
+    }
+
+    const uint nb = gl_WorkGroupID.y;
+    const uint kb = gl_WorkGroupID.x;
+    const uint t = gl_LocalInvocationIndex;
+    const uint offset = (nb * numKb + kb) * 256u + t;
+    uint n = nb * 16u + t / 16u;
+    uint k = kb * 16u + t % 16u;
+
+    if (weightLayout == 0u)
+    {
+        if (n < N && k < K) dst[n * K + k] = wF16[n * K + k];
+        return;
+    }
+    if (weightLayout == 2u)
+    {
+        // Each of 32 lane slots holds eight consecutive K values for one even or odd channel.
+        uint lane = t / 8u;
+        n = nb / 8u * 128u + nb % 4u * 32u + lane % 16u * 2u + nb / 4u % 2u;
+        k = kb * 16u + lane / 16u * 8u + t % 8u;
+    }
+    float16_t value = 0.0hf;
+    if (n < N && k < K)
+        value = typeW == DTYPE_F32 ? float16_t(wF32[n * K + k]) : wF16[n * K + k];
+    dst[offset] = value;
+}

@@ -4,6 +4,8 @@
 // Linear / fully-connected layer, tile (scalar / coopmat) and slab kernels
 // (ports of the ggml/llama.cpp Vulkan mul_mm / mul_mat_vec kernels).
 #include "common.h"
+#include <optional>
+#include <bit>
 
 namespace vai::node {
 
@@ -24,6 +26,7 @@ namespace vai::node {
     (linear-tile, each thread accumulates its own outputs) and
     cooperative-matrix (linear-cm, subgroup MMA tiles; NVIDIA's Fill tiles
     run linear-cm-nv, which masks the K tail per k-block).
+  - AMD RADV uses linear-amd for tuned RX 9070 XT and Strix tiles, with weights packed on the GPU.
   - Intel (useIntelTile; every M, slab included): linear-tile-intel, a port of
     OpenVINO's fully_connected_gpu_bf_tiled, reading W packed once on the GPU
     (packWeightIntel); its tile choice is intelTileParams(), its split
@@ -36,8 +39,7 @@ namespace vai::node {
   Split-K (splitSize option; 0 selects the vendor's rule per shape)
   accumulates partials P[splitCount, M, N] (oDtype) in a temporary buffer
   and folds them in a second pass (linear-reduce); bias / epilogue / the
-  residual live in that reduce pass, so requesting them without splitting still
-  runs the reduce as a plain epilogue pass (splitCount = 1).
+  residual live in that reduce pass. Unsplit AMD tiles can fuse the epilogue.
 
   O = s · epilogue(I · Wᵀ + bias) + R      residualOrder AfterEpilogue
   O = s · epilogue(I · Wᵀ + bias + R)      residualOrder BeforeEpilogue
@@ -55,6 +57,7 @@ class Linear : public vai::Node
     eva::ComputePipeline pipeSlab;
     eva::ComputePipeline pipeReduce;
     eva::DescriptorSet descSetTile;
+    eva::DescriptorSet descSetAmd_;
     eva::DescriptorSet descSetSlab;
     eva::DescriptorSet descSetReduce;
 
@@ -77,6 +80,41 @@ public:
     // tM x tN register tile per piece. Coopmat path (tK != 0): the piece
     // level vanishes (sgp* = 0) and tN x tM is a subgroup-collective
     // coopmat accumulator tile.
+    struct AmdTile
+    {
+        uint32_t threads, rows, columns, depth, waveColumns, stages, order;
+        bool packed;
+        bool fuseResidual = false;
+        uint32_t cmSubgroup = 0;   // linear-cm stages both operands in LDS
+        bool prefetch = false;
+
+        bool operator==(const AmdTile&) const = default;
+
+        static constexpr AmdTile cm(uint32_t threads, uint32_t rows, uint32_t columns, uint32_t depth,
+                                    uint32_t waveColumns, uint32_t subgroup, bool mFirst = false, bool prefetch = false)
+        {
+            return {
+                threads, rows, columns, depth, waveColumns, 0, mFirst ? 2u : 0u, false, false, subgroup, prefetch
+            };
+        }
+    };
+    enum class WeightLayout : uint32_t { Rows = 0, Fragments = 1, PermuteN = 2, Kn = 3 };
+
+    // Every Strix specialization participates in the pipeline key.
+    struct StrixTile
+    {
+        uint32_t splits = 0, groupM = 0, schedule = 0, loadWidth = 0;
+        WeightLayout weights = WeightLayout::Rows;
+        bool fused = false, hasBias = false, hasResidual = false;
+        uint32_t biasRepeat = 0, residualRepeat = 0, scaleBits = 0;
+        Dtype accType = Dtype::None;
+        Dtype biasDtype = Dtype::None;
+        Epilogue epilogue = Epilogue::None;
+        ResidualOrder residualOrder = ResidualOrder::AfterEpilogue;
+
+        bool operator==(const StrixTile&) const = default;
+    };
+
     struct PipeParamsTile {
         uint32_t wgSize;
         uint32_t sgSize;    // scalar: may differ from the real subgroup size; coopmat: must equal it
@@ -93,6 +131,11 @@ public:
         uint32_t tN;
         uint32_t tK = 0;    // coopmat k tile: k depth per coopMatMulAdd (= device coopmat K);
                             // 0 on the scalar path — doubles as the coopmat-tile marker
+        std::optional<AmdTile> amd;
+        std::optional<StrixTile> strix;
+        bool prefetch = false;
+        uint32_t specializedRows = 0;
+        uint32_t rowMajor = 0;      // 0: N-first tile order; else M tile count for M-first order
         bool kTailMasked = false;   // coopmat: linear-cm-nv (K tail masked per k-block)
         vai::Dtype iDtype = vai::Dtype::None;
 
@@ -194,7 +237,7 @@ public:
     void setAccDtype(vai::Dtype dtype, vai::DtypeKey) { accDtype_ = dtype; }
 
 private:
-    vai::Dtype accDtype_ = vai::Dtype::None;   // the matmul accumulator; None: the weight's dtype
+    vai::Dtype accDtype_ = vai::Dtype::None;   // None: FP32 on AMD, else the weight's dtype
 
     // Intel path: the "weight" slot rewritten into linear-tile-intel's layout,
     // [ceil(N / 32), ceil(K / 2), 64], once (the first prepare).
@@ -205,6 +248,9 @@ private:
     // is requested (the tile kernel itself carries no epilogue).
     bool needReducePass() const
     {
+        if (!intel_ && ((pipeParamsTile.amd && pipeParamsTile.amd->fuseResidual) ||
+                        (pipeParamsTile.strix && pipeParamsTile.strix->fused)))
+            return false;
         return splitCount > 1 || hasBias() || config_.acceptResidual || config_.epilogue != Epilogue::None ||
                config_.scalarScale != 1.0f;
     }
@@ -213,6 +259,16 @@ private:
     // 8 = ggml mul_mat_vec_max_cols.
     bool useSlabPath(uint32_t M) const { return M <= 8u && !intel_; }
 
+    WeightLayout weightLayout() const;
+    // The weight slot holds its active layout, as on the Intel path.
+    void prepareStrixWeight(WeightLayout layout);
+    Tensor rowWeight_;
+    Tensor transformWeight(const Tensor& source, WeightLayout target,
+                           eva::MEMORY_PROPERTY memory = eva::MEMORY_PROPERTY::DEVICE_LOCAL);
+    // To update a packed weight, bind a new source range and record the graph again.
+    // Keep the source alive so the pool cannot recycle its buffer.
+    Tensor packedWeight_, packedSource_;
+    eva::BufferRange packedSourceRange_;
     bool intel_ = false;   // the Intel tile path (useIntelTile), set by prepare()
     PipeParamsIntel pipeParamsIntel;
     PipeParamsTile pipeParamsTile;
@@ -985,6 +1041,762 @@ inline uint32_t amdLinearSplitCount(uint32_t M, uint32_t N, uint32_t K, const Li
     return ggmlGuessSplitCount(M, N, K, t, device);
 }
 
+constexpr uint32_t kLinearAMDStrixPointDeviceId = 0x150eu;
+constexpr uint32_t kLinearAMDStrixHaloDeviceId = 0x1586u;
+constexpr uint32_t kLinearAMDNavi48DeviceId = 0x7550u;
+
+inline bool amdLinearChip(uint32_t id)
+{
+    return id == kLinearAMDNavi48DeviceId || id == kLinearAMDStrixHaloDeviceId || id == kLinearAMDStrixPointDeviceId;
+}
+
+// M-first assigns consecutive groups to the same W tile. A single M or N tile has only one order.
+inline bool amdWideWeightGrid(const Linear::TileGrid& grid, uint32_t N, uint32_t K)
+{
+    return grid.tilesM > 1 && grid.tilesN >= 8ull * grid.tilesM && uint64_t(N) * K >= (16u << 20);
+}
+
+inline bool useAmdMFirst(uint32_t M, uint32_t N, uint32_t K, const Linear::PipeParamsTile& t, eva::Device device)
+{
+    if (device.vendorID() != eva::VENDOR_ID::AMD || !amdLinearChip(device.deviceID()) || t.sgSize != 64 || t.tM != 16 ||
+        t.tN != 16 || t.tK != 16)
+        return false;
+    const Linear::TileGrid grid(M, N, t.wgM, t.wgN);
+    return amdWideWeightGrid(grid, N, K) ||
+           (device.deviceID() == kLinearAMDStrixPointDeviceId && grid.tilesM > 1 && grid.tilesN >= 2ull * grid.tilesM &&
+            t.wgN > t.wgM && uint64_t(N) * K >= (4u << 20));
+}
+
+inline std::optional<Linear::AmdTile> amdLinearLaneTile(uint32_t M, uint32_t N, uint32_t K, uint32_t splits,
+                                                        eva::Device device, bool fullResidual = false)
+{
+    using Tile = Linear::AmdTile;
+    const uint32_t id = device.deviceID(), cu = device.computeBlockCount();
+    // linear-amd directly indexes the RADV wave32 matrix fragments on these chips.
+    if (device.driverID() != eva::DRIVER_ID::MESA_RADV || !amdLinearChip(id) || !cu || device.minSubgroupSize() > 32 ||
+        device.maxSubgroupSize() < 32)
+        return {};
+    // Use the ordinary CM loaders for narrow outputs and incomplete K fragments.
+    if (N < 64 || K % 16u != 0)
+        return {};
+
+    const bool uma = device.deviceType() == eva::DEVICE_TYPE::INTEGRATED_GPU;
+    const bool smallUma = uma && cu < 32;
+    const bool deep = K >= 8192 && K >= 4ull * N;
+    const bool fits160 = CEIL_DIV(uint64_t(M), 160u) * 160u - M <= 16u;
+    const Linear::TileGrid base(M, N, 64, 128);
+    const uint32_t cmTiles = CEIL_DIV(base.tilesM, 2u) * base.tilesN;
+    if (!uma && N > 64u && N == K && K <= 2048u && cmTiles > cu && cmTiles < 2u * cu)
+        return Tile::cm(256, 128, 128, 32, 64, 64);
+    const uint64_t groups = uint64_t(base.tilesM) * base.tilesN * splits;
+    const uint64_t target = 2ull * cu;
+    Tile t{ 128, 64, 128, 64, 32, 1, 0, true };
+
+    if (smallUma && splits == 1 && deep && 3ull * base.tilesM >= 2ull * base.tilesN && M >= 512)
+    {
+        // The raw prefetch loop reads whole N and K tiles. It clamps the last M tile.
+        if (id != kLinearAMDStrixPointDeviceId || N % 128 || K % 64 || !fits160)
+            return {};
+        t = Tile::cm(256, 160, 128, 64, 32, 32, true, true);
+    }
+    else if (smallUma && fullResidual && M <= 64 && K >= 2ull * N && K % 128 == 0)
+    {
+        t = K >= 4ull * N ? Tile::cm(128, 64, 32, 64, 32, 32) : Tile::cm(128, 64, 64, 128, 32, 32);
+    }
+    else if (smallUma && N >= 3ull * K && 2ull * M >= K && K >= 1024 && !amdWideWeightGrid(base, N, K) &&
+             device.maxSubgroupSize() >= 64)
+    {
+        t = Tile::cm(128, 128, 128, 32, 64, 64, true);
+    }
+    else if (!uma && M <= 64 && groups < target && K >= 2ull * N && K >= 1024)
+    {
+        // Split a narrow output into more groups before increasing the K depth.
+        if (fullResidual || K < 2048)
+            t = { 64, 16, 32, 128, 16, 0, 0, true, fullResidual };
+        else if (K >= 4ull * N)
+            t = { 64, 32, 16, 256, 16, 0, 0, true };
+        else
+            t = { 32, 16, 16, 256, 16, 0, 0, true };
+    }
+    else
+    {
+        if (smallUma && amdWideWeightGrid(base, N, K))
+        {
+            // A tall M tile reloads W fewer times. Prefer 160 rows when at most one fragment is padding.
+            if (M >= 256 && fits160)
+                t = { 128, 160, 128, 32, 32, 1, 0, true };
+            else if (3ull * M >= 2ull * CEIL_DIV(M, 256u) * 256u)
+                t = { 256, 256, 128, 64, 32, 1, 0, true };
+            else
+                t.packed = false;
+        }
+        else
+        {
+            // Aim for two groups per CU. Trim M padding before reducing the tile width.
+            for (uint32_t rows : { 64u, 32u, 16u })
+            {
+                t.rows = rows;
+                const Linear::TileGrid grid(M, N, rows, t.columns);
+                if (!grid.smallM && uint64_t(grid.tilesM) * grid.tilesN * splits >= target)
+                    break;
+            }
+            if (t.rows == 16 && K >= 128)
+            {
+                const uint64_t mGroups = uint64_t(CEIL_DIV(M, 16u)) * splits;
+                for (uint32_t width : { 64u, 32u, 16u })
+                {
+                    if (mGroups * CEIL_DIV(N, t.columns) >= target)
+                        break;
+                    t = { width * 2, 16, width, 128, 16, 0, 0, true };
+                }
+            }
+            if (K <= 64 && smallUma)
+                t.packed = false;
+        }
+        const Linear::TileGrid grid(M, N, t.rows, t.columns);
+        if (grid.tilesM > 1 && grid.tilesN > 1)
+        {
+            if (splits > 1 || (amdWideWeightGrid(grid, N, K) && (!uma || smallUma || grid.tilesM >= 8)) ||
+                (smallUma && (deep || (grid.tilesM >= 6 && N >= 1024))) ||
+                (!uma && !deep && uint64_t(N) * K >= (4u << 20)))
+                t.order = 2;
+            else if (!uma && deep)
+                t.order = 1;
+        }
+        if (smallUma && splits == 1 && t.packed)
+        {
+            // Two N waves share the same A rows.
+            if (t.rows == 16 && t.columns == 2 * t.waveColumns && !grid.smallM)
+                t.stages = 1;
+
+            // Keep the visit order and M padding. Skip a partial third round of workgroups.
+            if (t.rows == 64 && N >= 2 * t.columns && grid.tilesM % 2 == 0)
+            {
+                const uint64_t groups128 = uint64_t(grid.tilesM / 2) * grid.tilesN;
+                if (groups128 == target || groups128 >= target + cu)
+                    t.rows = 128;
+            }
+        }
+    }
+    const auto limit = device.maxComputeWorkGroupCount();
+    if (CEIL_DIV(N, t.columns) > limit[0] || CEIL_DIV(M, t.rows) > limit[1] ||
+        (t.packed && (CEIL_DIV(K, 16u) > limit[0] || CEIL_DIV(N, 128u) * 8ull > limit[1])))
+        return {};
+    return t;
+}
+
+// RX 9070 XT / RADV: keep K64, and spread each tile's cooperative loads over
+// more waves when the dispatch underfills the device. Split-K is already fixed;
+// counting its workgroups avoids exchanging useful occupancy for larger groups.
+inline Linear::PipeParamsTile refineLinearCmTile(uint32_t M, uint32_t N, uint32_t K, uint32_t splitSize,
+                                                 Linear::PipeParamsTile t, eva::Device device)
+{
+    const uint32_t cores = device.computeBlockCount();
+    if (t.tK == 0 || t.sgSize != 64 || device.vendorID() != eva::VENDOR_ID::AMD ||
+        device.driverID() != eva::DRIVER_ID::MESA_RADV || device.deviceID() != 0x7550u || cores != 64u)
+        return t;
+
+    const auto original = t;
+    if (K <= t.wgK)
+        return t;
+    const Linear::TileGrid grid(M, N, t.wgM, t.wgN);
+    // Keep K32 for deep K when the second wave does not fill the GPU.
+    if (t.iDtype == Dtype::Fp32 && K >= 8192u && K >= 4ull * N && grid.tiles() > cores && grid.tiles() < 2u * cores)
+        return t;
+    t.wgK = 64;
+    if (t.wgM >= 64 && t.wgN >= 64 && Linear::TileGrid(M, N, t.wgM, t.wgN).tiles() <= cores / CEIL_DIV(K, splitSize))
+    {
+        const bool aligned = K % t.wgK == 0 && splitSize % t.wgK == 0;
+        t.wgSize = aligned ? 256u : 512u;
+        t.sgM = t.wgM / 2;
+        t.sgN = t.wgN / (aligned ? 2u : 4u);
+    }
+    return coopmatTileUsable(t, device) ? t : original;
+}
+
+
+enum class LinearAmdDevice { Other, StrixPoint, StrixHalo };
+
+inline LinearAmdDevice linearAmdDevice(eva::Device device)
+{
+    if (device.vendorID() != eva::VENDOR_ID::AMD || device.driverID() != eva::DRIVER_ID::MESA_RADV)
+        return LinearAmdDevice::Other;
+    switch (device.deviceID())
+    {
+    case 0x150eu:   // 890M; the 12-CU 880M is not covered by the Point table.
+        if (device.computeBlockCount() == 16u)
+            return LinearAmdDevice::StrixPoint;
+        break;
+    case 0x1586u:   // Halo; its 16-CU part needs different tiles.
+        if (device.computeBlockCount() >= 32u)
+            return LinearAmdDevice::StrixHalo;
+        break;
+    default:
+        break;
+    }
+    return LinearAmdDevice::Other;
+}
+
+inline bool linearDeepDownV2Amd(uint32_t M, uint32_t N, uint32_t K)
+{
+    return K >= 8192u && CEIL_DIV(N, 128u) == 16u && CEIL_DIV(M, 160u) == 4u && CEIL_DIV(M, 128u) == 5u;
+}
+
+inline uint32_t linearGroupMV2Amd(uint32_t M, uint32_t N, uint32_t K, const Linear::PipeParamsTile& t)
+{
+    if (t.tK == 0u)
+        return 0;
+    const Linear::TileGrid g(M, N, t.wgM, t.wgN);
+    if (N >= 8192u && t.wgM == 128u && t.wgN == 128u)   // the wide-layer square tile (linearTileV2AmdStaged)
+        return std::min(g.tilesM, 8u);
+    if (K < 2048u)
+        return 0;
+    const uint32_t minTilesM = t.wgM > 32u ? 4u : 5u;
+    if (g.tilesM < minTilesM || g.tilesN < 16u || g.tilesN > 32u)
+        return 0;
+    return std::min(g.tilesM, 8u);
+}
+
+struct LinearWpPickV2Amd
+{
+    uint32_t wgM = 0, wgN = 0, wgK = 0, sgM = 0, sgN = 0, wgSize = 0;
+    uint32_t split = 1, groupM = 0, sgSize = 0, pipe = 0;
+};
+
+inline LinearWpPickV2Amd linearWpPickV2Amd(uint32_t M, uint32_t N, uint32_t K, bool accF16, bool io16,
+                                           const Linear::PipeParamsTile& t, eva::Device device)
+{
+    constexpr LinearWpPickV2Amd none{};
+    if (linearAmdDevice(device) != LinearAmdDevice::StrixHalo || t.tK != 16u || t.tN != 16u || t.tM != 16u ||
+        t.sgSize != 64u || K % 8u != 0u || !device.supportsPipelineRobustness())
+        return none;
+
+    const auto t32 = [](uint32_t s, uint32_t g = 0) { return LinearWpPickV2Amd{ 32, 128, 64, 32, 64, 128, s, g }; };
+    const auto t64 = [](uint32_t s, uint32_t g = 0) { return LinearWpPickV2Amd{ 64, 64, 64, 32, 64, 128, s, g }; };
+    const auto t6432 = [](uint32_t s) { return LinearWpPickV2Amd{ 64, 32, 64, 64, 32, 64, s, 0 }; };
+    const auto t48 = [](uint32_t s) { return LinearWpPickV2Amd{ 48, 128, 64, 48, 64, 128, s, 0 }; };
+
+    if (!accF16 && io16 && M == 666u && K == 16384u && N == 2048u)
+        return LinearWpPickV2Amd{ 48, 128, 64, 48, 64, 128, 1, 0, 64, 512 };
+
+    if (M >= 32u && M <= 64u)
+    {
+        if (K == 1024u && N == 8192u)
+            return LinearWpPickV2Amd{ 64, 32, 128, 32, 16, 128, 1, 0, 32, 7 };   // gate+up
+        if (K == 1024u && N == 2048u)
+            return LinearWpPickV2Amd{ 16, 64, 128, 16, 16, 128, 1, 0, 32, 3 };   // q
+        if (K == 1024u && N == 256u)                                             // k, v
+        {
+
+            if (!accF16 && io16 && (M == 50u || M == 51u))
+                return LinearWpPickV2Amd{ 16, 16, 256, 16, 16, 32, 1, 0, 32, 4104u };
+            return LinearWpPickV2Amd{ 16, 16, 128, 16, 16, 32, 1, 0, 32, 1 };
+        }
+        if (K == 2048u && N == 1024u)
+            return LinearWpPickV2Amd{ 16, 32, 128, 16, 16, 128, 1, 0, 64, 3 };   // o
+        if (K == 4096u && N == 1024u)
+            return LinearWpPickV2Amd{ 16, 64, 128, 16, 16, 128, 1, 0, 32, 3 };   // down
+    }
+
+    else if (M >= 256u && M <= 576u && K == 1152u)   // vision tower, two 256-patch views
+    {
+        if (N == 1152u)
+            return LinearWpPickV2Amd{ 48, 64, 64, 48, 32, 64, 1, 8, 32, 8 };   // q, k, v, o
+        if (N == 4304u && io16)
+            return LinearWpPickV2Amd{ 128, 96, 32, 128, 48, 128, 1, 8, 64 };
+    }
+    else if (M >= 512u && M < 1024u && K == 2048u && N == 32768u)   // prefix gate+up
+    {
+        if (!io16)
+            return LinearWpPickV2Amd{ 96, 256, 64, 96, 32, 256, 1, 8, 32 };
+
+        if (!accF16 && (M == 529u || M == 666u))
+            return LinearWpPickV2Amd{ 112, 128, 64, 112, 32, 128, 1, 8, 32, 8 };
+        return M <= 600u ? LinearWpPickV2Amd{ 96, 128, 64, 96, 32, 128, 1, 8, 32, 8 }
+                         : LinearWpPickV2Amd{ 96, 128, 64, 48, 64, 128, 1, 8, 32, 8 };
+    }
+    else if (io16 && M >= 512u && M < 1024u && K == 2048u && N == 256u)   // prefix k, v
+        return LinearWpPickV2Amd{ 16, 128, 64, 16, 32, 128, 4, 8, 32, 8 };
+    else if (io16 && M >= 512u && M <= 600u && K == 2048u && N == 2048u)   // prefix q, o
+        return LinearWpPickV2Amd{ 96, 128, 64, 48, 32, 256, 1, 8, 32, 8 };
+    else if (io16 && M >= 512u && M <= 600u && K == 16384u && N == 2048u)   // prefix down
+        return LinearWpPickV2Amd{ 32, 128, 64, 32, 64, 64, 1, 8, 32, 8 };
+
+    if (N >= 8192u)
+    {
+
+        if (io16 && M >= 512u && M < 1024u && K >= 1024u)
+            return LinearWpPickV2Amd{ 96, 128, 64, 48, 64, 256, 1, 8 };
+        if (M >= 256u)
+            return K >= 1024u ? LinearWpPickV2Amd{ 128, 128, 32, 64, 64, 256, 1, 8 } : none;
+        if (M <= 64u)
+            return t64(1);
+        return M <= 100u ? LinearWpPickV2Amd{ 128, 128, 64, 64, 64, 256, 1, 0 } : none;
+    }
+
+    if (N == 256u && K >= 2048u && M >= 512u && M < 1024u)
+    {
+        const Linear::TileGrid grid(M, N, 48u, 128u);
+        return LinearWpPickV2Amd{ 48, 128, 64, 48, 64, 128, grid.tiles() >= device.computeBlockCount() ? 1u : 4u, 8 };
+    }
+    if (N <= 512u)
+        return M > 50u && (K >= 2048u || N == 512u) ? t6432(4) : none;
+    if (K < 2048u)
+    {
+        if (M <= 50u)
+            return (N >= 2048u && K == 1024u) ? t6432(2) : none;
+        if (K < 1024u && M < 100u)
+            return none;
+        if (M < 256u)
+            return N > 2048u ? t64(1) : (N == 2048u ? t6432(1) : none);
+
+        if (K >= 768u && M <= 512u)
+            return none;
+        return t64(M <= 512u ? 2 : 1, 8);
+    }
+    if (M <= 50u)
+        return t6432(N >= 2048u ? 2 : 4);
+    if (M < 256u)
+        return t64(N >= 2048u ? 2 : 4);
+    if (N >= 2048u)
+    {
+
+        const uint32_t wgs32 = CEIL_DIV(M, 32u) * CEIL_DIV(N, 128u);
+
+        if (accF16 && wgs32 > 320u && wgs32 <= 360u)
+            return t48(1);
+        if (!accF16 && wgs32 > 320u)
+            return t48(M >= 900u && K >= 8192u ? 4 : 1);
+        return t32(M < 512u ? 2 : (M >= 785u && K >= 8192u ? 4 : 1));
+    }
+    return t32(M < 785u ? 2 : 1);
+}
+
+inline Linear::PipeParamsTile linearTileV2AmdStaged(uint32_t M, uint32_t N, uint32_t K, const Linear::PipeParamsTile& t,
+                                                    uint32_t cores, bool stageF32, eva::Device device)
+{
+    if (t.sgSize != 64)
+        return t;   // other subgroup sizes: ggml's pick stands
+
+    uint32_t wgM, wgN, wgK, sgM, sgN;
+    uint32_t wgSize = 128;
+
+    if (N <= 512u && M <= 256u)   // narrow layers, small M: at any CU count
+    {
+
+        const bool half =
+            !stageF32 && K >= 1024u && K % 128u == 0u && Linear::TileGrid(M, N, 32u, 16u).tiles() < cores * 3u;
+        if (half)
+        {
+            wgM = 32;
+            wgN = 16;
+            wgK = K < 2048u && N >= 256u ? 64 : 128;
+            sgM = 32;
+            sgN = 16;
+            wgSize = 64;
+        }
+        else
+        {
+            wgM = 32;
+            wgN = 32;
+            wgK = 64;
+            sgM = 32;
+            sgN = 32;
+            wgSize = 64;
+        }
+    }
+    else if (cores >= 32u)   // >= 32 CUs: one tile per layer width
+    {
+        if (N >= 8192u)   // widest layers: fat M bands of 32-wide columns,
+        {                 // so the weight streams once per band
+
+            struct Band
+            {
+                uint32_t wgM, cost;
+            };
+            constexpr Band bands[] = {
+                { 64, 84 }, { 128, 140 }, { 160, 159 }, { 192, 187 }, { 224, 207 }, { 256, 252 }
+            };
+            Band best = bands[std::size(bands) - 1];
+            if (M < 1024u)
+                for (const Band& b : bands)
+                    if ((b.wgM != 64u || CEIL_DIV(N, 128u) <= cores * 2u) &&
+                        CEIL_DIV(M, b.wgM) * b.cost < CEIL_DIV(M, best.wgM) * best.cost)
+                        best = b;
+
+            wgM = best.wgM;
+            wgN = 32;
+            sgN = 16;
+            if (M >= 384u)
+            {
+                wgM = 128;
+                wgN = 128;
+                wgK = 64;
+                sgM = 64;
+                sgN = 64;
+                wgSize = 256;
+            }
+            else if (wgM == 256u)
+            {
+                wgK = 32;
+                sgM = 256;
+            }
+            else if (wgM == 64u)
+            {
+                wgN = 16;
+                wgK = K % 128u == 0u ? 128 : 64;
+                sgM = 64;
+                sgN = 16;
+                wgSize = 64;
+            }
+            else
+            {
+                wgK = 64;
+                sgM = wgM / 2;
+                wgSize = 256;
+            }
+        }
+        else if (N <= 512u)   // narrow layers, bigger M
+        {
+
+            wgM = 128;
+            wgN = 128;
+            wgK = 64;
+            sgM = 32;
+            sgN = 64;
+            wgSize = 512;
+        }
+        else   // mid widths (q/o, down-proj class)
+        {
+
+            if (M <= 256u)
+            {
+                if (K >= 2048u && N >= 2048u)
+                {
+                    wgM = 192;
+                    wgN = 64;
+                    wgK = 64;
+                    sgM = 96;
+                    sgN = 16;
+                    wgSize = 512;
+                }
+                else
+                {
+                    wgM = 64;
+                    wgN = 64;
+                    wgK = 64;
+                    sgM = 64;
+                    sgN = 16;
+                    wgSize = 256;
+                }
+            }
+            else if (M < 1024u && K >= 2048u)
+            {
+
+                struct Steps
+                {
+                    uint32_t wgM;
+                    uint32_t t[8];
+                };   // t[bands - 1], 0: none
+                constexpr Steps steps[] = {
+                    { 128, { 125, 179, 280, 416, 474, 514, 551, 706 } },
+                    { 160, { 137, 206, 414, 460, 498, 656, 677, 0 } },
+                    { 192, { 150, 235, 467, 533, 572, 740, 0, 0 } },
+                    { 224, { 160, 263, 577, 616, 647, 0, 0, 0 } },
+                    { 256, { 0, 280, 651, 705, 0, 0, 0, 0 } },
+                };
+                uint32_t bestT = UINT32_MAX;
+                wgM = 256;
+                for (const Steps& s : steps)
+                {
+                    const uint32_t t = s.t[CEIL_DIV(M, s.wgM) - 1];
+                    if (t != 0u && t < bestT)
+                    {
+                        bestT = t;
+                        wgM = s.wgM;
+                    }
+                }
+                wgN = 128;
+                wgK = 64;
+                if (wgM == 256u)
+                {
+                    sgM = 64;
+                    sgN = 64;
+                    wgSize = 512;
+                }   // see below
+                else
+                {
+                    sgM = wgM;
+                    sgN = 32;
+                    wgSize = 256;
+                }
+                if (wgM == 160u && linearDeepDownV2Amd(M, N, K))   // split in linearSplitV2AmdStaged
+                {
+                    wgM = 128;
+                    sgM = 64;
+                    sgN = 64;
+                    wgSize = 256;
+                }
+            }
+
+            else if (M < 1024u)
+            {
+                wgM = 256;
+                wgN = 128;
+                wgK = 64;
+                sgM = 64;
+                sgN = 64;
+                wgSize = 512;
+            }
+            else
+            {
+                wgM = 96;
+                wgN = 128;
+                wgK = 64;
+                sgM = 96;
+                sgN = 32;
+                wgSize = 256;
+            }
+        }
+    }
+    else                 // < 32 CUs: one general tile, plus a
+    {                    // narrow-N and a mid-M case
+        if (N <= 512u)   // narrow layers, bigger M
+        {
+            wgM = 64;
+            wgN = 128;
+            wgK = 64;
+            sgM = 32;
+            sgN = 128;
+        }
+        else if (M > 256u && M < 2048u && (M < 1024u || K >= 8192u))
+        {   // mid M rides a taller-N tile
+            wgM = 128;
+            wgN = 256;
+            wgK = 64;
+            sgM = 32;
+            sgN = 256;
+            wgSize = 256;
+        }
+        else   // the general tile
+        {
+            wgM = 192;
+            wgN = 128;
+            wgK = 64;
+            sgM = 48;
+            sgN = 128;
+            wgSize = 256;
+        }
+    }
+
+    Linear::PipeParamsTile tuned = t;
+    tuned.wgSize = wgSize;
+    tuned.wgM = wgM;
+    tuned.wgN = wgN;
+    tuned.wgK = wgK;
+    tuned.sgM = sgM;
+    tuned.sgN = sgN;
+    return coopmatTileUsable(tuned, device) ? tuned : t;
+}
+
+inline uint32_t linearSplitV2AmdStaged(uint32_t M, uint32_t N, uint32_t K, const Linear::PipeParamsTile& t,
+                                       uint32_t cores, eva::Device device)
+{
+    const uint32_t tiles = Linear::TileGrid(M, N, t.wgM, t.wgN).tiles();
+    const auto shrink = [&](uint32_t splits) {
+        while (splits > 1u && ggmlSplitSize(K, splits) * (splits - 1u) >= K)
+            splits--;
+        return splits;
+    };
+
+    if (cmRefinedTile(t))
+    {
+        if (t.wgM == 128u && t.wgN == 128u && t.wgK == 64u && t.sgM == 64u && linearDeepDownV2Amd(M, N, K))
+            return 2;
+        if (t.wgM > 64u || M > 256u || N >= 8192u || K < 1024u)
+            return 1;
+        const bool halfK64 = t.wgM == 32u && t.wgN == 16u && t.wgK == 64u;
+        const uint32_t target = halfK64 ? cores * 6u : cores * 6u / 5u;
+        return shrink(std::min(std::max((target + tiles / 2u) / tiles, 1u), 8u));
+    }
+    if (t.tK != 0u && K % 64u != 0u && K % 8u == 0u && K >= 4096u)
+        return shrink(std::min(std::max((2u * cores + tiles / 2u) / tiles, 1u), 8u));
+    return ggmlGuessSplitCount(M, N, K, t, device);
+}
+
+inline Linear::PipeParamsTile linearStrixTileParams(uint32_t M, uint32_t N, uint32_t K, Dtype iDtype, Dtype wDtype,
+                                                    Dtype oDtype, bool accF16, eva::Device device)
+{
+    Linear::StrixTile plan;
+    uint32_t& splitCount = plan.splits;
+    uint32_t& groupM = plan.groupM;
+    const LinearAmdDevice chip = linearAmdDevice(device);
+    if (chip == LinearAmdDevice::StrixHalo)
+    {
+
+        Linear::PipeParamsTile t = ggmlMulmmTileParams(M, N, iDtype, wDtype, device);
+        if (t.tK == 0u)
+            return t;   // the scalar kernel: v1's path
+
+        const uint32_t cores = device.computeBlockCount();
+        const bool io16 = iDtype == Dtype::Fp16 && oDtype == Dtype::Fp16;
+        const LinearWpPickV2Amd pick = linearWpPickV2Amd(M, N, K, accF16, io16, t, device);
+        if (pick.wgM != 0u)
+        {
+            t.wgM = pick.wgM;
+            t.wgN = pick.wgN;
+            t.wgK = pick.wgK;
+            t.sgM = pick.sgM;
+            t.sgN = pick.sgN;
+            t.wgSize = pick.wgSize;
+            if (pick.sgSize != 0u)
+                t.sgSize = pick.sgSize;
+            plan.schedule = pick.pipe;
+
+            if (wDtype != Dtype::Fp16)
+                plan.schedule &= ~(4096u | 512u);
+            splitCount = pick.split;
+            while (splitCount > 1u && ggmlSplitSize(K, splitCount) * (splitCount - 1u) >= K)
+                splitCount--;
+            groupM = pick.groupM;
+            plan.weights = Linear::WeightLayout::Fragments;
+            t.strix = plan;
+            return t;
+        }
+        const bool stageF32 = iDtype == Dtype::Fp32 && wDtype == Dtype::Fp32;
+        if (K % 64u == 0u)
+            t = linearTileV2AmdStaged(M, N, K, t, cores, stageF32, device);
+        splitCount = linearSplitV2AmdStaged(M, N, K, t, cores, device);
+        groupM = linearGroupMV2Amd(M, N, K, t);
+        t.strix = plan;
+        return t;
+    }
+
+    Linear::PipeParamsTile t = amdLinearTile(M, N, K, iDtype, wDtype, device);
+
+    if (chip != LinearAmdDevice::StrixPoint || accF16 || t.tK != 16u || t.tN != 16u || t.tM != 16u || t.sgSize != 64u ||
+        !device.supportsPipelineRobustness())
+        return t;
+
+    struct PointTile
+    {
+        uint32_t wgM = 0, wgN = 0, wgK = 0, sgM = 0, sgN = 0, wgSize = 0, groupM = 0;
+        bool wp = false;
+        uint32_t sgSize = 0;   // 0 keeps the device default.
+    };
+    const PointTile pick = [&]() -> PointTile {
+        constexpr PointTile none{};
+        if (wDtype == Dtype::Fp32)   // ACT (fp32 weights, multiplied in fp16), at M 100, 300 and 302
+        {
+            if (M >= 256u && M <= 1024u)
+            {
+                if (K == 512u && N == 3200u)
+                    return { 64, 64, 32, 64, 32, 128, 8, true };   // ffn linear1
+                if (K == 3200u && N == 512u)
+                    return { 64, 64, 32, 32, 32, 256, 0, false };
+                if (K == 512u && N == 1024u)
+                    return { 64, 128, 32, 64, 32, 256, 0, true };   // q, k
+                if (K == 512u && N == 512u)
+                    return { 64, 64, 32, 32, 32, 256, 0, true };   // v, out
+            }
+            else if (M >= 32u && M <= 128u)
+            {
+                if (K == 512u && N == 3200u)
+                    return { 64, 128, 32, 64, 32, 256, 8, true };
+                if (K == 3200u && N == 512u)
+                    return { 32, 64, 32, 32, 64, 64, 0, true };
+                if (K == 512u && N == 512u)
+                    return { 32, 32, 32, 32, 32, 64, 0, true };
+            }
+            return none;
+        }
+        if (wDtype != Dtype::Fp16)
+            return none;
+
+        if (M >= 256u && M <= 1024u)   // vision tower and prefix
+        {
+
+            const bool fullBands =
+                iDtype == Dtype::Fp16 ? M <= 576u : (M >= 312u && M <= 384u) || (M >= 520u && M <= 576u);
+            if (K == 2048u && N == 32768u && iDtype == Dtype::Fp16 && M >= 768u && CEIL_DIV(M, 160u) * 160u - M <= 16u)
+                return { 160, 128, 32, 160, 32, 128, 8, true, 32 };
+            if (K == 2048u && N == 32768u &&
+                iDtype == Dtype::Fp16)   // pre gate+up, fp16 input, wave32 (one subgroup per
+                return { 96, 128, 64, 96, 64, 64, 8, true, 32 };
+            if (K == 2048u && N == 32768u)   // pre gate+up
+                return fullBands ? PointTile{ 192, 64, 32, 96, 32, 256, 8, true }
+                                 : PointTile{ 256, 64, 32, 128, 32, 256, 0, true };
+            if (K == 588u && N == 1152u && iDtype == Dtype::Fp32)
+                return { 64, 384, 64, 64, 96, 128, 8, true, 32 };
+            if (K == 1152u && N == 2048u && iDtype == Dtype::Fp32)
+                return { 96, 128, 32, 96, 64, 64, 8, false, 32 };
+
+            if (K == 16384u && N == 2048u && iDtype == Dtype::Fp16 && M >= 300u)
+                return (M >= 380u && M <= 560u)
+                           ? PointTile{ 128, 384, 64, 64, 96, 256, 8, true, 32 }
+                           : PointTile{ 192, 256, 64, 96, 64, 256, 0, true, 32 };   // no groupM past 560:
+
+            if (K == 16384u && N == 2048u)   // pre down
+                return { 96, 128, 32, 96, 64, 128, 0, true };
+            if (K == 2048u && N == 2048u && iDtype == Dtype::Fp16)
+                return (M > 600u && M <= 720u) ? PointTile{ 96, 96, 32, 96, 48, 64, 8, true, 32 }
+                                               : PointTile{ 80, 128, 64, 80, 64, 64, 8, true, 32 };
+            if (K == 2048u && N == 2048u)   // pre q, o
+                return (M >= 520u && M <= 576u) ? PointTile{ 96, 64, 32, 96, 32, 128, 8, true }
+                                                : PointTile{ 64, 64, 32, 64, 32, 128, 8, true };
+            if (K == 1152u && N == 1152u && iDtype == Dtype::Fp16)
+                return { 80, 128, 64, 80, 64, 64, 0, true, 32 };
+            if (K == 1152u && N == 1152u)   // vit q, k, v, o
+                return { 128, 64, 32, 128, 32, 128, 0, true };
+            if (K == 1152u && N == 4304u && iDtype == Dtype::Fp16)
+                return { 128, 96, 32, 128, 48, 64, 8, true, 32 };
+            if (K == 1152u && N == 4304u)   // vit fc1
+                return { 256, 64, 32, 128, 64, 128, 0, true };
+            if (K == 4304u && N == 1152u)
+                return { 64, 384, 64, 64, 96, 128, 0, true, 32 };
+        }
+        else if (M >= 32u && M <= 128u)   // action expert
+        {
+            if (K == 1024u && N == 1024u && iDtype == Dtype::Fp32)
+                return { 16, 64, 32, 16, 64, 64, 8, true };
+            if (K == 1024u && N == 8192u)   // ex gate+up
+                return { 64, 128, 32, 64, 32, 256, 0, true };
+            if ((K == 4096u || K == 2048u) && N == 1024u)   // ex down, o
+                return { 16, 64, 64, 16, 32, 128, 0, true };
+            if (K == 1024u && N == 2048u)   // ex q
+                return { 16, 128, 64, 16, 64, 128, 0, true };
+            if (K == 1024u && N == 256u)
+                return { 16, 32, 64, 16, 32, 64, 0, false };
+        }
+        return none;
+    }();
+    if (pick.wgM != 0u)
+    {
+        t.wgM = pick.wgM;
+        t.wgN = pick.wgN;
+        t.wgK = pick.wgK;
+        t.sgM = pick.sgM;
+        t.sgN = pick.sgN;
+        t.wgSize = pick.wgSize;
+        if (pick.sgSize != 0u)
+            t.sgSize = pick.sgSize;
+        splitCount = 1u;
+        groupM = pick.groupM;
+        plan.weights = pick.wp ? Linear::WeightLayout::Fragments : Linear::WeightLayout::Rows;
+        t.strix = plan;
+    }
+    return t;
+}
+
+inline uint32_t linearCmLoadV2Amd(uint32_t K, uint32_t wgK, uint32_t splitSize)
+{
+    if (K % wgK == 0u && splitSize % wgK == 0u)
+        return 1u;
+    if (K % 8u == 0u && splitSize % 8u == 0u)
+        return 2u;
+    return (K % 4u == 0u && splitSize % 4u == 0u) ? 3u : 0u;
+}
+
 // NOTE (vs llama.cpp): a deliberate deviation from ggml's slab rule — RDNA3+
 // picks LARGE for K >= 1024, no N cap. Everything else is ggml's rule.
 inline uint32_t amdLinearSlabWgSize(uint32_t K, uint32_t N, uint32_t sgSize, eva::Device device)
@@ -1123,7 +1935,7 @@ inline uint32_t otherLinearSlabWgSize(uint32_t K, uint32_t N, uint32_t sgSize, e
 // kernel is prepare()'s branch, see useIntelTile). NVIDIA's Fill selector picks
 // the two together; AMD and the others split the picked tile by their rule.
 inline Linear::PipeParamsTile selectLinearTile(uint32_t M, uint32_t N, uint32_t K, Dtype iDtype, Dtype wDtype,
-                                               eva::Device device, uint32_t& splitCount)
+                                               eva::Device device, uint32_t& splitCount, Dtype oDtype, Dtype accDtype)
 {
     Linear::PipeParamsTile t;
     switch (device.vendorID())
@@ -1131,8 +1943,9 @@ inline Linear::PipeParamsTile selectLinearTile(uint32_t M, uint32_t N, uint32_t 
     case eva::VENDOR_ID::NVIDIA:
         return nvLinearTile(M, N, K, iDtype, wDtype, device, splitCount);
     case eva::VENDOR_ID::AMD:
-        t = amdLinearTile(M, N, K, iDtype, wDtype, device);
-        splitCount = amdLinearSplitCount(M, N, K, t, device);
+        t = linearStrixTileParams(M, N, K, iDtype, wDtype, oDtype, accDtype == Dtype::Fp16, device);
+        t.iDtype = iDtype;
+        splitCount = t.strix && t.strix->splits ? t.strix->splits : amdLinearSplitCount(M, N, K, t, device);
         return t;
     default:
         t = otherLinearTile(M, N, iDtype, wDtype, device);
@@ -1210,26 +2023,131 @@ inline void Linear::packWeightIntel()
     wTen = packed;
 }
 
+inline Linear::WeightLayout Linear::weightLayout() const
+{
+    const auto& weight = (*this)["weight"];
+    const uint32_t N = config_.outDim, K = config_.inDim;
+    if (weight.isShapeOf(N, K))
+        return WeightLayout::Rows;
+    if (weight.isShapeOf(CEIL_DIV(N, 16u), CEIL_DIV(K, 16u), 256u))
+        return WeightLayout::Fragments;
+    if (weight.isShapeOf(CEIL_DIV(N, 128u), 2u, 4u, CEIL_DIV(K, 16u), 2u, 16u, 8u))
+        return WeightLayout::PermuteN;
+    VAI_ASSERT(weight.isShapeOf(K, N, 1u));
+    return WeightLayout::Kn;
+}
+
+inline Tensor Linear::transformWeight(const Tensor& source, WeightLayout target, eva::MEMORY_PROPERTY memory)
+{
+    const uint32_t N = config_.outDim, K = config_.inDim;
+    const uint32_t kb = CEIL_DIV(K, 16u);
+    uint32_t gx = kb, gy = CEIL_DIV(N, 16u);
+    std::vector<uint32_t> shape;
+    switch (target)
+    {
+    case WeightLayout::Rows:
+        shape = { N, K };
+        break;
+    case WeightLayout::Fragments:
+        shape = { gy, kb, 256u };
+        break;
+    case WeightLayout::PermuteN:
+        gy = CEIL_DIV(N, 128u) * 8u;
+        shape = { gy / 8u, 2u, 4u, kb, 2u, 16u, 8u };
+        break;
+    case WeightLayout::Kn:
+        gx = K / 64u;
+        gy = N / 64u;
+        shape = { K, N, 1u };
+        break;
+    }
+    Tensor packed(shape, Dtype::Fp16);
+    packed.bindBuffer(bufferPool().requestBuffer(eva::BUFFER_USAGE::STORAGE_BUFFER | eva::BUFFER_USAGE::TRANSFER_DST,
+                                                 memory,
+                                                 packed.numBytes(),
+                                                 packed.numBytes()));
+    const auto destination = packed.buffer();
+    auto pipe = pipelinePool().request(
+        "linear-preshuffle", { eva::constant_id<0>(target), eva::constant_id<SPEC_ID_TYPE_W>(source.dtype()) });
+    auto set = gVaiDestSetPool(pipe.descSetLayout(0));
+    set.write({ destination, source.buffer() });
+    const uint32_t constants[] = { N, K, kb };
+    auto cmd = device().newCommandBuffer(eva::queue_compute);
+    cmd.begin(eva::COMMAND_BUFFER_USAGE::ONE_TIME_SUBMIT)
+        .bindPipeline(pipe)
+        .bindDescSets({ set })
+        .setPushConstants(0, sizeof(constants), constants)
+        .dispatch(gx, gy, 1u)
+        .barrier(eva::SYNC_SCOPE::COMPUTE_WRITE / destination / eva::SYNC_SCOPE::COMPUTE_READ)
+        .end();
+    device().queue() << cmd << eva::waiting;
+    return packed;
+}
+
+inline void Linear::prepareStrixWeight(WeightLayout layout)
+{
+    Tensor& weight = (*this)["weight"];
+    const WeightLayout current = weightLayout();
+    if (current == WeightLayout::Rows)
+        rowWeight_ = {};
+    if (current == layout)
+        return;
+
+    if (current != WeightLayout::Rows)
+    {
+        VAI_ASSERT(rowWeight_.validShape());
+        weight = rowWeight_;
+    }
+    const bool point = linearAmdDevice(device()) == LinearAmdDevice::StrixPoint && weight.dtype() == Dtype::Fp16;
+    if (layout == WeightLayout::Rows)
+    {
+        if (point)
+            weight = transformWeight(weight, WeightLayout::Rows);
+        rowWeight_ = {};
+        return;
+    }
+    // Keep Point originals in cached memory. Keep packed weights in device local memory.
+    if (point && !eva::hasFlag(weight.buffer().buffer.memoryProperties(), eva::MEMORY_PROPERTY::HOST_CACHED))
+        weight = transformWeight(
+            weight, WeightLayout::Rows, eva::MEMORY_PROPERTY::HOST_VISIBLE | eva::MEMORY_PROPERTY::HOST_CACHED);
+    rowWeight_ = weight;
+    weight = transformWeight(weight, layout);
+}
+
 inline void Linear::prepare()
 {
     const Dtype oDtype = (oDtype_ == Dtype::None) ? oDefaultDtype() : oDtype_;
     const Tensor& inTen = (*this)["in0"];
     const Tensor& wTen  = (*this)["weight"];
 
+    if (packedWeight_.gpuBufferBound() &&
+        (wTen.lastSubmission().first || wTen.buffer().buffer != packedSourceRange_.buffer ||
+         wTen.byteOffset() != packedSourceRange_.offset))
+    {
+        packedWeight_ = {};
+        packedSource_ = {};
+        packedSourceRange_ = {};
+    }
+
     uint32_t N = config_.outDim;
     uint32_t K = config_.inDim;
     VAI_ASSERT(inTen.shape().back() == K);
 
     const Dtype iDtype = inTen.dtype();
-    const Dtype wDtype = wTen.dtype();
-    const Dtype accDtype = (accDtype_ == Dtype::None) ? wDtype : accDtype_;
+    const bool strix = linearAmdDevice(device()) != LinearAmdDevice::Other;
+    const Dtype wDtype =
+        strix && weightLayout() != WeightLayout::Rows && rowWeight_.validShape() ? rowWeight_.dtype() : wTen.dtype();
+    const bool amd = device().vendorID() == eva::VENDOR_ID::AMD;
+    const Dtype accDtype = (accDtype_ == Dtype::None) ? (amd ? Dtype::Fp32 : wDtype) : accDtype_;
 
     const auto& inShape = inTen.shape();
     uint32_t M = outerSize(inShape);
     intel_ = useIntelTile(device());
     if (intel_ && wTen.isShapeOf(N, K))
         packWeightIntel();
-    VAI_ASSERT(intel_ ? weightPackedIntel() : wTen.isShapeOf(N, K));
+    VAI_ASSERT(strix || (intel_ ? weightPackedIntel() : wTen.isShapeOf(N, K)));
+    if (strix && useSlabPath(M))
+        prepareStrixWeight(WeightLayout::Rows);
 
     // An operand block that covers O is 0, so the shader indexes it directly;
     // a shorter one ([N], or one image's rows) is its length, read modulo.
@@ -1334,7 +2252,9 @@ inline void Linear::prepare()
             // coopmat (like llama.cpp) and any fp16 operand keep fp16 staging.
             const bool stageF32 = iDtype == Dtype::Fp32 && wDtype == Dtype::Fp32;
             uint32_t pickedSplits = 1;
-            const PipeParamsTile t = selectLinearTile(M, N, K, iDtype, wDtype, device(), pickedSplits);
+            const Dtype cmAccDtype =
+                accDtype == Dtype::Fp16 && !ggmlCoopmatShape(device()).accF16 ? Dtype::Fp32 : accDtype;
+            PipeParamsTile t = selectLinearTile(M, N, K, iDtype, wDtype, device(), pickedSplits, oDtype, cmAccDtype);
 
             // Resolve split-K for this shape: explicit splitSize, or the
             // vendor's count when 0.
@@ -1349,6 +2269,96 @@ inline void Linear::prepare()
                 splitCount = pickedSplits;
                 splitSize = (splitCount > 1) ? ggmlSplitSize(K, splitCount) : K;
             }
+
+            if (t.strix)
+            {
+                auto& a = *t.strix;
+                a.accType = cmAccDtype;
+                const bool plain = !hasBias() && !config_.acceptResidual && config_.epilogue == Epilogue::None &&
+                                   config_.scalarScale == 1.0f;
+                const bool io16 = iDtype == Dtype::Fp16 && wDtype == Dtype::Fp16 && oDtype == Dtype::Fp16;
+                const bool halo = linearAmdDevice(device()) == LinearAmdDevice::StrixHalo;
+                if (halo && plain && io16 && a.accType == Dtype::Fp32 && !config_.splitSize && splitCount == 1)
+                {
+                    if (M >= 768 && M < 1024 && K == 2048 && N == 32768)
+                    {
+                        t.amd = amdLinearLaneTile(M, N, K, splitCount, device());
+                        a.weights = WeightLayout::PermuteN;
+                    }
+                    else if ((M == 50 || M == 51) && K == 1024 && N == 8192 && wTen.buffer().offset == 0)
+                    {
+                        t.wgM = 64;
+                        t.wgN = 64;
+                        t.wgK = 16;
+                        t.sgM = M == 50 ? 32 : 16;
+                        t.sgN = M == 50 ? 32 : 64;
+                        t.wgSize = 128;
+                        t.sgSize = 32;
+                        a.weights = WeightLayout::Kn;
+                        a.groupM = 0;
+                        a.schedule = 0;
+                    }
+                }
+                a.fused = !t.amd && splitCount == 1 && !plain;
+                a.hasBias = hasBias();
+                a.hasResidual = config_.acceptResidual;
+                a.biasDtype = bDtype;
+                a.biasRepeat = biasElems;
+                a.residualRepeat = residualElems;
+                a.scaleBits = std::bit_cast<uint32_t>(config_.scalarScale);
+                a.epilogue = config_.epilogue;
+                a.residualOrder = config_.residualOrder;
+                a.loadWidth = linearCmLoadV2Amd(K, t.wgK, splitSize);
+                if (a.weights != WeightLayout::Fragments || a.loadWidth != 1)
+                    a.schedule = 0;
+                prepareStrixWeight(a.weights);
+            }
+            else if (strix)
+                prepareStrixWeight(WeightLayout::Rows);
+
+            // The locked cooperative matrix shape may only support FP32 accumulation.
+            const Dtype acc = t.tK && amd ? Dtype::Fp32 : cmAccDtype;
+            const bool fullResidual = splitCount == 1 && config_.acceptResidual && residualElems == 0 && !hasBias() &&
+                                      config_.epilogue == Epilogue::None && config_.scalarScale == 1.0f;
+            if (!strix && device().vendorID() == eva::VENDOR_ID::AMD && t.tM == 16 && t.tN == 16 && t.tK == 16 &&
+                !config_.splitSize && acc == Dtype::Fp32 && iDtype == Dtype::Fp16 && wDtype == Dtype::Fp16 &&
+                oDtype == Dtype::Fp16)
+                t.amd = amdLinearLaneTile(M, N, K, splitCount, device(), fullResidual);
+            if (t.amd && t.amd->packed && wTen.lastSubmission().first)
+                t.amd.reset();
+            if (t.amd)
+            {
+                const AmdTile& a = *t.amd;
+                t.wgSize = a.threads;
+                t.sgSize = a.cmSubgroup ? a.cmSubgroup : 32u;
+                t.wgM = a.rows;
+                t.wgN = a.columns;
+                t.wgK = a.depth;
+                t.sgN = a.waveColumns;
+                const uint32_t wavesM = (t.wgSize / t.sgSize) / (t.wgN / t.sgN);
+                t.sgM = t.wgM / wavesM;
+                if (a.cmSubgroup)
+                {
+                    t.rowMajor = a.order == 2 ? CEIL_DIV(M, a.rows) : 0u;
+                    t.prefetch = a.prefetch;
+                    t.amd.reset();
+                }
+                else
+                {
+                    t.specializedRows = M;
+                    if (a.packed && !t.strix && !packedWeight_.gpuBufferBound())
+                    {
+                        packedWeight_ = transformWeight(wTen, WeightLayout::PermuteN);
+                        packedSource_ = wTen;
+                        packedSourceRange_ = wTen.buffer();
+                    }
+                }
+            }
+            else if (!strix && splitSize == K && acc == Dtype::Fp32 && iDtype == Dtype::Fp16 && wDtype == Dtype::Fp16 &&
+                     oDtype == Dtype::Fp16 && useAmdMFirst(M, N, K, t, device()))
+                t.rowMajor = CEIL_DIV(M, t.wgM);
+            else
+                t = refineLinearCmTile(M, N, K, splitSize, t, device());
 
             if (!pipeTile || t != pipeParamsTile)
             {
@@ -1373,16 +2383,63 @@ inline void Linear::prepare()
 
                 // Loader constraints, common to both tile kernels (they share
                 // the cooperative loaders).
-                VAI_ASSERT(tileLoadersFit(t, loadCode));
+                if (!t.amd && !t.strix)
+                    VAI_ASSERT(tileLoadersFit(t, loadCode));
 
-                if (t.tK != 0)   // coopmat kernel
+                if (t.amd || t.strix)
                 {
-                    // fp16 accumulation only when the locked shape reports it;
-                    // otherwise promote to fp32 (ggml falls back to its f32acc
-                    // pipeline the same way).
-                    const Dtype acc =
-                        (accDtype == Dtype::Fp16 && !ggmlCoopmatShape(device()).accF16) ? Dtype::Fp32 : accDtype;
-
+                    const WeightLayout layout =
+                        t.amd ? (t.amd->packed ? WeightLayout::PermuteN : WeightLayout::Rows) : t.strix->weights;
+                    eva::SpecializationConstant spec{ eva::constant_id<0>(t.wgSize),
+                                                      eva::constant_id<1>(t.sgSize),
+                                                      eva::constant_id<2>(t.wgM),
+                                                      eva::constant_id<3>(t.wgN),
+                                                      eva::constant_id<4>(t.wgK),
+                                                      eva::constant_id<5>(t.sgM),
+                                                      eva::constant_id<6>(t.sgN),
+                                                      eva::constant_id<7>(t.tM),
+                                                      eva::constant_id<8>(t.tN),
+                                                      eva::constant_id<9>(t.tK),
+                                                      eva::constant_id<12>(uint32_t(robust)),
+                                                      eva::constant_id<14>(layout) };
+                    if (t.amd)
+                    {
+                        spec.addConstant(eva::constant_id<15>(uint32_t(t.amd->fuseResidual)));
+                        spec.addConstant(eva::constant_id<23>(t.amd->stages));
+                        spec.addConstant(eva::constant_id<24>(t.amd->order));
+                        spec.addConstant(eva::constant_id<25>(M));
+                        spec.addConstant(eva::constant_id<26>(N));
+                        spec.addConstant(eva::constant_id<27>(K));
+                        spec.addConstant(eva::constant_id<28>(splitSize));
+                    }
+                    else
+                    {
+                        const auto& a = *t.strix;
+                        spec.addConstant(eva::constant_id<10>(a.biasDtype));
+                        spec.addConstant(eva::constant_id<11>(a.accType));
+                        spec.addConstant(eva::constant_id<13>(a.groupM));
+                        spec.addConstant(eva::constant_id<15>(uint32_t(a.fused)));
+                        spec.addConstant(eva::constant_id<16>(uint32_t(a.hasBias)));
+                        spec.addConstant(eva::constant_id<17>(a.biasRepeat));
+                        spec.addConstant(eva::constant_id<18>(uint32_t(a.hasResidual)));
+                        spec.addConstant(eva::constant_id<19>(a.residualRepeat));
+                        spec.addConstant(eva::constant_id<20>(uint32_t(a.residualOrder)));
+                        spec.addConstant(eva::constant_id<21>(a.scaleBits));
+                        spec.addConstant(eva::constant_id<22>(a.schedule));
+                        spec.addConstant(eva::constant_id<SPEC_ID_EPILOGUE>(a.epilogue));
+                        spec.addConstant(eva::constant_id<SPEC_ID_TYPE_O>(oDtype));
+                        spec.addConstant(eva::constant_id<SPEC_ID_TYPE_I>(iDtype));
+                        spec.addConstant(eva::constant_id<SPEC_ID_TYPE_W>(wDtype));
+                        spec.addConstant(eva::constant_id<SPEC_ID_ALIGNED>(a.loadWidth));
+                    }
+                    pipeTile = pipelinePool().request(
+                        "linear-amd",
+                        std::move(spec),
+                        { .requiredSubgroupSize = t.amd || t.sgSize != device().subgroupSize() ? t.sgSize : 0u,
+                          .robustBufferAccess = robust });
+                }
+                else if (t.tK != 0)   // coopmat kernel
+                {
                     // NOTE (vs llama.cpp): ggml passes REQUIRE_FULL_SUBGROUPS_BIT
                     // here; eva doesn't expose it (see ggmlCoopmatShape).
                     // clang-format off
@@ -1399,11 +2456,14 @@ inline void Linear::prepare()
                         eva::constant_id<9>(t.tK),                           // tK
                         eva::constant_id<11>(acc),                           // accType
                         eva::constant_id<12>(robust ? 1u : 0u),              // robustBufferAccess
+                        eva::constant_id<14>(t.rowMajor),
+                        eva::constant_id<15>(uint32_t(t.prefetch)),
                         eva::constant_id<SPEC_ID_TYPE_O>(oDtype),    // typeO
                         eva::constant_id<SPEC_ID_TYPE_I>(iDtype),            // typeI
                         eva::constant_id<SPEC_ID_TYPE_W>(wDtype),    // typeW
                         eva::constant_id<SPEC_ID_ALIGNED>(loadCode)          // aligned (linear-cm-nv: load-width code)
                     }, {
+                        .requiredSubgroupSize = t.sgSize != device().subgroupSize() ? t.sgSize : 0u,
                         .robustBufferAccess = robust,
                     });
                     // clang-format on
@@ -1446,8 +2506,9 @@ inline void Linear::prepare()
                     // clang-format on
                 }
 
-                if (!descSetTile)
-                    descSetTile = gVaiDestSetPool(pipeTile.descSetLayout(0));
+                auto& set = (t.amd || t.strix) ? descSetAmd_ : descSetTile;
+                if (!set)
+                    set = gVaiDestSetPool(pipeTile.descSetLayout(0));
             }
         }
 
@@ -1542,38 +2603,33 @@ inline void Linear::run(eva::CommandBuffer cmdBuff)
     else
     {
         const TileGrid grid(M, N, pipeParamsTile.wgM, pipeParamsTile.wgN);
+        if (pipeParamsTile.amd && pipeParamsTile.amd->packed && !pipeParamsTile.strix)
+            wBuf = packedWeight_.buffer();
         gx = grid.tilesN;
         gy = grid.tilesM;
     }
 
-    if (!needReducePass())
-    {
-        descSetTile.write({ outBuf, inBuf, wBuf });
-        cmdBuff.bindPipeline(pipeTile)
-            .bindDescSets({ descSetTile })
-            .setPushConstants(0, sizeof(constants), &constants)
-            .dispatch(gx, gy, 1)
-            .barrier(eva::SYNC_SCOPE::COMPUTE_WRITE / outBuf / eva::SYNC_SCOPE::COMPUTE_READ);
+    const bool reduce = needReducePass();
+    const auto dst = reduce ? (*this)["partial"].buffer() : outBuf;
+    const bool amd = pipeParamsTile.amd || pipeParamsTile.strix;
+    auto& set = amd ? descSetAmd_ : descSetTile;
+    if (amd)
+        set.write(
+            { dst, inBuf, wBuf, hasBias() ? (*this)["bias"].buffer() : dst, config_.acceptResidual ? rBuf : dst });
+    else
+        set.write({ dst, inBuf, wBuf });
+    cmdBuff.bindPipeline(pipeTile).bindDescSets({ set }).setPushConstants(0, sizeof(constants), constants);
+    cmdBuff.dispatch(gx, gy, splitCount).barrier(eva::SYNC_SCOPE::COMPUTE_WRITE / dst / eva::SYNC_SCOPE::COMPUTE_READ);
+    if (!reduce)
         return;
-    }
 
-    // Split path: the tile kernel writes partials P[splitCount, M, N], then the
-    // reduce pass folds them and applies bias / epilogue / the residual.
-    auto pBuf = (*this)["partial"].buffer();
     auto bBuf = hasBias() ? (*this)["bias"].buffer() : eva::Buffer();
-    descSetTile.write({ pBuf, inBuf, wBuf });
-    descSetReduce.write({ outBuf, pBuf, bBuf, rBuf });   // 0 = O, 1 = P, 2 = bias, 3 = residual
-
+    descSetReduce.write({ outBuf, dst, bBuf, rBuf });
     constexpr uint32_t reduceWgSize = 256;   // = local_size_x of linear-reduce
     constexpr uint32_t reduceBatch  = 4;     // elements folded per invocation
     struct { uint32_t MN, splitCount, N; float scalarScale; } reduceConstants = { M * N, splitCount, N, config_.scalarScale };
 
-    cmdBuff.bindPipeline(pipeTile)
-        .bindDescSets({ descSetTile })
-        .setPushConstants(0, sizeof(constants), &constants)
-        .dispatch(gx, gy, splitCount)
-        .barrier(eva::SYNC_SCOPE::COMPUTE_WRITE / pBuf / eva::SYNC_SCOPE::COMPUTE_READ)
-        .bindPipeline(pipeReduce)
+    cmdBuff.bindPipeline(pipeReduce)
         .bindDescSets({ descSetReduce })
         .setPushConstants(0, sizeof(reduceConstants), &reduceConstants)
         .dispatch(CEIL_DIV(M * N, reduceWgSize * reduceBatch), 1, 1)
