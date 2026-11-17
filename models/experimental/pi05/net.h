@@ -38,9 +38,7 @@ struct PrefillNet : public vai::NeuralNet
 
     eva::Buffer kvCacheCounter;
 
-    PrefillNet(
-        const vai::NeuralNetConfig& netCfg, const ModelConfig& modelCfg,
-        const RuntimeConfig& runtimeCfg)
+    PrefillNet(const vai::NeuralNetConfig& netCfg, const ModelConfig& modelCfg, const RuntimeConfig& runtimeCfg)
     : NeuralNet(netCfg)
     , patchEmbed({
           .imageChannels = modelCfg.visionTrf.imageChannels,
@@ -81,8 +79,7 @@ struct PrefillNet : public vai::NeuralNet
     uint32_t prefixLength_ = 0;
 
     // Input: images [cameras, C, S, S], promptTokenIds [T] carrying task and state.
-    void prefill(
-        const vai::Tensor& images, const vai::Tensor& promptTokenIds, const ModelConfig& modelCfg)
+    void prefill(const vai::Tensor& images, const vai::Tensor& promptTokenIds, const ModelConfig& modelCfg)
     {
         const uint32_t cameras = images.shape()[0];
         VAI_ASSERT(cameras >= 1 && cameras <= modelCfg.maxCameras);
@@ -110,8 +107,8 @@ struct DecodeNet : public vai::NeuralNet
     eva::Buffer kvCacheCounter;
 
     DecodeNet(
-        const vai::NeuralNetConfig& netCfg, const ModelConfig& modelCfg,
-        const RuntimeConfig& runtimeCfg, PrefillNet& prefillNet)
+        const vai::NeuralNetConfig& netCfg, const ModelConfig& modelCfg, const RuntimeConfig& runtimeCfg,
+        PrefillNet& prefillNet)
     : NeuralNet(netCfg)
     , actionProj({
           .inDim = modelCfg.actionDim,
@@ -189,8 +186,7 @@ struct Net
     group::ActionDecoder& actionDecoder = decodeNet.actionDecoder;
     vai::node::Linear& velocityHead = decodeNet.velocityHead;
 
-    Net(const vai::NeuralNetConfig& netCfg, const ModelConfig& modelCfg,
-        const RuntimeConfig& runtimeCfg = {})
+    Net(const vai::NeuralNetConfig& netCfg, const ModelConfig& modelCfg, const RuntimeConfig& runtimeCfg = {})
     : modelCfg(modelCfg)
     , runtimeCfg(runtimeCfg)
     , prefillNet(sharePipelines(netCfg), modelCfg, runtimeCfg)
@@ -210,10 +206,7 @@ struct Net
             decodeNet.invalidateCommandBuffer();
     }
 
-    void decode(vai::Tensor* action)
-    {
-        decodeNet.decode(action, prefillNet.prefixLength_, runtimeCfg.denoiseSteps);
-    }
+    void decode(vai::Tensor* action) { decodeNet.decode(action, prefillNet.prefixLength_, runtimeCfg.denoiseSteps); }
 
     // Input: images and promptTokenIds as prefill() takes them, action as decode() takes it.
     // Output: the action chunk in the same GPU tensor.

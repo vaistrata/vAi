@@ -109,8 +109,7 @@ inline std::vector<float> condTable(const Net& net, const vai::Checkpoint& ckpt)
         for (uint32_t s = 0; s < S; ++s)
             for (uint32_t k = 0; k < rows; ++k)
                 for (uint32_t j = 0; j < D; ++j)
-                    table[(size_t(s) * R + r + k) * D + j] =
-                        mod[s][size_t(k) * D + j] + (k == 0 ? 1.0f : 0.0f);
+                    table[(size_t(s) * R + r + k) * D + j] = mod[s][size_t(k) * D + j] + (k == 0 ? 1.0f : 0.0f);
         r += rows;
     };
 
@@ -177,13 +176,10 @@ inline void loadWeights(Net& net, const vai::Checkpoint& ckpt)
             vai::Tensor(ckpt[root + "embeddings.patch_embedding.weight"], wDt)
                 .reshape({
                     modelCfg.visionTrf.embedDim,
-                    modelCfg.visionTrf.imageChannels * modelCfg.visionTrf.patchSize *
-                        modelCfg.visionTrf.patchSize,
+                    modelCfg.visionTrf.imageChannels * modelCfg.visionTrf.patchSize * modelCfg.visionTrf.patchSize,
                 });
         patch.project["bias"] = vai::sum(
-            ckpt[root + "embeddings.position_embedding.weight"],
-            ckpt[root + "embeddings.patch_embedding.bias"],
-            wDt);
+            ckpt[root + "embeddings.position_embedding.weight"], ckpt[root + "embeddings.patch_embedding.bias"], wDt);
 
         for (uint32_t i = 0; i < modelCfg.visionTrf.nBlocks; ++i)
         {
@@ -210,8 +206,7 @@ inline void loadWeights(Net& net, const vai::Checkpoint& ckpt)
 
     // Token embedding. Gemma ties the table to the LM head, and the export
     // wrote only the head — so that tensor is the table, read from the tied end.
-    net.promptEmbed["weight"] =
-        vai::Tensor(ckpt["paligemma_with_expert.paligemma.lm_head.weight"], wDt);
+    net.promptEmbed["weight"] = vai::Tensor(ckpt["paligemma_with_expert.paligemma.lm_head.weight"], wDt);
 
     // Both Gemma stacks share the attention and FFN key names. Only the
     // language stack has norm weights; the expert's norms are the condition.
@@ -224,8 +219,8 @@ inline void loadWeights(Net& net, const vai::Checkpoint& ckpt)
 
         // FFN projections (GeGLU). gate and value are one projection here, so
         // their rows are stacked — gate first, the half GatedMul activates.
-        block.ffn.gateValue["weight"] = vai::concat(
-            { ckpt[prefix + "mlp.gate_proj.weight"], ckpt[prefix + "mlp.up_proj.weight"] }, wDt);
+        block.ffn.gateValue["weight"] =
+            vai::concat({ ckpt[prefix + "mlp.gate_proj.weight"], ckpt[prefix + "mlp.up_proj.weight"] }, wDt);
         loadLinNoBias(block.ffn.out, prefix + "mlp.down_proj");
     };
 
@@ -242,8 +237,7 @@ inline void loadWeights(Net& net, const vai::Checkpoint& ckpt)
 
     for (uint32_t i = 0; i < net.modelCfg.actionTrf.nBlocks; ++i)
     {
-        std::string prefix =
-            "paligemma_with_expert.gemma_expert.model.layers." + std::to_string(i) + ".";
+        std::string prefix = "paligemma_with_expert.gemma_expert.model.layers." + std::to_string(i) + ".";
         loadGemmaBlock(net.actionDecoder.blocks[i], prefix);
     }
 
@@ -254,9 +248,7 @@ inline void loadWeights(Net& net, const vai::Checkpoint& ckpt)
 
     const auto& modelCfg = net.modelCfg;
     net.condTable["table"] =
-        vai::Tensor(
-            { net.runtimeCfg.denoiseSteps, modelCfg.condRows(), modelCfg.actionTrf.embedDim },
-            vai::Dtype::Fp32)
+        vai::Tensor({ net.runtimeCfg.denoiseSteps, modelCfg.condRows(), modelCfg.actionTrf.embedDim }, vai::Dtype::Fp32)
             .setFloats(condTable(net, ckpt));
 }
 
@@ -265,8 +257,7 @@ inline void loadWeights(Net& net, const vai::Checkpoint& ckpt)
 
 // loadWeights<"lerobot">(net) — composes the path in Checkpoint and loads it.
 template <>
-inline void loadWeights<"lerobot", model::experimental::pi05::Net>(
-    model::experimental::pi05::Net& net)
+inline void loadWeights<"lerobot", model::experimental::pi05::Net>(model::experimental::pi05::Net& net)
 {
     std::string dir = std::string(VAI_DATA_DIR "/ckpts/pi05/lerobot/") + net.modelCfg.variant;
     model::experimental::pi05::lerobot::loadWeights(net, vai::Checkpoint(dir));

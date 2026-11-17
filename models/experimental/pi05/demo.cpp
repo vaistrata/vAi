@@ -33,8 +33,7 @@ namespace pi05 = model::experimental::pi05;
 void setProfileTags(pi05::Net& net)
 {
     auto lin = [](const char* tower, uint32_t in, uint32_t out) {
-        return std::string(tower) + ".Linear.[" + std::to_string(in) + "x" + std::to_string(out) +
-               "]";
+        return std::string(tower) + ".Linear.[" + std::to_string(in) + "x" + std::to_string(out) + "]";
     };
 
     // Vision tower — SigLIP, one shape for every block.
@@ -56,8 +55,7 @@ void setProfileTags(pi05::Net& net)
         b.ffn.fc2.setProfileTag(lin("Vision", Dvff, Dv));
     }
     net.patchEmbed.perPatches.setProfileTag("Vision.Permute");
-    net.patchEmbed.project.setProfileTag(
-        lin("Vision", vitCfg.imageChannels * vitCfg.patchSize * vitCfg.patchSize, Dv));
+    net.patchEmbed.project.setProfileTag(lin("Vision", vitCfg.imageChannels * vitCfg.patchSize * vitCfg.patchSize, Dv));
     net.visionEncoder.finalNorm.setProfileTag("Vision.LayerNorm");
     net.projector.setProfileTag(lin("Vision", Dv, modelCfg.languageTrf.embedDim));
 
@@ -86,8 +84,7 @@ void setProfileTags(pi05::Net& net)
     };
 
     tagGemma(net.languageEncoder, "Language", langCfg.embedDim, langCfg.ffnHiddenDim);
-    tagGemma(
-        net.actionDecoder, "Action", modelCfg.actionTrf.embedDim, modelCfg.actionTrf.ffnHiddenDim);
+    tagGemma(net.actionDecoder, "Action", modelCfg.actionTrf.embedDim, modelCfg.actionTrf.ffnHiddenDim);
 
     // The expert's gated residuals, EleAffine in place of Gemma's folded adds.
     for (auto& b : net.actionDecoder.blocks)
@@ -157,8 +154,7 @@ int main()
         states[i] = 0.1f * (i + 1);
 
     // Prepare prompt and encode it to token ids
-    std::string prompt =
-        "Take the shoe with patterned bottom from the table and place it on the mat";
+    std::string prompt = "Take the shoe with patterned bottom from the table and place it on the mat";
     printf("\nTask: \"%s\"\n", prompt.c_str());
     std::vector<int> ids = tokenizer.encode(pi05::makePrompt(prompt, states), true);
     const uint32_t promptLength = (uint32_t)ids.size();
@@ -166,8 +162,9 @@ int main()
     // Initialize the input tensors
     Tensor inImages = Tensor({ B, C, S, S }).setFloats(std::move(pixels));
     Tensor promptTokenIds = Tensor({ promptLength }).setData(ids.data());
-    Tensor nextAction = Tensor({ modelCfg.actionChunk, modelCfg.actionDim })
-                            .setFloats(std::vector<float>(size_t(modelCfg.actionChunk) * modelCfg.actionDim));
+    Tensor nextAction =
+        Tensor({ modelCfg.actionChunk, modelCfg.actionDim })
+            .setFloats(std::vector<float>(size_t(modelCfg.actionChunk) * modelCfg.actionDim));
 
     // Warm-up.
     {
@@ -181,8 +178,7 @@ int main()
     // its recording, so a round costs its GPU time alone.
     for (uint32_t round = 0; round < 3; ++round)
     {
-        nextAction.setFloats(
-            pi05::sampleNoise(size_t(modelCfg.actionChunk) * modelCfg.actionDim, 0));
+        nextAction.setFloats(pi05::sampleNoise(size_t(modelCfg.actionChunk) * modelCfg.actionDim, 0));
 
         utils::TimeChecker roundTimer("▶ Round {}: prefill + denoise in {}ms", round);
 
@@ -196,8 +192,7 @@ int main()
     net.decodeNet.printProfile();
 
     // Print the chunk — the first few steps and dims.
-    printf(
-        "\n=== Action chunk (%u steps x %u dims) ===\n", modelCfg.actionChunk, modelCfg.actionDim);
+    printf("\n=== Action chunk (%u steps x %u dims) ===\n", modelCfg.actionChunk, modelCfg.actionDim);
     const uint32_t showSteps = std::min(modelCfg.actionChunk, 5u);
     const uint32_t showDims = std::min(modelCfg.actionDim, 8u);
     const float* a = nextAction.getData<float>();
