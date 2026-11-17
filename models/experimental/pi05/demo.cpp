@@ -166,9 +166,8 @@ int main()
     // Initialize the input tensors
     Tensor inImages = Tensor({ B, C, S, S }).setFloats(std::move(pixels));
     Tensor promptTokenIds = Tensor({ promptLength }).setData(ids.data());
-    Tensor nextAction =
-        Tensor({ modelCfg.actionChunk, modelCfg.actionDim })
-            .setFloats(std::vector<float>(size_t(modelCfg.actionChunk) * modelCfg.actionDim));
+    Tensor nextAction = Tensor({ modelCfg.actionChunk, modelCfg.actionDim })
+                            .setFloats(std::vector<float>(size_t(modelCfg.actionChunk) * modelCfg.actionDim));
 
     // Warm-up.
     {
@@ -177,43 +176,6 @@ int main()
     }
 
     net.resetProfileRecords();
-
-    // Prefill — every image and the prompt in one forward pass, filling the KV cache.
-    {
-        utils::TimeChecker totalTimer(
-            "\n"
-            "────────────────────────────────────────\n"
-            "▶ Prefill {} image + {} prompt tokens in {}ms \n"
-            "────────────────────────────────────────",
-            B * modelCfg.visionTrf.numPatches(),
-            promptLength);
-
-        net.prefill(inImages, promptTokenIds);
-
-        net.sync();   // this sync is not necessary, but it is here to measure the prefill time.
-    }
-
-    net.prefillNet.printProfile();
-
-    // Denoise — Euler from noise at t = 1 down to the action chunk at t = 0.
-    nextAction.setFloats(pi05::sampleNoise(size_t(modelCfg.actionChunk) * modelCfg.actionDim, 0));
-    {
-        const uint32_t steps = net.runtimeCfg.denoiseSteps;
-
-        utils::TimeChecker totalTimer(
-            "\n"
-            "────────────────────────────────────────\n"
-            "▶ Denoise {} steps over a {}-step chunk in {}ms \n"
-            "────────────────────────────────────────",
-            steps,
-            modelCfg.actionChunk);
-
-        net.decode(&nextAction);
-
-        net.sync();   // this sync is not necessary, but it is here to measure the denoise time.
-    }
-
-    net.decodeNet.printProfile();
 
     // Rounds — prefill then denoise, as a control loop runs them. Each net keeps
     // its recording, so a round costs its GPU time alone.
@@ -224,11 +186,14 @@ int main()
 
         utils::TimeChecker roundTimer("▶ Round {}: prefill + denoise in {}ms", round);
 
-        net.prefill(inImages, promptTokenIds);
-        net.decode(&nextAction);
+        net.predict(inImages, promptTokenIds, &nextAction);
 
         net.sync();
     }
+
+    // Per-node GPU time over the rounds: one prefill per iter, one denoise step per iter.
+    net.prefillNet.printProfile();
+    net.decodeNet.printProfile();
 
     // Print the chunk — the first few steps and dims.
     printf(

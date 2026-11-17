@@ -153,7 +153,7 @@ struct DecodeNet : public vai::NeuralNet
 
     // Input: action [actionChunk, actionDim], initialized with noise.
     // Output: denoised actions in the same GPU tensor.
-    void decode(vai::Tensor* action, uint32_t prefixLength, const RuntimeConfig& runtimeCfg)
+    void decode(vai::Tensor* action, uint32_t prefixLength, uint32_t denoiseSteps)
     {
         VAI_ASSERT(action);
 
@@ -161,7 +161,7 @@ struct DecodeNet : public vai::NeuralNet
         *(uint32_t*)kvCacheCounter.map() = prefixLength;
         condTable.rewind();
 
-        for (uint32_t step = 0; step < runtimeCfg.denoiseSteps; ++step)
+        for (uint32_t step = 0; step < denoiseSteps; ++step)
             (*this)({ { "inActions", *action } }, { { "outActions", action } }, false);
     }
 };
@@ -212,7 +212,15 @@ struct Net
 
     void decode(vai::Tensor* action)
     {
-        decodeNet.decode(action, prefillNet.prefixLength_, runtimeCfg);
+        decodeNet.decode(action, prefillNet.prefixLength_, runtimeCfg.denoiseSteps);
+    }
+
+    // Input: images and promptTokenIds as prefill() takes them, action as decode() takes it.
+    // Output: the action chunk in the same GPU tensor.
+    void predict(const vai::Tensor& images, const vai::Tensor& promptTokenIds, vai::Tensor* action)
+    {
+        prefill(images, promptTokenIds);
+        decode(action);
     }
 
     void sync()
