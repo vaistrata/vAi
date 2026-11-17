@@ -1,5 +1,25 @@
-// Copy row weights or convert them to the selected GEMM layout.
+/*=============================================================================
+ linear-preshuffle.comp: rewrites a Linear weight W [N, K] into a layout
+     linear-cm-amd.comp reads (Linear::packWeightAmd, once per weight and
+     layout). The output is fp16.
+
+     weightLayout (= Linear::WeightLayout):
+       Rows       W'[n, k] = W[n, k]: a copy, fp16 W only
+       Fragments  W'[n / 16, k / 16, (n % 16) * 16 + k % 16] = W[n, k]:
+                  one 16x16 coopmat fragment per block, zero-padded
+       PermuteN   the lane schedule's fragments. A block is 32 lanes of 8
+                  values: lane l holds 8 consecutive k of one channel, lanes
+                  0..15 the block's first 8 k and 16..31 the next 8. The 8
+                  blocks of 128 channels are its four 32-channel groups, even
+                  channels first, then the odd ones. Zero-padded
+       Kn         W'[k, n] = W[n, k], in 64x64 blocks through shared memory;
+                  fp16 W only, N and K multiples of 64
+
+ Dispatch (host): Rows / Fragments (ceil(K / 16), ceil(N / 16)), PermuteN
+ (ceil(K / 16), ceil(N / 128) * 8), Kn (K / 64, N / 64); 256 threads each.
+=============================================================================*/
 #version 450
+#extension GL_GOOGLE_include_directive : require
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 #include "common/spec_constants.h"
@@ -7,21 +27,25 @@
 layout(local_size_x = 256) in;
 
 layout(constant_id = SPEC_ID_TYPE_W) const uint typeW = 0;
-layout(constant_id = 0) const uint weightLayout = 1;   // 0: rows, 1: fragments, 2: permute N, 3: KN
+layout(constant_id = 0) const uint weightLayout = 1;   // LAYOUT_* below
 
+// weightLayout (= Linear::WeightLayout)
+const uint LAYOUT_ROWS = 0u, LAYOUT_FRAGMENTS = 1u, LAYOUT_PERMUTE_N = 2u, LAYOUT_KN = 3u;
+
+// 0 = W' (fp16), 1 = W. Kn moves fp16 pairs as raw words.
 layout(set = 0, binding = 0) writeonly buffer DST { float16_t dst[]; };
 layout(set = 0, binding = 1) readonly buffer W_F32 { float wF32[]; };
 layout(set = 0, binding = 1) readonly buffer W_F16 { float16_t wF16[]; };
 
 layout(set = 0, binding = 0) writeonly buffer PACKED_WORDS { uint packedWords[]; };
 layout(set = 0, binding = 1) readonly buffer WEIGHT_WORDS { uint weightWords[]; };
-shared uint knPackTile[weightLayout == 3u ? 64u * 33u : 1u];
+shared uint knPackTile[weightLayout == LAYOUT_KN ? 64u * 33u : 1u];
 
-layout(push_constant) uniform PushConstants { uint N; uint K; uint numKb; };
+layout(push_constant) uniform PushConstants { uint N; uint K; uint numKb; };   // numKb = ceil(K / 16)
 
 void main()
 {
-    if (weightLayout == 3u)
+    if (weightLayout == LAYOUT_KN)
     {
         const uint sourceK = gl_WorkGroupID.x * 64u;
         const uint sourceN = gl_WorkGroupID.y * 64u;
@@ -48,6 +72,7 @@ void main()
         return;
     }
 
+    // One 16x16 block of W per workgroup: thread t is (n, k) = (t / 16, t % 16).
     const uint nb = gl_WorkGroupID.y;
     const uint kb = gl_WorkGroupID.x;
     const uint t = gl_LocalInvocationIndex;
@@ -55,12 +80,12 @@ void main()
     uint n = nb * 16u + t / 16u;
     uint k = kb * 16u + t % 16u;
 
-    if (weightLayout == 0u)
+    if (weightLayout == LAYOUT_ROWS)
     {
         if (n < N && k < K) dst[n * K + k] = wF16[n * K + k];
         return;
     }
-    if (weightLayout == 2u)
+    if (weightLayout == LAYOUT_PERMUTE_N)
     {
         // Each of 32 lane slots holds eight consecutive K values for one even or odd channel.
         uint lane = t / 8u;
