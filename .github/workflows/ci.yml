@@ -15,6 +15,9 @@ permissions:
   contents: read
   pull-requests: read
 
+env:
+  VULKAN_SDK_VERSION: "1.4.357.0"
+
 jobs:
   # Job-level `if:` rather than a workflow-level `paths:` — a skipped job still
   # reports, so a required check does not hang. A skipped workflow reports
@@ -131,9 +134,34 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            gcc-14 g++-14 ninja-build glslc libvulkan-dev spirv-headers
+            gcc-14 g++-14 ninja-build libvulkan-dev spirv-headers
           pip install clang-tidy==22.1.8
           clang-tidy --version
+
+      - &cache-glslc
+        uses: actions/cache@v5
+        with:
+          path: ${{ runner.temp }}/glslc
+          key: glslc-${{ runner.os }}-${{ runner.arch }}-${{ env.VULKAN_SDK_VERSION }}
+
+      - &setup-glslc
+        name: Set up glslc
+        shell: bash
+        working-directory: ${{ runner.temp }}
+        run: |
+          bin="$RUNNER_TEMP/glslc"
+          if [[ ! -x "$bin/glslc" ]]; then
+            sdk="$VULKAN_SDK_VERSION"
+            file="vulkansdk-linux-x86_64-$sdk.tar.xz"
+            base="https://sdk.lunarg.com/sdk"
+            curl -fsSL --retry 3 "$base/download/$sdk/linux/$file" -o "$file"
+            curl -fsSL --retry 3 "$base/sha/$sdk/linux/$file.txt" | sha256sum -c -
+            mkdir -p "$bin"
+            tar -xJf "$file" -C "$bin" --strip-components=3 "$sdk/x86_64/bin/glslc"
+          fi
+          echo "$bin" >> "$GITHUB_PATH"
+          echo "CMAKE_PROGRAM_PATH=$bin" >> "$GITHUB_ENV"
+          "$bin/glslc" --version
 
       - name: Configure
         run: |
@@ -182,7 +210,10 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            gcc-14 g++-14 ninja-build glslc libvulkan-dev spirv-headers
+            gcc-14 g++-14 ninja-build libvulkan-dev spirv-headers
+
+      - *cache-glslc
+      - *setup-glslc
 
       - uses: hendrikmuhs/ccache-action@v1.2.23   # `v1` still ships node20
         with:
@@ -206,9 +237,6 @@ jobs:
     if: github.event_name == 'workflow_dispatch' || needs.filter.outputs.cpp == 'true'
     runs-on: windows-2025
     timeout-minutes: 30
-
-    env:
-      VULKAN_SDK_VERSION: 1.4.357.0
 
     steps:
       - uses: actions/checkout@v5
@@ -282,7 +310,10 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            gcc-14 g++-14 ninja-build glslc libvulkan-dev spirv-headers mesa-vulkan-drivers
+            gcc-14 g++-14 ninja-build libvulkan-dev spirv-headers mesa-vulkan-drivers
+
+      - *cache-glslc
+      - *setup-glslc
 
       # ubuntu-24.04's system python is PEP 668 externally-managed.
       - uses: actions/setup-python@v7
