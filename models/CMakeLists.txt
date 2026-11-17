@@ -9,6 +9,8 @@ foreach(shaderDir ${MODEL_SHADER_DIRS})
     get_filename_component(impl ${implDir} NAME)
     string(TOUPPER ${impl} IMPL)
     string(TOUPPER ${model} MODEL)
+    string(MAKE_C_IDENTIFIER ${IMPL} IMPL)     # diffusion-policy -> DIFFUSION_POLICY: a macro name takes no '-'
+    string(MAKE_C_IDENTIFIER ${MODEL} MODEL)
 
     file(GLOB shaders CONFIGURE_DEPENDS ${shaderDir}/*.comp)
     set(outDir ${CMAKE_CURRENT_BINARY_DIR}/${impl}/${model}/shaders)
