@@ -1,7 +1,41 @@
-// Copyright (c) Advanced Micro Devices, Inc., or its affiliates.
-// SPDX-License-Identifier: MIT
-// AMD Linear. The CK wave32 schedule (PRESHUFFLE_V2, 6a27c440) uses lane fragments.
-// The cooperative schedule loads row, 16x16 fragment, or KN weights on Strix.
+/*=============================================================================
+ linear-cm-amd.comp: Linear / fully-connected layer, cooperative-matrix GEMM for
+     AMD on RADV (RX 9070 XT, Strix Point, Strix Halo)
+
+     O[m, n] = sum_k I[m, k] * W[n, k]
+
+     M = flattened batch, N = outDim, K = inDim
+     O [M, N], I [M, K]; W in the layout weightLayout names
+     (Linear::WeightLayout, written by linear-preshuffle.comp)
+
+ Two schedules share linear-cm.comp's frame, one wgM x wgN tile of O per
+ workgroup marching over K in wgK blocks. specM selects:
+
+ laneGemm (specM != 0, Linear::LaneTile): CK's wave32 PRESHUFFLE_V2 schedule
+     (6a27c440). The kernel reads and writes coopmat fragments by element
+     index, relying on how RADV lays a 16x16 fragment over a 32-lane subgroup,
+     so it builds them per lane instead of with coopMatLoad: W from the
+     PermuteN (or Rows) buffer, I from its buffer or through `stages`
+     shared-memory copies. fp16 operands and output, fp32 accumulation, and
+     the whole shape baked in (specM / specN / specK / specSplit). `fused`
+     adds a residual covering O.
+     NOTE: here the coopmat A operand is I and B is W (globalA, globalB),
+     the reverse of cooperativeGemm.
+
+ cooperativeGemm (specM == 0, Linear::StrixTile): linear-cm.comp's schedule,
+     with W as Rows (staged through shared memory, coopmat A = W rows),
+     Fragments (coopMatLoad straight from the buffer) or Kn (W transposed and
+     the operands swapped; N and K baked in as specN / specK). `schedule`
+     picks the load order on Fragments, groupM the dispatch order, `aligned`
+     the K-tail masking, and `fused` applies linear-reduce.comp's epilogue
+     here (bias / epilogue / residual / scale; K not split).
+
+ Split-K, unless fused: workgroup z owns the K span [z * splitSize,
+ min(K, (z + 1) * splitSize)) and writes its partials to P[z, M, N] on
+ binding 0; linear-reduce.comp folds them.
+
+ Dispatch (host): (ceil(N / wgN), ceil(M / wgM), ceil(K / splitSize))
+=============================================================================*/
 #version 450
 #extension GL_GOOGLE_include_directive : require
 #extension GL_EXT_control_flow_attributes : enable
@@ -25,34 +59,48 @@ layout(constant_id = 6)  const uint sgN      = 64;   // subgroup tile size along
 layout(constant_id = 7)  const uint tM       = 16;   // coopmat tile along M (= device coopmat N)
 layout(constant_id = 8)  const uint tN       = 16;   // coopmat tile along N (= device coopmat M)
 layout(constant_id = 9)  const uint tK       = 16;   // coopmat tile along K (= device coopmat K)
-layout(constant_id = 10) const uint typeB = DTYPE_NONE;
+layout(constant_id = 10) const uint typeB    = DTYPE_NONE;   // bias dtype
 layout(constant_id = 11) const uint accType  = 0;    // accumulator dtype (0: fp32, 1: fp16)
 layout(constant_id = 12) const uint robustBufferAccess  = 0;    // robust buffer access (0: disabled, 1: enabled)
 layout(constant_id = 13) const uint groupM   = 0;    // dispatch order (0: N tiles fastest, g: groups of g M tiles fastest)
 
-layout(constant_id = 14) const uint weightLayout = 0;   // 0: rows, 1: fragments, 2: permute N, 3: KN
-layout(constant_id = 15) const uint fuseEpi       = 0;   // 1: apply bias / epilogue / residual / scale here (splitK == K)
-layout(constant_id = 16) const uint hasBias       = 0;   // 1: bias at binding 3 (W dtype)
+layout(constant_id = 14) const uint weightLayout = 0;   // LAYOUT_* below
+layout(constant_id = 15) const uint fused         = 0;   // 1: apply bias / epilogue / residual / scale here (splitSize == K)
+layout(constant_id = 16) const uint hasBias       = 0;   // 1: bias at binding 3 (typeB)
 layout(constant_id = 17) const uint biasElems     = 0;   // 0: the bias covers O; else it repeats every biasElems
 layout(constant_id = 18) const uint hasResidual   = 0;   // 1: residual at binding 4 (O dtype)
 layout(constant_id = 19) const uint residualElems = 0;   // 0: the residual covers O; else it repeats every residualElems
 layout(constant_id = 20) const uint residualOrder = 0;   // 0: added after the epilogue, 1: before it
 layout(constant_id = 21) const uint scaleBits     = 0x3f800000u;   // scalar scale as float bits (1.0)
 
-// Bits: 1 prefetch, 2 uvec4 input, 4 double input, 8 input stream, 512 interleave, 4096 row cursor.
-layout(constant_id = 22) const uint wpPipe        = 0;
+layout(constant_id = 22) const uint schedule      = 0;   // SCHEDULE_* bits below (Fragments weights, aligned == 1)
 
-// CK PRESHUFFLE specializes M, N, K and split. The cooperative schedule reads its shape from push constants.
-layout(constant_id = 23) const uint stages = 1u;
-layout(constant_id = 24) const uint tileOrder = 0u;
-layout(constant_id = 25) const uint laneM = 0u;
-layout(constant_id = 26) const uint laneN = 128u;
-layout(constant_id = 27) const uint laneK = 64u;
-layout(constant_id = 28) const uint laneSplit = 64u;
+// The lane schedule bakes M, N, K and the split span into the pipeline, the KN
+// schedule N and K. Everything else reads its shape from push constants.
+layout(constant_id = 23) const uint stages    = 1u;     // lane: shared-memory copies of I (0: read from the buffer, 2: double-buffered)
+layout(constant_id = 24) const uint tileOrder = 0u;     // lane: ORDER_* below
+layout(constant_id = 25) const uint specM     = 0u;     // != 0 selects the lane schedule
+layout(constant_id = 26) const uint specN     = 128u;
+layout(constant_id = 27) const uint specK     = 64u;
+layout(constant_id = 28) const uint specSplit = 64u;
 
-const bool laneFragments = laneM != 0u;  // Nonzero M selects the CK wave32 schedule.
-const bool fragmentWeights = weightLayout == 1u;
-const bool knWeight = weightLayout == 3u;
+// weightLayout (= Linear::WeightLayout)
+const uint LAYOUT_ROWS = 0u, LAYOUT_FRAGMENTS = 1u, LAYOUT_PERMUTE_N = 2u, LAYOUT_KN = 3u;
+
+// schedule (= Linear::StrixSchedule)
+const uint SCHEDULE_PREFETCH     = 1u;      // load the next k-block's W fragments and I ahead
+const uint SCHEDULE_VECTOR_INPUT = 2u;      // stage I as uvec4 (8 fp16 per slot)
+const uint SCHEDULE_DOUBLE_INPUT = 4u;      // two I stages, alternating per k-block
+const uint SCHEDULE_INPUT_STREAM = 8u;      // stream I through the uvec4 stage, W one slice ahead
+const uint SCHEDULE_INTERLEAVE   = 512u;    // alternate two I fragments over the W fragments
+const uint SCHEDULE_ROW_CURSOR   = 4096u;   // INPUT_STREAM: one read cursor instead of per-load indices
+
+// tileOrder (= Linear::LaneOrder)
+const uint ORDER_BLOCKS = 0u, ORDER_N_FIRST = 1u, ORDER_M_FIRST = 2u;
+
+const bool laneFragments = specM != 0u;
+const bool fragmentWeights = weightLayout == LAYOUT_FRAGMENTS;
+const bool knWeight = weightLayout == LAYOUT_KN;
 
 layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0;  // O (output) dtype
 layout(constant_id = SPEC_ID_TYPE_I) const uint typeI = 0;  // I (input) dtype
@@ -69,7 +117,7 @@ const uint weightGap = knWeight ? 4u : 0u;
 
 // shaderc rejects the same specialization checks as a LogicalAnd chain.
 const uint interleaveEligibility = uint(fragmentWeights) | (uint(aligned == 1u) << 1u)
-    | (uint((wpPipe & 512u) != 0u) << 2u) | (uint(sgM == 48u) << 3u)
+    | (uint((schedule & SCHEDULE_INTERLEAVE) != 0u) << 2u) | (uint(sgM == 48u) << 3u)
     | (uint(sgN == 64u) << 4u) | (uint(tM == 16u) << 5u) | (uint(tN == 16u) << 6u);
 const bool interleaveB = interleaveEligibility == 127u;
 
@@ -106,14 +154,15 @@ layout(set = 0, binding = 4) readonly buffer R_BUF_F32    { float bufferR_f32[];
 layout(set = 0, binding = 4) readonly buffer R_BUF_F16    { float16_t bufferR_f16[]; };
 
 layout(push_constant) uniform PushConstants {
-    uint rows;
-    uint dynamicN;
-    uint dynamicK;
-    uint splitK;   // K span per workgroup-z (= K without splitting)
+    uint M;
+    uint N;
+    uint K;
+    uint splitSize;   // K span per workgroup-z (= K without splitting)
 };
 
-uint matrixN() { return knWeight ? 8192u : dynamicN; }
-uint matrixK() { return knWeight ? 1024u : dynamicK; }
+// The cooperative schedule's N and K: baked in for the KN schedule.
+uint matrixN() { return knWeight ? specN : N; }
+uint matrixK() { return knWeight ? specK : K; }
 
 f16mat2x4 readI8(uint i8) { return (typeI == DTYPE_F32) ? f16mat2x4(bufferI_8f32[i8]) : bufferI_8f16[i8]; }
 f16mat2x4 readW8(uint i8) { return (typeW == DTYPE_F32) ? f16mat2x4(bufferW_8f32[i8]) : bufferW_8f16[i8]; }
@@ -125,7 +174,7 @@ void writeO(uint i, float v) { if (typeO == DTYPE_F32) bufferO_f32[i] = v; else 
 
 float epi(uint i, float v)
 {
-    if (fuseEpi == 0u) return v;
+    if (fused == 0u) return v;
     if (hasBias != 0u)
     {
         const uint bi = (biasElems == 0u) ? i : i % biasElems;
@@ -141,11 +190,11 @@ float epi(uint i, float v)
     return (residualOrder == 1u) ? s * applyEpilogue(v + r) : s * applyEpilogue(v) + r;
 }
 
-const uint inputVectorLds = wpPipe & (2u | 8u);
+const uint inputVectorLds = schedule & (SCHEDULE_VECTOR_INPUT | SCHEDULE_INPUT_STREAM);
 shared f16vec2 weightLds[laneFragments ? 1u : fragmentWeights ? 1u : wgN * tileStride + (wgN / 16u) * weightGap];
 shared f16vec2 inputLds[laneFragments ? 1u : inputVectorLds != 0u ? 1u : wgM * tileStride];
 const uint STRIDE4 = wgK / 8u + 1u;
-shared uvec4 inputLds4[inputVectorLds != 0u ? ((wpPipe & 4u) != 0u ? 2u : 1u) * wgM * STRIDE4 : 1u];
+shared uvec4 inputLds4[inputVectorLds != 0u ? ((schedule & SCHEDULE_DOUBLE_INPUT) != 0u ? 2u : 1u) * wgM * STRIDE4 : 1u];
 
 shared float cmStage[laneFragments ? 1u : knWeight ? 1u : (wgSize / sgSize) * tN * tM];
 
@@ -165,7 +214,7 @@ matA caB[cmsN * SLICES];
 f16mat2x4 iNext[IPASS];
 matB cbEven, cbOdd;
 
-const bool fullKTiles = ((laneK % wgK) | (laneSplit % wgK)) == 0u;
+const bool fullKTiles = ((specK % wgK) | (specSplit % wgK)) == 0u;
 const uint fullBlockEnd = ~0u;
 const uint wavesN = wgN / sgN;
 const uint weightFragments = cmsN * SLICES;
@@ -218,7 +267,7 @@ void stageInput(const uint pos_b, const uint row, const uint col, const uint idx
     {
         const uint idx     = pos_b + col * (matrixK() / LOAD_VEC) + row;
         const uint buf_idx = col * SHMEM_STRIDE + row * (LOAD_VEC / 2);
-        f16vec4 bb = ((robustBufferAccess != 0 || idx_m < rows) && block + row * LOAD_VEC < endK) ? readI4(idx) : f16vec4(0.0);
+        f16vec4 bb = ((robustBufferAccess != 0 || idx_m < M) && block + row * LOAD_VEC < endK) ? readI4(idx) : f16vec4(0.0);
         inputLds[buf_idx    ] = bb.xy;
         inputLds[buf_idx + 1] = bb.zw;
     }
@@ -226,7 +275,7 @@ void stageInput(const uint pos_b, const uint row, const uint col, const uint idx
     {
         const uint idx     = pos_b + col * (matrixK() / LOAD_VEC) + row;
         const uint buf_idx = col * SHMEM_STRIDE + row * (LOAD_VEC / 2);
-        f16mat2x4 bb = ((robustBufferAccess != 0 || idx_m < rows) && (aligned == 1u || block + row * LOAD_VEC < endK))
+        f16mat2x4 bb = ((robustBufferAccess != 0 || idx_m < M) && (aligned == 1u || block + row * LOAD_VEC < endK))
                      ? readI8(idx) : f16mat2x4(0.0);
         inputLds[buf_idx    ] = bb[0].xy;
         inputLds[buf_idx + 1] = bb[0].zw;
@@ -237,24 +286,24 @@ void stageInput(const uint pos_b, const uint row, const uint col, const uint idx
     {
         const uint idx     = pos_b + col * matrixK() + row * 2;
         const uint buf_idx = col * SHMEM_STRIDE + row;
-        if ((robustBufferAccess != 0 || idx_m < rows) && block + row * 2 + 1 < endK)
+        if ((robustBufferAccess != 0 || idx_m < M) && block + row * 2 + 1 < endK)
             inputLds[buf_idx] = f16vec2(readI(idx), readI(idx + 1));
-        else if ((robustBufferAccess != 0 || idx_m < rows) && block + row * 2 < endK)
+        else if ((robustBufferAccess != 0 || idx_m < M) && block + row * 2 < endK)
             inputLds[buf_idx] = f16vec2(readI(idx), 0.0hf);
         else
             inputLds[buf_idx] = f16vec2(0.0hf);
     }
 }
 
-f16mat2x4 I_read(const uint pos_b, const uint row, const uint col, const uint idx_m)
+f16mat2x4 readInputPack(const uint pos_b, const uint row, const uint col, const uint idx_m)
 {
     const uint idx = pos_b + col * (matrixK() / LOAD_VEC) + row;
-    return (robustBufferAccess != 0 || idx_m < rows) ? readI8(idx) : f16mat2x4(0.0);
+    return (robustBufferAccess != 0 || idx_m < M) ? readI8(idx) : f16mat2x4(0.0);
 }
 
-void I_store(const f16mat2x4 bb, const uint row, const uint col, const uint buf)
+void storeInputPack(const f16mat2x4 bb, const uint row, const uint col, const uint buf)
 {
-    if ((wpPipe & 2u) != 0u)
+    if ((schedule & SCHEDULE_VECTOR_INPUT) != 0u)
     {
         inputLds4[buf * wgM * STRIDE4 + col * STRIDE4 + row] = uvec4(packFloat2x16(bb[0].xy), packFloat2x16(bb[0].zw),
                                                                   packFloat2x16(bb[1].xy), packFloat2x16(bb[1].zw));
@@ -282,23 +331,23 @@ void loadPackedBlock(uint block, bool first)
 
 void stepPackedBlock(uint block, uint endK, uint stage)
 {
-    const bool twoI = (wpPipe & 6u) == 6u;
+    const bool twoI = (schedule & (SCHEDULE_VECTOR_INPUT | SCHEDULE_DOUBLE_INPUT)) == (SCHEDULE_VECTOR_INPUT | SCHEDULE_DOUBLE_INPUT);
     [[unroll]] for (uint l = 0; l < IPASS; ++l)
-        I_store(iNext[l], loadr, loadc + l * loadstride, twoI ? stage : 0u);
+        storeInputPack(iNext[l], loadr, loadc + l * loadstride, twoI ? stage : 0u);
     barrier();
     pos_b += wgK / LOAD_VEC;
     if (block + wgK < endK)
     {
         loadPackedBlock(block + wgK, stage != 0u);
         [[unroll]] for (uint l = 0; l < IPASS; ++l)
-            iNext[l] = I_read(pos_b, loadr, loadc + l * loadstride, mTile * wgM + loadc + l * loadstride);
+            iNext[l] = readInputPack(pos_b, loadr, loadc + l * loadstride, mTile * wgM + loadc + l * loadstride);
     }
     const uint row = (gl_SubgroupID / (wgN / sgN)) * sgM;
     [[unroll]] for (uint sl = 0; sl < SLICES; ++sl)
         [[unroll]] for (uint b = 0; b < cmsM; ++b)
         {
             matB cb;
-            if ((wpPipe & 2u) != 0u)
+            if ((schedule & SCHEDULE_VECTOR_INPUT) != 0u)
                 coopMatLoad(cb, inputLds4, (twoI ? stage : 0u) * wgM * STRIDE4 + (row + b * tM) * STRIDE4 + sl * tK / 8,
                             STRIDE4, gl_CooperativeMatrixLayoutColumnMajor);
             else
@@ -348,7 +397,7 @@ void scheduleFragment(bool even, uint index, uint k)
 void cooperativeGemm()
 {
     nTile = gl_WorkGroupID.x;   // which wgN-wide slice of N this workgroup owns
-    mTile = gl_WorkGroupID.y;   // which wgM-wide slice of rows this workgroup owns
+    mTile = gl_WorkGroupID.y;   // which wgM-wide slice of M this workgroup owns
 
     if (groupM > 1u)
     {
@@ -360,8 +409,8 @@ void cooperativeGemm()
         nTile = (pid % (groupM * numN)) / gsize;
     }
 
-    const uint startK = knWeight ? 0u : gl_WorkGroupID.z * splitK;
-    const uint endK   = knWeight ? matrixK() : min(matrixK(), startK + splitK);
+    const uint startK = knWeight ? 0u : gl_WorkGroupID.z * splitSize;
+    const uint endK   = knWeight ? matrixK() : min(matrixK(), startK + splitSize);
 
     loadr = gl_LocalInvocationID.x % (wgK / LOAD_VEC / LOAD_VEC_BATCH);
     loadc = gl_LocalInvocationID.x / (wgK / LOAD_VEC / LOAD_VEC_BATCH);
@@ -373,6 +422,10 @@ void cooperativeGemm()
     const uint sg_n = warpIdx % (wgN / sgN);   // subgroup position in the workgroup tile, along N
     const uint sg_m = warpIdx / (wgN / sgN);   // subgroup position in the workgroup tile, along M
 
+    // KN schedule: W is [K, N], so the operands swap (coopmat A = I rows,
+    // B = W columns) and the tM x tN accumulators store row-major into O. Each
+    // thread stages 4 N columns of one K pair, and loads the next k-block's W
+    // and I between the multiplies of the current one.
     if (knWeight)
     {
         coopmat<float, gl_ScopeSubgroup, tM, tN, gl_MatrixUseAccumulator> nativeC[cmsM * cmsN];
@@ -382,7 +435,7 @@ void cooperativeGemm()
         const uint nativeKpair = gl_LocalInvocationID.x / 16u;
         const uint nativeN4 = (gl_LocalInvocationID.x % 16u) * 4u;
         const uint nativeGlobalN = nTile * wgN + nativeN4;
-        f16mat2x4 pendingInput = I_read(pos_b, loadr, loadc, mTile * wgM + loadc);
+        f16mat2x4 pendingInput = readInputPack(pos_b, loadr, loadc, mTile * wgM + loadc);
         f16vec4 pendingWeight0 = readW4(((startK + 2u * nativeKpair) * matrixN() + nativeGlobalN) / 4u);
         f16vec4 pendingWeight1 = readW4(((startK + 2u * nativeKpair + 1u) * matrixN() + nativeGlobalN) / 4u);
         uint block = startK;
@@ -390,7 +443,7 @@ void cooperativeGemm()
         {
             [[unroll]] for (uint j = 0; j < 4u; j++)
                 weightLds[(nativeN4 + j) * tileStride + ((nativeN4 + j) / 16u) * weightGap + nativeKpair] = f16vec2(pendingWeight0[j], pendingWeight1[j]);
-            I_store(pendingInput, loadr, loadc, 0u);
+            storeInputPack(pendingInput, loadr, loadc, 0u);
             barrier();
             coopmat<float16_t, gl_ScopeSubgroup, tM, tK, gl_MatrixUseA> nativeInputs[cmsM];
             [[unroll]] for (uint m = 0; m < cmsM; m++)
@@ -410,7 +463,7 @@ void cooperativeGemm()
                     nativeC[c] = coopMatMulAdd(nativeInputs[m], nativeWeights[a], nativeC[c]);
 
                     if (c == 0u)
-                        pendingInput = I_read(pos_b + wgK / LOAD_VEC, loadr, loadc, mTile * wgM + loadc);
+                        pendingInput = readInputPack(pos_b + wgK / LOAD_VEC, loadr, loadc, mTile * wgM + loadc);
                     if (c == 1u)
                         pendingWeight0 = readW4(((block + wgK + 2u * nativeKpair) * matrixN() + nativeGlobalN) / 4u);
                     if (c == 2u)
@@ -420,10 +473,11 @@ void cooperativeGemm()
             pos_b += wgK / LOAD_VEC;
         }
 
+        // The last k-block, peeled: nothing is left to load ahead.
         {
             [[unroll]] for (uint j = 0; j < 4u; j++)
                 weightLds[(nativeN4 + j) * tileStride + ((nativeN4 + j) / 16u) * weightGap + nativeKpair] = f16vec2(pendingWeight0[j], pendingWeight1[j]);
-            I_store(pendingInput, loadr, loadc, 0u);
+            storeInputPack(pendingInput, loadr, loadc, 0u);
             barrier();
             coopmat<float16_t, gl_ScopeSubgroup, tM, tK, gl_MatrixUseA> nativeInputs[cmsM];
             [[unroll]] for (uint m = 0; m < cmsM; m++)
@@ -454,7 +508,7 @@ void cooperativeGemm()
                 const uint c = m * cmsN + a;
                 coopmat<float16_t, gl_ScopeSubgroup, tM, tN, gl_MatrixUseAccumulator> nativeOut =
                     coopmat<float16_t, gl_ScopeSubgroup, tM, tN, gl_MatrixUseAccumulator>(nativeC[c]);
-                if (outM + tM <= rows)
+                if (outM + tM <= M)
                     coopMatStore(nativeOut, bufferO_f16, outM * matrixN() + nativeN + a * tN,
                                  matrixN(), gl_CooperativeMatrixLayoutRowMajor);
                 else
@@ -465,7 +519,7 @@ void cooperativeGemm()
                     {
                         const uint row = e / tN;
                         const uint col = e % tN;
-                        if (outM + row < rows)
+                        if (outM + row < M)
                         {
                             const f16vec2 values = inputLds[nativeStage + e / 2u];
                             bufferO_f16[(outM + row) * matrixN() + nativeN + a * tN + col] =
@@ -487,14 +541,14 @@ void cooperativeGemm()
 
     const uint numKb     = (matrixK() + tK - 1u) / tK;
     const uint fragSlots = tN * tK / 2u;
-    const uint n0a       = nTile * wgN + sg_n * sgN;
+    const uint n0        = nTile * wgN + sg_n * sgN;   // this subgroup's first output along N (global)
     const uint rowSlots  = tK / 2u;
 
-    if (fragmentWeights && aligned == 1u && (wpPipe & 1u) != 0u)
+    if (fragmentWeights && aligned == 1u && (schedule & SCHEDULE_PREFETCH) != 0u)
     {
         loadPackedBlock(startK, true);
         [[unroll]] for (uint l = 0; l < IPASS; l++)
-            iNext[l] = I_read(pos_b, loadr, loadc + l * loadstride, mTile * wgM + loadc + l * loadstride);
+            iNext[l] = readInputPack(pos_b, loadr, loadc + l * loadstride, mTile * wgM + loadc + l * loadstride);
         for (uint block = startK; block < endK; block += 2u * wgK)
         {
             stepPackedBlock(block, endK, 0u);
@@ -502,12 +556,11 @@ void cooperativeGemm()
             stepPackedBlock(block + wgK, endK, 1u);
         }
     }
-    else if (fragmentWeights && aligned == 1u && (wpPipe & 8u) != 0u)
+    else if (fragmentWeights && aligned == 1u && (schedule & SCHEDULE_INPUT_STREAM) != 0u)
     {
-        const uint SL    = wgK / tK;
         uint aOff[cmsN];
-        [[unroll]] for (uint a = 0; a < cmsN; a++) aOff[a] = ((n0a + a * tN) / tN * numKb) * fragSlots;
-        const bool cursorInput = (wpPipe & 4096u) != 0u;
+        [[unroll]] for (uint a = 0; a < cmsN; a++) aOff[a] = ((n0 + a * tN) / tN * numKb) * fragSlots;
+        const bool cursorInput = (schedule & SCHEDULE_ROW_CURSOR) != 0u;
         uint iCursor = pos_b + loadc * (matrixK() / LOAD_VEC) + loadr;
         uint iIdx[IPASS];
         bool iOk[IPASS];
@@ -515,7 +568,7 @@ void cooperativeGemm()
             [[unroll]] for (uint l = 0; l < IPASS; l++)
             {
                 iIdx[l] = pos_b + (loadc + l * loadstride) * (matrixK() / LOAD_VEC) + loadr;
-                iOk[l]  = robustBufferAccess != 0 || mTile * wgM + loadc + l * loadstride < rows;
+                iOk[l]  = robustBufferAccess != 0 || mTile * wgM + loadc + l * loadstride < M;
             }
         const uint iSt0 = loadc * STRIDE4 + loadr;
         uint bBase[cmsM];
@@ -528,7 +581,7 @@ void cooperativeGemm()
             [[unroll]] for (uint l = 0; l < IPASS; l++)
             {
                 const bool validInput = cursorInput
-                    ? (robustBufferAccess != 0u || mTile * wgM + loadc + l * loadstride < rows)
+                    ? (robustBufferAccess != 0u || mTile * wgM + loadc + l * loadstride < M)
                     : iOk[l];
                 const uint inputIndex = cursorInput ? iCursor + l * loadstride * (matrixK() / LOAD_VEC) : iIdx[l];
                 const f16mat2x4 v = validInput ? readI8(inputIndex) : f16mat2x4(0.0);
@@ -539,7 +592,7 @@ void cooperativeGemm()
             if (cursorInput) iCursor += wgK / LOAD_VEC;
             barrier();
             const uint kb0 = block / tK;
-            [[unroll]] for (uint sl = 0; sl < SL; sl++)
+            [[unroll]] for (uint sl = 0; sl < SLICES; sl++)
             {
                 if (sl != 0u)
                     [[unroll]] for (uint a = 0; a < cmsN; a++)
@@ -557,7 +610,7 @@ void cooperativeGemm()
 
             if (block + wgK < endK)
                 [[unroll]] for (uint a = 0; a < cmsN; a++)
-                    coopMatLoad(ca[a], bufferWp, aOff[a] + (kb0 + SL) * fragSlots, rowSlots, gl_CooperativeMatrixLayoutRowMajor);
+                    coopMatLoad(ca[a], bufferWp, aOff[a] + (kb0 + SLICES) * fragSlots, rowSlots, gl_CooperativeMatrixLayoutRowMajor);
             barrier();
         }
     }
@@ -573,7 +626,7 @@ void cooperativeGemm()
             else
             {
                 [[unroll]] for (uint a = 0; a < cmsN; a++)
-                    coopMatLoad(ca[a], bufferWp, ((n0a + a * tN) / tN * numKb + block / tK) * fragSlots,
+                    coopMatLoad(ca[a], bufferWp, ((n0 + a * tN) / tN * numKb + block / tK) * fragSlots,
                                 rowSlots, gl_CooperativeMatrixLayoutRowMajor);
             }
 
@@ -592,7 +645,7 @@ void cooperativeGemm()
                     if (fragmentWeights)
                     {
                         if (i != 0u)
-                            coopMatLoad(ca[a], bufferWp, ((n0a + a * tN) / tN * numKb + (block + i) / tK) * fragSlots,
+                            coopMatLoad(ca[a], bufferWp, ((n0 + a * tN) / tN * numKb + (block + i) / tK) * fragSlots,
                                         rowSlots, gl_CooperativeMatrixLayoutRowMajor);
                     }
                     else
@@ -643,9 +696,8 @@ void cooperativeGemm()
                 sums_f16[i][e] = clamp(sums_f16[i][e], -FP16_MAX, FP16_MAX);
     }
 
-    const uint n0   = nTile * wgN + sg_n * sgN;   // this subgroup's first output along N (global)
     const uint m0   = mTile * wgM + sg_m * sgM;   // this subgroup's first output along M (global)
-    const uint zOff = gl_WorkGroupID.z * rows * matrixN();
+    const uint zOff = gl_WorkGroupID.z * M * matrixN();
 
     const bool oAligned = (typeO == DTYPE_F32) ? (matrixN() % 4u == 0u && tN % 4u == 0u)
                                         : (matrixN() % 8u == 0u && tN % 8u == 0u);
@@ -664,11 +716,11 @@ void cooperativeGemm()
         {
             const uint n = n0 + a * tN;
             const uint m = m0 + b * tM;
-            const bool inBounds = n + tN <= matrixN() && m + tM <= rows;
+            const bool inBounds = n + tN <= matrixN() && m + tM <= M;
 
-            if (oAligned && inBounds && (fuseEpi == 0u || epiDirect))
+            if (oAligned && inBounds && (fused == 0u || epiDirect))
             {
-                if (fuseEpi != 0u)
+                if (fused != 0u)
                 {
                     accT32 v;
                     if (accType == DTYPE_F32) v = sums_f32[b * cmsN + a];
@@ -715,7 +767,7 @@ void cooperativeGemm()
                     coopMatStore(v, bufferO_f16, zOff + m * matrixN() + n, matrixN(), gl_CooperativeMatrixLayoutColumnMajor);
                 }
             }
-            else if (n < matrixN() && m < rows)
+            else if (n < matrixN() && m < M)
             {
                 if (accType == DTYPE_F32)
                     coopMatStore(sums_f32[b * cmsN + a], cmStage, stageBase, tN, gl_CooperativeMatrixLayoutColumnMajor);
@@ -735,7 +787,7 @@ void cooperativeGemm()
                 else
                 {
                     [[unroll]] for (uint c = 0; c < tM; c += storeStride)
-                        if (m + c + storeC < rows && n + storeR < matrixN())
+                        if (m + c + storeC < M && n + storeR < matrixN())
                         {
                             const uint oi = zOff + (m + c + storeC) * matrixN() + n + storeR;
                             writeO(oi, epi(oi, cmStage[stageBase + (c + storeC) * tN + storeR]));
@@ -749,10 +801,10 @@ void cooperativeGemm()
 }
 
 // GemmSpatiallyLocalTilePartitioner: GroupNum=8, M01=4.
-uvec2 blockTile(uint rows, uint columns, uint tileRows, uint tileColumns)
+uvec2 blockTile(uint sizeM, uint sizeN, uint tileM, uint tileN)
 {
-    uint mTiles = (rows + tileRows - 1u) / tileRows;
-    uint nTiles = (columns + tileColumns - 1u) / tileColumns;
+    uint mTiles = (sizeM + tileM - 1u) / tileM;
+    uint nTiles = (sizeN + tileN - 1u) / tileN;
     uint id = gl_WorkGroupID.y * nTiles + gl_WorkGroupID.x;
     if (mTiles == 1u) return uvec2(0u, id);
     if (nTiles == 1u) return uvec2(id, 0u);
@@ -768,7 +820,7 @@ uvec2 blockTile(uint rows, uint columns, uint tileRows, uint tileColumns)
     return uvec2(local % height + (m / 4u) * 4u, local / height);
 }
 
-bool peelKTail() { return laneK % 16u == 0u && laneK % wgK != 0u && laneSplit >= 4u * wgK; }
+bool peelKTail() { return specK % 16u == 0u && specK % wgK != 0u && specSplit >= 4u * wgK; }
 uint spatialWave() { return gl_SubgroupID % (wgSize / 32u); }
 
 uint ldsIndex(uint stage, uint row, uint kPack)
@@ -779,19 +831,19 @@ uint ldsIndex(uint stage, uint row, uint kPack)
 f16mat2x4 readI8(uint row, uint k, uint endK, uint vectorIndex, bool validK)
 {
     f16mat2x4 value = f16mat2x4(0.0hf);
-    if (laneK % 8u == 0u) return (robustBufferAccess != 0u || laneM % wgM == 0u || row < laneM) && validK ? bufferI_8f16[vectorIndex] : value;
-    if (laneM % wgM != 0u && row >= laneM) return value;
-    if (laneK % 4u == 0u)
+    if (specK % 8u == 0u) return (robustBufferAccess != 0u || specM % wgM == 0u || row < specM) && validK ? bufferI_8f16[vectorIndex] : value;
+    if (specM % wgM != 0u && row >= specM) return value;
+    if (specK % 4u == 0u)
     {
         [[unroll]] for (uint h = 0; h < 2u; ++h)
-            if (k + h * 4u < endK) value[h] = bufferI_4f16[(row * laneK + k) / 4u + h];
+            if (k + h * 4u < endK) value[h] = bufferI_4f16[(row * specK + k) / 4u + h];
     }
-    else if (laneK % 2u == 0u)
+    else if (specK % 2u == 0u)
     {
         [[unroll]] for (uint h = 0; h < 4u; ++h)
             if (k + h * 2u < endK)
             {
-                f16vec2 pair = bufferI_2f16[(row * laneK + k) / 2u + h];
+                f16vec2 pair = bufferI_2f16[(row * specK + k) / 2u + h];
                 value[h / 2u][(h % 2u) * 2u] = pair.x;
                 value[h / 2u][(h % 2u) * 2u + 1u] = pair.y;
             }
@@ -799,16 +851,19 @@ f16mat2x4 readI8(uint row, uint k, uint endK, uint vectorIndex, bool validK)
     else
     {
         [[unroll]] for (uint e = 0; e < 8u; ++e)
-            if (k + e < endK) value[e / 4u][e % 4u] = bufferI_f16[row * laneK + k + e];
+            if (k + e < endK) value[e / 4u][e % 4u] = bufferI_f16[row * specK + k + e];
     }
     return value;
 }
 
+// The lane schedule. A is the activation I and B the weight W, the reverse of
+// cooperativeGemm: globalA / globalB read a k-block's operands from the
+// buffers, storeA stages I in shared memory, fragmentA builds one I fragment.
 void globalA(uint block, uint endK, out f16mat2x4 values[activationLoads])
 {
     uint k = block + (gl_LocalInvocationIndex % packs) * 8u;
     uint firstRow = outputTile.x * wgM + gl_LocalInvocationIndex / packs;
-    uint rowStride = laneK / 8u;
+    uint rowStride = specK / 8u;
     uint base = firstRow * rowStride + k / 8u;
     [[unroll]] for (uint i = 0; i < activationLoads; ++i)
     {
@@ -841,7 +896,7 @@ matA fragmentA(uint stage, uint fragment, uint block, uint endK)
         if (stages == 0u)
         {
             uint m = outputTile.x * wgM + row, k = block + offsetK * 8u;
-            f16mat2x4 v = readI8(m, k, endK, m * (laneK / 8u) + k / 8u, fullKTiles || (peelKTail() && endK == fullBlockEnd) || k < endK);
+            f16mat2x4 v = readI8(m, k, endK, m * (specK / 8u) + k / 8u, fullKTiles || (peelKTail() && endK == fullBlockEnd) || k < endK);
             lo = v[0];
             hi = v[1];
         }
@@ -867,31 +922,31 @@ void globalB(uint block, uint endK, out matB values[weightFragments])
     uint fragmentN = outputTile.y * wavesN + spatialWave() % wavesN;
     uint group32 = cmsN == 2u ? fragmentN : fragmentN / 2u;
     // A partial last group of 16 columns needs consecutive channels.
-    bool consecutive = cmsN == 1u && wgN == 16u && laneN % 32u != 0u;
+    bool consecutive = cmsN == 1u && wgN == 16u && specN % 32u != 0u;
     uint packedN = consecutive ? fragmentN % 2u * 8u + channelInTile / 2u : channelInTile;
     [[unroll]] for (uint n = 0; n < cmsN; ++n)
         [[unroll]] for (uint k = 0; k < SLICES; ++k)
         {
             uint repeatN = cmsN == 2u ? n : (consecutive ? channelInTile % 2u : fragmentN % 2u);
-            uint fragment = ((group32 / 4u * 2u + repeatN) * 4u + group32 % 4u) * ((laneK + 15u) / 16u) + block / 16u + k;
+            uint fragment = ((group32 / 4u * 2u + repeatN) * 4u + group32 % 4u) * ((specK + 15u) / 16u) + block / 16u + k;
             matB result;
             [[unroll]] for (uint halfTile = 0; halfTile < result.length() / 8u; ++halfTile)
             {
                 uint lane = !consecutive && result.length() == 8 ? gl_SubgroupInvocationID : (result.length() == 16 ? halfTile : gl_SubgroupInvocationID / 16u) * 16u + packedN;
                 bool valid = fullKTiles || (peelKTail() && endK == fullBlockEnd) || block + k * 16u < endK;
                 f16mat2x4 value = f16mat2x4(0.0hf);
-                if (weightLayout == 2u)
+                if (weightLayout == LAYOUT_PERMUTE_N)
                 {
                     if (valid) value = bufferW_8f16[fragment * 32u + lane];
                 }
                 else
                 {
-                    uint nb = fragment / ((laneK + 15u) / 16u);
-                    uint kb = fragment % ((laneK + 15u) / 16u);
+                    uint nb = fragment / ((specK + 15u) / 16u);
+                    uint kb = fragment % ((specK + 15u) / 16u);
                     uint channel = (nb / 8u) * 128u + (nb % 4u) * 32u + (lane % 16u) * 2u + (nb / 4u) % 2u;
                     uint kOffset = kb * 16u + (lane / 16u) * 8u;
-                    if (valid && channel < laneN && kOffset < laneK)
-                        value = bufferW_8f16[channel * (laneK / 8u) + kOffset / 8u];
+                    if (valid && channel < specN && kOffset < specK)
+                        value = bufferW_8f16[channel * (specK / 8u) + kOffset / 8u];
                 }
                 [[unroll]] for (uint e = 0; e < 4; ++e)
                 {
@@ -934,16 +989,16 @@ void computeBlock(uint block, uint endK, inout accT32 c[accumulators])
 
 void laneGemm()
 {
-    if (tileOrder == 1u) outputTile = gl_WorkGroupID.yx;
-    else if (tileOrder == 2u)
+    if (tileOrder == ORDER_N_FIRST) outputTile = gl_WorkGroupID.yx;
+    else if (tileOrder == ORDER_M_FIRST)
     {
-        uint mTiles = (laneM + wgM - 1u) / wgM;
-        uint id = gl_WorkGroupID.y * ((laneN + wgN - 1u) / wgN) + gl_WorkGroupID.x;
+        uint mTiles = (specM + wgM - 1u) / wgM;
+        uint id = gl_WorkGroupID.y * ((specN + wgN - 1u) / wgN) + gl_WorkGroupID.x;
         outputTile = uvec2(id % mTiles, id / mTiles);
     }
-    else outputTile = blockTile(laneM, laneN, wgM, wgN);
-    uint startK = laneK == laneSplit ? 0u : gl_WorkGroupID.z * laneSplit;
-    uint endK = min(laneK, startK + laneSplit);
+    else outputTile = blockTile(specM, specN, wgM, wgN);
+    uint startK = specK == specSplit ? 0u : gl_WorkGroupID.z * specSplit;
+    uint endK = min(specK, startK + specSplit);
     f16mat2x4 aGlobal[activationLoads];
     matB b0[weightFragments];
     matB b1[weightFragments];
@@ -1017,37 +1072,38 @@ void laneGemm()
     }
 
     matA operand;
-    // PermuteN restores adjacent output channels from the two laneN cmsM.
+    // PermuteN keeps the even and the odd channels of a 32-channel group in
+    // separate fragments; the store puts them back side by side.
     uint lane = gl_SubgroupInvocationID;
     uint fragmentN = outputTile.y * wavesN + spatialWave() % wavesN;
     uint n = fragmentN * sgN + (lane % 16u) * cmsN;
-    if (cmsN == 1u && (wgN >= 32u || laneN % 32u == 0u))
+    if (cmsN == 1u && (wgN >= 32u || specN % 32u == 0u))
         n = fragmentN / 2u * 32u + (lane % 16u) * 2u + fragmentN % 2u;
-    if (laneN % wgN != 0u && n >= laneN) return;
+    if (specN % wgN != 0u && n >= specN) return;
     [[unroll]] for (uint m = 0; m < cmsM; ++m)
         [[unroll]] for (uint e = 0; e < 8u; ++e)
         {
             uint row = outputTile.x * wgM + (spatialWave() / wavesN) * sgM + m * 16u + (operand.length() == 16 ? lane / 16u + e * 2u : (lane / 16u) * 8u + e);
-            if (laneM % wgM != 0u && row >= laneM) continue;
+            if (specM % wgM != 0u && row >= specM) continue;
             f16vec2 value = f16vec2(0.0hf);
             [[unroll]] for (uint col = 0; col < cmsN; ++col)
             {
                 uint i = m * cmsN + col;
                 value[col] = float16_t(c[i][e]);
             }
-            uint index = ((laneK == laneSplit ? 0u : gl_WorkGroupID.z * laneM) + row) * laneN + n;
-            if (fuseEpi != 0u)
+            uint index = ((specK == specSplit ? 0u : gl_WorkGroupID.z * specM) + row) * specN + n;
+            if (fused != 0u)
             {
                 // Match the FP16 partial stored by the separate reduce pass.
                 [[unroll]] for (uint col = 0; col < cmsN; ++col)
                     value[col] = value[col] + bufferR_f16[index + col];
             }
             if (cmsN == 1u) bufferO_f16[index] = value.x;
-            else if (laneN % 2u == 0u) bufferO_2f16[index / 2u] = value;
+            else if (specN % 2u == 0u) bufferO_2f16[index / 2u] = value;
             else
             {
                 bufferO_f16[index] = value.x;
-                if (n + 1u < laneN) bufferO_f16[index + 1u] = value.y;
+                if (n + 1u < specN) bufferO_f16[index + 1u] = value.y;
             }
         }
 }
