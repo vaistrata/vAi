@@ -53,6 +53,7 @@ nav:
       - YOLOX: ko/04-models/yolox.md
       - GPT-2: ko/04-models/gpt2.md
       - Llama 3: ko/04-models/llama3.md
+      - Gemma 3: ko/04-models/gemma3.md
   - 제공 노드들: ko/06-nodes.md
   - 기여하기:
       - ko/contributing/README.md               # 기여 절차와 자동 검사
@@ -134,6 +135,7 @@ plugins:
                 - YOLOX: en/04-models/yolox.md
                 - GPT-2: en/04-models/gpt2.md
                 - Llama 3: en/04-models/llama3.md
+                - Gemma 3: en/04-models/gemma3.md
             - Built-in nodes: en/06-nodes.md
             - Contributing:
                 - en/contributing/README.md
