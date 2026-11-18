@@ -98,13 +98,15 @@ namespace vai::node {
     group's heads, subgroup-broadcast products.
   - naive (attention): the unconditional fallback — unfamiliar
     devices degrade instead of crashing. See supportsFlashAttention().
-  - Xe3 on the fork's 2D block loads (ANV_CMAT_BLOCK2D=1), fp16 throughout:
-    the two products run on the Linear kernel, S = Q K^T and O = P V
-    (linear-cm-xe3), with attention-softmax-xe3 between them, after
-    attention-prep-xe3 appends to the cache and lays V out. With a cache: one
-    sequence and one KV head, no ring. Without one: any, a KV head a product
-    of one batched dispatch. Smaller grids (under 64 rows a KV head) and
-    everything else on Xe3 keep the kernels below. See prepare().
+  - Xe3 on the fork's 2D block loads (ANV_CMAT_BLOCK2D=1), fp16 throughout.
+    Grids of 256 8-row tiles or more run in one pass (attention-cm-xe3):
+    Q K^T, the online softmax and P V stay in a subgroup's registers, after
+    attention-append-xe3 puts the new K / V in the cache. Smaller grids run
+    three passes: the two products on the Linear kernel (linear-cm-xe3) with
+    attention-softmax-xe3 between them, after attention-prep-xe3 appends and
+    lays V out. With a cache: one sequence and one KV head, no ring. Without
+    one: any. Under 64 rows a KV head, and everything else on Xe3, keep the
+    kernels below. See prepare().
 
   Intel's coopmat tiles (Xe2, and Xe3 for the grids the Intel kernel leaves)
   run attention-fa-cm-intel, the kernel Intel was verified with, under the
@@ -297,6 +299,11 @@ private:
     uint32_t xe3KeyRows_ = 0;    // xe3Keys_ up to whole 16s: key rows of P and V
     uint32_t xe3Dh16_ = 0;       // headDim up to whole 16s (Q is padded to it when they differ)
     uint32_t xe3PerChunk_ = 0;   // heads (one group) or groups a chunk of S / P holds
+    // One pass (attention-cm-xe3) in place of the three, where the rows fill the GPU.
+    bool xe3OnePass_ = false;
+    uint32_t xe3Subgroups_ = 0, xe3KeyTiles_ = 0;   // subgroups a workgroup, 16-key tiles a block
+    eva::ComputePipeline pipeXe3OnePass_, pipeXe3Append_;
+    eva::DescriptorSet descSetXe3OnePass_, descSetXe3Append_;
     Xe3Pick xe3QkPick_ = {}, xe3PvPick_ = {};
     eva::ComputePipeline pipeXe3Prep_, pipeXe3Qk_, pipeXe3Softmax_, pipeXe3Pv_;
     eva::DescriptorSet descSetXe3Prep_, descSetXe3Softmax_;
@@ -1082,6 +1089,36 @@ inline void Attention::prepare()
     if (xe3_)
     {
         const uint32_t Hq = config_.numQHeads, groups = B * Hkv, groupRows = groupSize_ * Tq;
+
+        // One pass (attention-cm-xe3) where the 8-row tiles fill the GPU by themselves: a subgroup sweeps
+        // every key of its rows in registers. Smaller grids keep the three passes below.
+        xe3OnePass_ = groups * CEIL_DIV(groupRows, 8u) >= 256u;
+        if (xe3OnePass_)
+        {
+            // A subgroup holds the O tiles (Dh / 16) and a block's S tiles together: 2 key tiles beside
+            // more than 8 O tiles, 4 beside fewer.
+            xe3Subgroups_ = 8;
+            xe3KeyTiles_ = CEIL_DIV(Dh, 16u) > 8u ? 2u : 4u;
+            // clang-format off
+            pipeXe3OnePass_ = pipelinePool().request("attention-cm-xe3", {
+                eva::constant_id<0>(16u * xe3Subgroups_),      // wgSize
+                eva::constant_id<1>(CEIL_DIV(Dh, 16u)),        // dh steps and O tiles
+                eva::constant_id<2>(xe3KeyTiles_),             // 16-key tiles a block
+                eva::constant_id<3>(uint32_t(caching)),
+                eva::constant_id<SPEC_ID_TYPE_O>(oDtype)
+            }, {
+                .requiredSubgroupSize = 16,
+            });
+            // clang-format on
+            if (!descSetXe3OnePass_)
+                descSetXe3OnePass_ = gVaiDestSetPool(pipeXe3OnePass_.descSetLayout(0));
+            if (caching)
+            {
+                pipeXe3Append_ = pipelinePool().request("attention-append-xe3", {});
+                if (!descSetXe3Append_)
+                    descSetXe3Append_ = gVaiDestSetPool(pipeXe3Append_.descSetLayout(0));
+            }
+        }
         xe3Keys_ = caching ? config_.kvCacheSize : Tkv;
         xe3KeyRows_ = ROUNDUP(xe3Keys_, 16u);
         xe3Dh16_ = ROUNDUP(Dh, 16u);
@@ -1139,12 +1176,13 @@ inline void Attention::prepare()
             descSetXe3Pv_.push_back(gVaiDestSetPool(pipeXe3Pv_.descSetLayout(0)));
         }
 
-        (*this)["xe3Kt"] = padQ ? Tensor({ groups, xe3KeyRows_, xe3Dh16_ }, Dtype::Fp16) : Tensor();
-        (*this)["xe3V"] = Tensor({ groups, xe3KeyRows_, ldv }, Dtype::Fp16);
-        (*this)["xe3S"] = Tensor({ chunkRows, xe3KeyRows_ }, Dtype::Fp32);
-        (*this)["xe3P"] = Tensor({ chunkRows, xe3KeyRows_ }, Dtype::Fp16);
-        (*this)["xe3L"] = Tensor({ chunkRows }, Dtype::Fp32);
-        (*this)["xe3Q"] = padQ ? Tensor({ groups * groupRows, xe3Dh16_ }, Dtype::Fp16) : Tensor();
+        const bool three = !xe3OnePass_;   // the one pass keeps everything in registers
+        (*this)["xe3Kt"] = three && padQ ? Tensor({ groups, xe3KeyRows_, xe3Dh16_ }, Dtype::Fp16) : Tensor();
+        (*this)["xe3V"] = three ? Tensor({ groups, xe3KeyRows_, ldv }, Dtype::Fp16) : Tensor();
+        (*this)["xe3S"] = three ? Tensor({ chunkRows, xe3KeyRows_ }, Dtype::Fp32) : Tensor();
+        (*this)["xe3P"] = three ? Tensor({ chunkRows, xe3KeyRows_ }, Dtype::Fp16) : Tensor();
+        (*this)["xe3L"] = three ? Tensor({ chunkRows }, Dtype::Fp32) : Tensor();
+        (*this)["xe3Q"] = three && padQ ? Tensor({ groups * groupRows, xe3Dh16_ }, Dtype::Fp16) : Tensor();
     }
 
     useFa = !xe3_ && supportsFlashAttention(Dh, device());
@@ -1350,6 +1388,44 @@ inline void Attention::run(eva::CommandBuffer cmdBuff)
     auto K_cache = caching ? (*this)["K_cache"].buffer() : eva::Buffer();
     auto V_cache = caching ? (*this)["V_cache"].buffer() : eva::Buffer();
     auto counter = caching ? kvCacheCounter : eva::Buffer();
+
+    if (xe3_ && xe3OnePass_)
+    {
+        const uint32_t Dh = config_.headDim, groups = B * Hkv, groupRows = groupSize_ * Tq_;
+        const auto computeToCompute = eva::SYNC_SCOPE::COMPUTE_WRITE / eva::SYNC_SCOPE::COMPUTE_READ;
+
+        // The append first: the attention then reads every key from the cache.
+        if (caching && Tkv > 0)
+        {
+            const uint32_t zeroRows = 16u * xe3KeyTiles_;
+            const uint32_t appendConsts[] = { Dh / 4u, Tkv, config_.kvCacheSize, zeroRows };
+            descSetXe3Append_.write({ K, V, K_cache, V_cache, counter });
+            cmdBuff.bindPipeline(pipeXe3Append_)
+                .bindDescSets({ descSetXe3Append_ })
+                .setPushConstants(0, sizeof(appendConsts), appendConsts)
+                .dispatch(CEIL_DIV(Dh / 4u, 16u), Tkv + zeroRows, 1)
+                .barrier(computeToCompute);
+        }
+
+        const uint32_t wgs = CEIL_DIV(groups * CEIL_DIV(groupRows, 8u), xe3Subgroups_);
+        const uint32_t gy = CEIL_DIV(wgs, device().maxComputeWorkGroupCount()[0]), gx = CEIL_DIV(wgs, gy);
+        struct
+        {
+            uint32_t Dh, Hq, groupSize, Tq, Tkv, keyRows, groups;
+            float scale;
+            uint32_t gridX;
+        } consts = {
+            Dh,     config_.numQHeads,           groupSize_, Tq_, Tkv, caching ? config_.kvCacheSize : Tkv,
+            groups, 1.0f / std::sqrt(float(Dh)), gx
+        };
+        descSetXe3OnePass_.write({ O, Q, caching ? K_cache : K, caching ? V_cache : V, counter, causalMask });
+        cmdBuff.bindPipeline(pipeXe3OnePass_)
+            .bindDescSets({ descSetXe3OnePass_ })
+            .setPushConstants(0, sizeof(consts), &consts)
+            .dispatch(gx, gy, 1)
+            .barrier(computeToCompute);
+        return;
+    }
 
     if (xe3_)
     {
