@@ -2,10 +2,11 @@
 #==============================================================================
 # Builds the TensorRT Edge-LLM engines the pi0.5 TensorRT bench reads, from the
 # checkpoint in data/ckpts/pi05/lerobot/<size>/, in three steps:
-#   1. exports it to FP16 ONNX with Edge-LLM's exporter, as the pi05_aloha
-#      configuration (pi05_base with the 50-action chunk), into
-#      data/benchmarks/pi05/<size>/trt-onnx/
-#   2. adds the normalization statistics Edge-LLM's guide names for it
+#   1. exports it to FP16 ONNX with Edge-LLM's exporter, as the openpi
+#      configuration Edge-LLM's pi0.5 guide pairs with it (libero: pi05_libero,
+#      the bench's workload; 3B: pi05_aloha, pi05_base with the 50-action chunk),
+#      into data/benchmarks/pi05/<size>/trt-onnx/
+#   2. adds the normalization statistics the guide names for that configuration
 #   3. builds the engines on this GPU into data/benchmarks/pi05/<size>/engines/
 #
 # A finished export is reused, so a failed build does not repeat it; an
@@ -16,7 +17,7 @@
 # environment from benchmarks/SETUP.md (TRT_EXPORT_VENV for another one).
 # Set TRT_PACKAGE_DIR for an extracted TensorRT SDK, as for the setup script.
 #
-#   ./benchmarks/pi05/scripts/build-trt-engines.sh                  # --size 3B
+#   ./benchmarks/pi05/scripts/build-trt-engines.sh                  # --size libero
 #   ./benchmarks/pi05/scripts/build-trt-engines.sh --size <size>
 #==============================================================================
 set -euo pipefail
@@ -24,23 +25,18 @@ set -euo pipefail
 # The release setup-trt-edge-llm.sh pins; the exporter must be the same one.
 VERSION=0.11.1
 
-# Edge-LLM's configuration for pi05_base with the 50-action chunk, and the
-# normalization statistics its pi0.5 guide names for that configuration.
-POLICY_CONFIG=pi05_aloha
-NORM_STATS_URL=https://storage.googleapis.com/openpi-assets/checkpoints/pi05_base/assets/trossen/norm_stats.json
-
 [ -n "${HOME:-}" ] || { echo "HOME is not set" >&2; exit 2; }
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 EDGELLM="${TensorRTEdgeLLM_ROOT:-${XDG_CACHE_HOME:-$HOME/.cache}/vai/TensorRT-Edge-LLM}"
 VENV="${TRT_EXPORT_VENV:-$ROOT/.venv-trt-export}"
-SIZE=3B
+SIZE=libero
 
 usage() {
     sed -n '3,/^#===/p' "$0" | sed 's/^#//'
     cat <<USAGE
 
 Options:
-  --size NAME   checkpoint size (default: $SIZE), one of: 3B
+  --size NAME   checkpoint folder (default: $SIZE), one of: libero 3B
   -h, --help    this text
 USAGE
 }
@@ -52,9 +48,17 @@ while [ $# -gt 0 ]; do
         *) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
     esac
 done
+# Edge-LLM's openpi configuration for the checkpoint, and the normalization
+# statistics its pi0.5 guide names for that configuration.
+OPENPI_ASSETS=https://storage.googleapis.com/openpi-assets/checkpoints
 case "$SIZE" in
-    3B) ;;
-    *) echo "unknown --size '$SIZE', one of: 3B" >&2; exit 2 ;;
+    libero)
+        POLICY_CONFIG=pi05_libero
+        NORM_STATS_URL=$OPENPI_ASSETS/pi05_libero/assets/physical-intelligence/libero/norm_stats.json ;;
+    3B)
+        POLICY_CONFIG=pi05_aloha
+        NORM_STATS_URL=$OPENPI_ASSETS/pi05_base/assets/trossen/norm_stats.json ;;
+    *) echo "unknown --size '$SIZE', one of: libero 3B" >&2; exit 2 ;;
 esac
 
 CHECKPOINT="$ROOT/data/ckpts/pi05/lerobot/$SIZE"

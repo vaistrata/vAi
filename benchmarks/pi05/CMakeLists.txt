@@ -5,7 +5,7 @@ project(bench-pi05)
 # The model owns its definition (net.h) and its checkpoint loader (lerobot-weights.h,
 # which resolves data/ckpts/pi05/lerobot/...); the comparison benches take only its
 # prompt and noise helpers (processing.h), so every framework gets the same input.
-set(MODEL_DIR ${CMAKE_SOURCE_DIR}/models/production/pi05)
+set(MODEL_DIR ${CMAKE_SOURCE_DIR}/models/experimental/pi05)
 
 # vla.cpp and TensorRT Edge-LLM ship no CMake package. Their setup scripts link the
 # install at <cache>/vai/vla.cpp and <cache>/vai/TensorRT-Edge-LLM, used here unless
@@ -122,8 +122,8 @@ unset(_vlaPrefix)
 # MIGraphX
 ################################################################################
 # Optional, Linux only. setup-migraphx.sh registers its install in CMake's package
-# registry; ROCm's own folder is searched first, so where ROCm carries a MIGraphX of its
-# own, name the pinned one with -Dmigraphx_DIR.
+# registry. ROCm's own folder is searched first, so the pinned release is asked for by
+# version: a MIGraphX of another release that ROCm carries is passed over for it.
 if(DEFINED ENV{ROCM_PATH})
     list(APPEND CMAKE_PREFIX_PATH "$ENV{ROCM_PATH}")
 elseif(EXISTS "/opt/rocm")
@@ -133,8 +133,22 @@ endif()
 set(MIGRAPHX_GPU_HIP_FLAGS "-Wno-gcc-install-dir-libstdcxx" CACHE STRING
     "Default native MIGraphX HIP compiler flags")
 
-find_package(migraphx QUIET CONFIG)
+# The pinned release first; else any, for the warning below to name.
+find_package(migraphx 2.18...<2.19 QUIET CONFIG)
+if(NOT migraphx_FOUND)
+    find_package(migraphx QUIET CONFIG)
+endif()
 find_package(hip QUIET CONFIG)
+
+# The GEMM backend the bench compiles its graphs with: mlir fuses the dots into MLIR
+# kernels; hipblaslt lowers every dot to hipBLASLt with MLIR off. Either way a dot left
+# outside MLIR goes to hipBLASLt. mlir is the faster on the bundle export-onnx.py writes
+# by default, with its constants folded; hipblaslt on one exported with --no-constant-folding.
+set(MIGRAPHX_GEMM_PROVIDER "mlir" CACHE STRING "GEMM backend of the MIGraphX bench: mlir or hipblaslt")
+set_property(CACHE MIGRAPHX_GEMM_PROVIDER PROPERTY STRINGS mlir hipblaslt)
+if(NOT MIGRAPHX_GEMM_PROVIDER MATCHES "^(hipblaslt|mlir)$")
+    message(FATAL_ERROR "[vAi-bench] MIGRAPHX_GEMM_PROVIDER must be mlir or hipblaslt, not '${MIGRAPHX_GEMM_PROVIDER}'")
+endif()
 
 set(_migraphxFound OFF)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND TARGET migraphx::c AND (TARGET hip::amdhip64 OR TARGET hip::host))
@@ -163,24 +177,49 @@ if(_migraphxFound AND NOT _migraphxVersion STREQUAL "2.18")
     # The bench reads the graphs of the pinned release's export and binds its output
     # names, and its numbers are recorded against that release.
     message(WARNING "[vAi-bench] MIGraphX ${_migraphxVersion} at ${migraphx_DIR} != pinned 2.18 (rocm-10.1): "
-                    "skipping bench-pi05-migraphx. Run benchmarks/scripts/setup-migraphx.sh "
-                    "and point migraphx_DIR at its install.")
+                    "skipping bench-pi05-migraphx. Run benchmarks/scripts/setup-migraphx.sh, "
+                    "or point migraphx_DIR at an install of 2.18.")
 elseif(_migraphxFound)
-    message(STATUS "[vAi-bench] MIGraphX found: ${migraphx_DIR} (${_migraphxVersion})")
+    message(STATUS "[vAi-bench] MIGraphX found: ${migraphx_DIR} (${_migraphxVersion}), GEMM through ${MIGRAPHX_GEMM_PROVIDER}")
 
     add_executable(bench-pi05-migraphx
         migraphx/bench.cpp
     )
     bench_pi05_configure_target(bench-pi05-migraphx)
     target_link_libraries(bench-pi05-migraphx PRIVATE migraphx::c)
-    if(TARGET hip::amdhip64)
+    # setup-migraphx.sh puts the ROCm runtime MIGraphX was built for next to libmigraphx_c.
+    # The bench then links that HIP rather than the system's, so its RUNPATH names no
+    # system ROCm folder and every ROCm library in the process comes from one release;
+    # the system HIP provides the headers.
+    get_filename_component(_migraphxLibDir "${migraphx_DIR}/../.." ABSOLUTE)
+    if(EXISTS "${_migraphxLibDir}/libamdhip64.so.7" AND TARGET hip::amdhip64)
+        # The system HIP's include folder also holds that ROCm's own MIGraphX headers. Linked
+        # after migraphx::c, its folder comes after MIGraphX's on the command line, so
+        # <migraphx/...> resolves to the pinned release.
+        add_library(bench-pi05-hip-headers INTERFACE)
+        get_target_property(_hipIncludes hip::amdhip64 INTERFACE_INCLUDE_DIRECTORIES)
+        get_target_property(_hipDefinitions hip::amdhip64 INTERFACE_COMPILE_DEFINITIONS)
+        if(_hipIncludes)
+            target_include_directories(bench-pi05-hip-headers SYSTEM INTERFACE ${_hipIncludes})
+        endif()
+        if(_hipDefinitions)
+            target_compile_definitions(bench-pi05-hip-headers INTERFACE ${_hipDefinitions})
+        endif()
+        target_link_libraries(bench-pi05-migraphx PRIVATE
+            bench-pi05-hip-headers "${_migraphxLibDir}/libamdhip64.so.7")
+        message(STATUS "[vAi-bench] bench-pi05-migraphx runs on the ROCm runtime in ${_migraphxLibDir}")
+        unset(_hipIncludes)
+        unset(_hipDefinitions)
+    elseif(TARGET hip::amdhip64)
         target_link_libraries(bench-pi05-migraphx PRIVATE hip::amdhip64)
     else()
         target_link_libraries(bench-pi05-migraphx PRIVATE hip::host)
     endif()
+    unset(_migraphxLibDir)
     target_compile_definitions(bench-pi05-migraphx PRIVATE
         __HIP_PLATFORM_AMD__=1
         MIGRAPHX_GPU_HIP_FLAGS_DEFAULT="${MIGRAPHX_GPU_HIP_FLAGS}"
+        MIGRAPHX_GEMM_PROVIDER_DEFAULT="${MIGRAPHX_GEMM_PROVIDER}"
     )
 else()
     message(STATUS "[vAi-bench] MIGraphX or HIP not found on Linux, skipping bench-pi05-migraphx. "

@@ -138,6 +138,9 @@ if(VAI_BUILD_BENCH)
     add_subdirectory(benchmarks/llama3)
     add_subdirectory(benchmarks/gemma3)
 
+    # VLA benchmarks
+    add_subdirectory(benchmarks/pi05)
+
     message(STATUS "[vAi] Benchmark projects build configuration completed.")
 endif()
 

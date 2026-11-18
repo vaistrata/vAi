@@ -59,6 +59,13 @@ struct ModelConfig
             .variant = "3B",
         };
     }
+
+    static constexpr ModelConfig _LIBERO()
+    {
+        return {
+            .variant = "libero",
+        };
+    }
 };
 
 

@@ -8,11 +8,13 @@
 //     runtime.getConfig();                 // actionHorizon, actionDim, ...
 //     runtime.setNumDenoiseSteps(10);
 //     runtime.setInitialNoise(noise);
-//     policy.validateViewCount(3);
+//     policy.validateViewCount(2);
 //     auto chunk = policy.inferTensors(images, tokens, 1);   // chunk.normalizedActions
 //
-// The bundle is the v2 split export of scripts/export-onnx.py: prefill.fp32.onnx, run once
-// per prediction to fill the K/V cache, and step.fp32.onnx, one reusable Euler step.
+// The bundle is the v5 split export of scripts/export-onnx.py: prefill.fp16.onnx, run once
+// per prediction to fill the K/V cache, and step.fp16.onnx, one reusable Euler step. Both
+// are FP16 graphs (weights, activations, the K/V cache between them) with FP32 images,
+// timestep and x. Its config.txt names the camera views, steps and chunk it was exported with.
 
 #include <migraphx/migraphx.hpp>
 #include <hip/hip_runtime_api.h>
@@ -24,6 +26,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <optional>
@@ -34,6 +37,11 @@
 
 #ifndef MIGRAPHX_GPU_HIP_FLAGS_DEFAULT
     #define MIGRAPHX_GPU_HIP_FLAGS_DEFAULT ""
+#endif
+// mlir: dots fused into MLIR kernels. hipblaslt: every dot lowered to hipBLASLt, MLIR off.
+// Either way a dot left outside MLIR goes to hipBLASLt.
+#ifndef MIGRAPHX_GEMM_PROVIDER_DEFAULT
+    #define MIGRAPHX_GEMM_PROVIDER_DEFAULT "mlir"
 #endif
 
 namespace bench::pi05 {
@@ -159,30 +167,15 @@ inline std::vector<std::string> validateContract(
 }
 
 
-inline migraphx::program compileGraph(const std::filesystem::path& path, const char* tag, const std::string& precision)
+inline migraphx::program compileGraph(const std::filesystem::path& path, const char* tag)
 {
-    // Keep external FP32 input/output types, including the shared K/V cache.
+    // The graph is FP16 as exported: no conversion here.
     printf("%s ONNX parsing: starting\n", tag);
     fflush(stdout);
     const double parseStart = nowSec();
     migraphx::onnx_options onnxOptions;
     auto program = migraphx::parse_onnx(path.string().c_str(), onnxOptions);
     printf("%s ONNX parsing: completed in %.1f s\n", tag, nowSec() - parseStart);
-    fflush(stdout);
-    if (precision == "fp16")
-    {
-        printf("%s FP16 conversion: starting (dot/convolution; untimed)\n", tag);
-        fflush(stdout);
-        const double quantizeStart = nowSec();
-        // The exporter represents RoPE frequencies as FP32 Mul, outside this selection.
-        migraphx::quantize_op_names names;
-        names.add("dot");
-        names.add("convolution");
-        migraphx::quantize_fp16(program, names);
-        printf("%s FP16 conversion: completed in %.1f s\n", tag, nowSec() - quantizeStart);
-    }
-    else
-        printf("%s FP16 conversion: skipped (--precision fp32)\n", tag);
     printf("%s GPU compilation: starting (untimed)\n", tag);
     fflush(stdout);
     const double gpuCompileStart = nowSec();
@@ -197,6 +190,7 @@ inline migraphx::program compileGraph(const std::filesystem::path& path, const c
 
 struct BundleConfig
 {
+    int views = 0;
     int steps = 0;
     int horizon = 0;
     int actionDim = 0;
@@ -213,28 +207,46 @@ inline BundleConfig readBundleConfig(const std::filesystem::path& bundle)
     if (!(file >> version))
         throw std::runtime_error(
             "missing pi05 bundle config in " + bundle.string() + "; see benchmarks/SETUP.md, MIGraphX");
-    if (version == 1)
+    if (version >= 1 && version <= 4)
         throw std::runtime_error(
-            "v1 monolithic pi05 bundle is unsupported; re-export with python "
+            "v" + std::to_string(version) +
+            " pi05 bundle (FP32 graph) is unsupported; re-export with python "
             "benchmarks/pi05/scripts/export-onnx.py --output NEW_DIR, then pass NEW_DIR to this benchmark");
-    if (!(file >> config.steps >> config.horizon >> config.actionDim >> config.layers >> config.prefixLength) ||
-        version != 2 || config.steps != 10 || config.horizon != 50 || config.actionDim != 32 || config.layers != 18 ||
-        config.prefixLength <= 3 * 256 || config.prefixLength > 3 * 256 + 200)
+    if (!(file >> config.views >> config.steps >> config.horizon >> config.actionDim >> config.layers >>
+          config.prefixLength) ||
+        version != 5 || config.views < 1 || config.views > 3 || config.steps < 1 || config.horizon < 1 ||
+        config.actionDim != 32 || config.layers != 18 || config.prefixLength <= config.views * 256 ||
+        config.prefixLength > config.views * 256 + 200)
         throw std::runtime_error(
-            "invalid v2 split pi05 bundle in " + bundle.string() + "; see benchmarks/SETUP.md, MIGraphX");
+            "invalid v5 split pi05 bundle in " + bundle.string() + "; see benchmarks/SETUP.md, MIGraphX");
     std::string extra;
     if (file >> extra)
-        throw std::runtime_error("unexpected fields in v2 pi05 bundle config");
+        throw std::runtime_error("unexpected fields in v5 pi05 bundle config");
     return config;
 }
 
 }   // namespace detail
 
 
+// Whether export-onnx.py folded the bundle's constants, from its metadata.json; bundles
+// exported before it recorded this were not folded.
+inline bool bundleConstantsFolded(const std::filesystem::path& bundle)
+{
+    std::ifstream file(bundle / "metadata.json");
+    const std::string text{ std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>() };
+    constexpr std::string_view key = "\"constant_folding\"";
+    const size_t at = text.find(key);
+    if (at == std::string::npos)
+        return false;
+    const size_t value = text.find_first_not_of(" \t\r\n:", at + key.size());
+    return value != std::string::npos && text.compare(value, 4, "true") == 0;
+}
+
+
 // The counterpart of Edge-LLM's runtime config, read from the bundle's config.txt.
 struct Pi05Config
 {
-    int32_t numViews = 3;
+    int32_t numViews = 0;
     int32_t imageChannels = 3;
     int32_t imageSize = 224;
     int32_t actionHorizon = 0;
@@ -242,8 +254,7 @@ struct Pi05Config
     int32_t numLayers = 0;
     int32_t prefixLength = 0;
     int32_t numPromptTokens = 0; // the exported prompt length; prompts must match it exactly
-    int32_t numDenoiseSteps = 0; // the steps the bundle was exported and referenced with
-    std::string precision;
+    int32_t numDenoiseSteps = 0;   // the steps the bundle was exported and referenced with
 };
 
 
@@ -259,18 +270,19 @@ struct ActionChunk
 class Pi05Runtime
 {
 public:
-    Pi05Runtime(const std::filesystem::path& bundle, hipStream_t stream, const std::string& precision)
-        : stream_(stream), bundleConfig_(detail::readBundleConfig(bundle)),
-          prefill_(compileWithFlags(bundle / "prefill.fp32.onnx", "Prefill", precision)),
-          step_(compileWithFlags(bundle / "step.fp32.onnx", "Step", precision))
+    Pi05Runtime(const std::filesystem::path& bundle, hipStream_t stream)
+    : stream_(stream)
+    , bundleConfig_(detail::readBundleConfig(bundle))
+    , prefill_(compileWithFlags(bundle / "prefill.fp16.onnx", "Prefill"))
+    , step_(compileWithFlags(bundle / "step.fp16.onnx", "Step"))
     {
+        config_.numViews = bundleConfig_.views;
         config_.actionHorizon = bundleConfig_.horizon;
         config_.actionDim = bundleConfig_.actionDim;
         config_.numLayers = bundleConfig_.layers;
         config_.prefixLength = bundleConfig_.prefixLength;
         config_.numPromptTokens = bundleConfig_.prefixLength - config_.numViews * 256;
         config_.numDenoiseSteps = bundleConfig_.steps;
-        config_.precision = precision;
 
         bindGraphs();
         setNumDenoiseSteps(config_.numDenoiseSteps);
@@ -294,7 +306,7 @@ public:
         if (steps <= 0)
             throw std::runtime_error("the number of denoise steps must be positive");
         hipCheck(hipStreamSynchronize(stream_), "hipStreamSynchronize");
-        std::vector<float> timesteps(size_t(steps));
+        std::vector<float> timesteps(static_cast<size_t>(steps));
         for (int32_t index = 0; index < steps; ++index)
             timesteps[size_t(index)] = float(1.0 + index * (-1.0 / steps));
         timestepBuffer_ = std::make_unique<DeviceBuffer>(timesteps.size() * sizeof(float));
@@ -380,15 +392,16 @@ public:
     }
 
 private:
-    static migraphx::program compileWithFlags(
-        const std::filesystem::path& path, const char* tag, const std::string& precision)
+    static migraphx::program compileWithFlags(const std::filesystem::path& path, const char* tag)
     {
-        if (precision != "fp16" && precision != "fp32")
-            throw std::runtime_error("precision must be fp16 or fp32");
         const char* flags = MIGRAPHX_GPU_HIP_FLAGS_DEFAULT;
         if (flags[0] && !std::getenv("MIGRAPHX_GPU_HIP_FLAGS"))
             setenv("MIGRAPHX_GPU_HIP_FLAGS", flags, 0);
-        return detail::compileGraph(path, tag, precision);
+        // MIGraphX reads these once, at its first compile; values already in the environment win.
+        const bool mlir = std::string_view(MIGRAPHX_GEMM_PROVIDER_DEFAULT) != "hipblaslt";
+        setenv("MIGRAPHX_DISABLE_MLIR", mlir ? "0" : "1", 0);
+        setenv("MIGRAPHX_SET_GEMM_PROVIDER", "hipblaslt", 0);
+        return detail::compileGraph(path, tag);
     }
 
     size_t actionElements() const { return size_t(config_.actionHorizon) * size_t(config_.actionDim); }
@@ -408,7 +421,7 @@ private:
               size_t(config_.imageSize) });
         const migraphx::shape timestepSpec(migraphx_shape_float_type, { 1 });
         const migraphx::shape cacheMaskSpec(migraphx_shape_bool_type, { 1, prefixLength });
-        const migraphx::shape cacheSpec(migraphx_shape_float_type, { 1, 1, prefixLength, 256 });
+        const migraphx::shape cacheSpec(migraphx_shape_half_type, { 1, 1, prefixLength, 256 });
         const std::map<std::string, migraphx::shape> prefillInputSpecs{
             { "images", *imageSpec_ },
             { "image_masks", migraphx::shape(migraphx_shape_bool_type, { 1, size_t(config_.numViews) }) },
@@ -526,8 +539,8 @@ private:
 class Pi05Policy
 {
 public:
-    Pi05Policy(const std::filesystem::path& bundleDir, hipStream_t stream, const std::string& precision = "fp16")
-        : runtime_(bundleDir, stream, precision)
+    Pi05Policy(const std::filesystem::path& bundleDir, hipStream_t stream)
+    : runtime_(bundleDir, stream)
     {
     }
 

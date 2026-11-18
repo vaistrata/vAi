@@ -1,10 +1,20 @@
 #!/usr/bin/env python3
-"""Export pi05 3B prefill/one-step ONNX and the FP32 reference for the canonical inputs.
+"""Export the MIGraphX bench's pi05 LIBERO bundle: static prefill and one-step ONNX graphs.
 
-Static prefill and reusable Euler-step graphs keep FP32 boundaries. Consumers
-run prefill once and the step ten times. A temporary CPU
+Consumers run prefill once and the step once per denoise step. The graphs are
+FP16: parameters, activations, attention and the K/V cache passed from prefill to
+the step. The RoPE frequencies (buffers), the model code's own FP32 islands
+(RMSNorm variance, softmax), the images, the timestep, x and the Euler update stay
+FP32. The split is checked in FP32 before the conversion. A temporary CPU
 wrapper calls the repository utilities to preserve the vAi benchmark's exact
-JPEG processing, tokenization and seeded noise; no GPU runtime is needed here.
+JPEG processing and tokenization; no GPU runtime is needed here. The graphs are
+checked against LeRobot's own sample_actions on those inputs; the bench's
+accuracy reference is scripts/reference.py's, not written here.
+
+Torch folds the graphs' constant subgraphs by default, transposing the weights
+once at export: MIGraphX's MLIR GEMM path, the bench's default, runs that bundle
+fastest. --no-constant-folding keeps the checkpoint's tensors as they are, which
+its hipBLASLt path runs faster.
 """
 
 import argparse
@@ -28,13 +38,21 @@ from transformers.cache_utils import DynamicCache
 from transformers.models.gemma import modeling_gemma
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
+
+# The MIGraphX bench's workload, vsMIGraphX in common/workload.h: the LeRobot LIBERO
+# checkpoint with its own policy (the discretized state in the prompt), two cameras, a
+# 50-action chunk and 10 denoise steps. The graphs keep these shapes.
+DATASET = "libero"
+CAMERAS = 2
+CHUNK = 50
+STEPS = 10
+
 INPUT_NAMES = ["images", "image_masks", "tokens", "token_masks", "noise"]
 ARTIFACTS = [
-    "prefill.fp32.onnx",
-    "prefill.fp32.weights.bin",
-    "step.fp32.onnx",
-    "step.fp32.weights.bin",
-    "reference.bin",
+    "prefill.fp16.onnx",
+    "prefill.fp16.weights.bin",
+    "step.fp16.onnx",
+    "step.fp16.weights.bin",
     "metadata.json",
     "config.txt",
 ]
@@ -51,7 +69,9 @@ FIXTURE_CPP = r"""
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <stdexcept>
+#include <string>
 #include <vector>
 namespace pi05 = model::production::pi05;
 template<class T> void save(const std::filesystem::path& path, const std::vector<T>& values)
@@ -63,11 +83,14 @@ template<class T> void save(const std::filesystem::path& path, const std::vector
 int main(int argc, char** argv) try
 {
     static_assert(std::endian::native == std::endian::little);
-    if (argc != 3) throw std::runtime_error("usage: prepare-inputs DATA_ROOT OUTPUT_DIR");
+    if (argc != 5) throw std::runtime_error("usage: prepare-inputs DATA_ROOT OUTPUT_DIR CAMERAS CHUNK");
     const std::filesystem::path data(argv[1]), output(argv[2]);
+    const int cameras = std::stoi(argv[3]), chunk = std::stoi(argv[4]);
+    if (cameras < 1 || cameras > int(std::size(vlaCameras)) || chunk < 1)
+        throw std::runtime_error("invalid camera count or chunk");
     std::vector<float> pixels;
-    for (const char* camera : vlaCameras) {
-        const std::vector<float> image = vai::utils::ImageProcessor((data / camera).string())
+    for (int i = 0; i < cameras; ++i) {
+        const std::vector<float> image = vai::utils::ImageProcessor((data / vlaCameras[i]).string())
             .letterbox(224, vai::utils::Align::Center, 0.0f).normalize(-1.0f, 1.0f).chw();
         pixels.insert(pixels.end(), image.begin(), image.end());
     }
@@ -77,7 +100,7 @@ int main(int argc, char** argv) try
     if (ids.empty() || ids.size() > 200) throw std::runtime_error("expected 1..200 prompt tokens");
     save(output / "images.bin", pixels);
     save(output / "tokens.bin", std::vector<int64_t>(ids.begin(), ids.end()));
-    save(output / "noise.bin", pi05::sampleNoise(50 * 32, vlaNoiseSeed));
+    save(output / "noise.bin", pi05::sampleNoise(size_t(chunk) * 32, vlaNoiseSeed));
     std::ofstream file(output / "prompt.txt");
     file << prompt;
     if (!file) throw std::runtime_error("cannot write prompt.txt");
@@ -308,6 +331,38 @@ def attention_mask(padding, attention):
     return allowed & padding[:, None, :] & padding[:, :, None]
 
 
+def attention_bias(core, mask, dtype):
+    """LeRobot's additive attention mask, in the model's type.
+
+    Its FP32 -2.38e38 overflows FP16, so the FP16 model takes the type's lowest value.
+    """
+    if dtype == torch.float32:
+        return core._prepare_attention_masks_4d(mask)
+    zero = torch.zeros((), dtype=dtype)
+    lowest = torch.full((), torch.finfo(dtype).min, dtype=dtype)
+    return torch.where(mask[:, None, :, :], zero, lowest)
+
+
+@contextmanager
+def images_in_model_dtype(core):
+    """Feed SigLIP the images in its own parameter type.
+
+    LeRobot keeps its vision tower FP32 and casts every image to FP32. In the FP16
+    model the tower is FP16 too, so the image follows the weights instead.
+    """
+    model = core.paligemma_with_expert
+
+    def embed_image(image):
+        dtype = next(model.paligemma.model.vision_tower.parameters()).dtype
+        return model.paligemma.model.get_image_features(image.to(dtype)).pooler_output
+
+    model.embed_image = embed_image
+    try:
+        yield
+    finally:
+        del model.embed_image
+
+
 def cache_from_tensors(values):
     cache = DynamicCache()
     for layer in range(len(values) // 2):
@@ -382,15 +437,16 @@ def fp32_rope_frequencies():
 
 
 class Prefill(nn.Module):
-    def __init__(self, core):
+    def __init__(self, core, cameras):
         super().__init__()
         self.core = core
+        self.cameras = cameras
 
     def forward(self, images, image_masks, tokens, token_masks):
         core = self.core
         embeddings, padding, attention = core.embed_prefix(
-            [images[:, i] for i in range(3)],
-            [image_masks[:, i] for i in range(3)],
+            [images[:, i] for i in range(self.cameras)],
+            [image_masks[:, i] for i in range(self.cameras)],
             tokens,
             token_masks,
         )
@@ -399,7 +455,7 @@ class Prefill(nn.Module):
         mask = attention_mask(padding, attention)
         positions = torch.cumsum(padding.to(torch.int64), dim=1) - 1
         _, cache = core.paligemma_with_expert.forward(
-            attention_mask=core._prepare_attention_masks_4d(mask),
+            attention_mask=attention_bias(core, mask, embeddings.dtype),
             position_ids=positions,
             past_key_values=None,
             inputs_embeds=[embeddings, None],
@@ -410,14 +466,18 @@ class Prefill(nn.Module):
 
 
 class Step(nn.Module):
-    def __init__(self, core, steps=10):
+    def __init__(self, core, steps):
         super().__init__()
         self.core = core
         self.dt = -1.0 / steps
 
     def forward(self, x_t, timestep, cache_mask, *values):
         core = self.core
-        embeddings, padding, attention, condition = core.embed_suffix(x_t, timestep)
+        # x_t and the Euler update stay FP32; the model runs in its parameters' type.
+        dtype = core.action_in_proj.weight.dtype
+        embeddings, padding, attention, condition = core.embed_suffix(
+            x_t.to(dtype), timestep.to(dtype)
+        )
         suffix_length = padding.shape[1]
         prefix = cache_mask[:, None, :].expand(padding.shape[0], suffix_length, cache_mask.shape[1])
         suffix = attention_mask(padding, attention)
@@ -427,28 +487,41 @@ class Step(nn.Module):
         # Each invocation owns a fresh cache container. update() concatenates
         # into new tensors and leaves the shared prefill K/V inputs unchanged.
         outputs, _ = core.paligemma_with_expert.forward(
-            attention_mask=core._prepare_attention_masks_4d(mask),
+            attention_mask=attention_bias(core, mask, dtype),
             position_ids=positions,
             past_key_values=cache_from_tensors(values),
             inputs_embeds=[None, embeddings],
             use_cache=False,
             adarms_cond=[None, condition],
         )
-        hidden = outputs[1][:, -core.config.chunk_size :].to(torch.float32)
-        velocity = core.action_out_proj(hidden)
+        # LeRobot casts to FP32 before the projection; the FP16 model keeps its own type.
+        hidden = outputs[1][:, -core.config.chunk_size :].to(dtype)
+        velocity = core.action_out_proj(hidden).to(torch.float32)
         return x_t + self.dt * velocity
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--size", choices=["3B"], default="3B")
     parser.add_argument("--data-root", type=Path, default=REPO_ROOT / "data")
-    parser.add_argument("--checkpoint", help="LeRobot checkpoint directory or Hugging Face id")
-    parser.add_argument("--output", type=Path, help="shared data/benchmarks/pi05/3B directory")
+    parser.add_argument(
+        "--checkpoint",
+        help=f"LeRobot checkpoint directory or Hugging Face id (default: ckpts/pi05/lerobot/{DATASET})",
+    )
+    parser.add_argument(
+        "--output", type=Path, help=f"bundle directory (default: benchmarks/pi05/{DATASET})"
+    )
     parser.add_argument(
         "--revision", help="Hugging Face checkpoint revision; prefer an immutable commit"
     )
     parser.add_argument("--local-files-only", action="store_true")
+    parser.add_argument(
+        "--constant-folding",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="let torch fold constant subgraphs (transposed weights and the like) at export, "
+        "the bundle the bench's default MLIR GEMM path runs fastest (default: on); "
+        "--no-constant-folding keeps the checkpoint's tensors, for its hipBLASLt path",
+    )
     parser.add_argument(
         "--cxx", default=os.environ.get("CXX", "c++"), help="C++23 input-helper compiler"
     )
@@ -491,15 +564,19 @@ static_assert(Probe{}.value() == 0);
 def export(args):
     compiler = check_cpp23_compiler(args.cxx)
     data = args.data_root.resolve()
-    checkpoint = args.checkpoint or str(data / "ckpts/pi05/lerobot" / args.size)
-    output = (args.output or data / "benchmarks/pi05" / args.size).resolve()
+    checkpoint = args.checkpoint or str(data / "ckpts/pi05/lerobot" / DATASET)
+    output = (args.output or data / "benchmarks/pi05" / DATASET).resolve()
     if any(
         (output / name).exists()
-        for name in [*ARTIFACTS, "model.fp32.onnx", "model.fp32.weights.bin"]
+        for name in [
+            *ARTIFACTS,
+            "model.fp32.onnx",
+            "model.fp32.weights.bin",
+            "prefill.fp32.onnx",
+            "step.fp32.onnx",
+        ]
     ):
-        raise FileExistsError(
-            f"shared ONNX artifacts already exist under {output}; choose --output"
-        )
+        raise FileExistsError(f"an ONNX bundle already exists under {output}; choose --output")
     if not (data / "tokenizers/paligemma/tokenizer.json").is_file():
         raise FileNotFoundError(
             f"missing benchmark input: {data / 'tokenizers/paligemma/tokenizer.json'}"
@@ -543,7 +620,9 @@ def export(args):
                 ],
                 check=True,
             )
-            subprocess.run([str(helper), str(data), str(staging)], check=True)
+            subprocess.run(
+                [str(helper), str(data), str(staging), str(CAMERAS), str(CHUNK)], check=True
+            )
 
         import numpy as np
         from huggingface_hub import hf_hub_download
@@ -559,18 +638,18 @@ def export(args):
                 f"expected a pi05 checkpoint configuration; found {type(config).__name__}"
             )
         if (
-            config.chunk_size != 50
+            config.chunk_size != CHUNK
             or config.max_action_dim != 32
             or tuple(config.image_resolution) != (224, 224)
         ):
-            raise RuntimeError("expected pi05 3B [50,32], 224x224 configuration")
+            raise RuntimeError(f"expected a pi05 [{CHUNK},32], 224x224 configuration")
         if config.paligemma_variant != "gemma_2b" or config.action_expert_variant != "gemma_300m":
-            raise RuntimeError("expected pi05 3B gemma_2b/gemma_300m architecture")
+            raise RuntimeError("expected the pi05 gemma_2b/gemma_300m architecture")
         if getattr(config, "rtc_config", None) is not None or getattr(
             config, "use_proprioceptive_memory", False
         ):
             raise RuntimeError("RTC and memory extensions are outside this benchmark")
-        config.device, config.dtype, config.num_inference_steps = "cpu", "float32", 10
+        config.device, config.dtype, config.num_inference_steps = "cpu", "float32", STEPS
         config.compile_model, config.gradient_checkpointing = False, False
         policy = PI05Policy(config)
         weights = (
@@ -594,32 +673,34 @@ def export(args):
         if any(parameter.dtype != torch.float32 for parameter in core.parameters()):
             raise RuntimeError("expected FP32 model parameters")
         arrays = {
-            "images": np.fromfile(staging / "images.bin", dtype="<f4").reshape(1, 3, 3, 224, 224),
-            "image_masks": np.ones((1, 3), dtype=np.bool_),
+            "images": np.fromfile(staging / "images.bin", dtype="<f4").reshape(
+                1, CAMERAS, 3, 224, 224
+            ),
+            "image_masks": np.ones((1, CAMERAS), dtype=np.bool_),
             "tokens": np.fromfile(staging / "tokens.bin", dtype="<i8").reshape(1, -1),
-            "noise": np.fromfile(staging / "noise.bin", dtype="<f4").reshape(1, 50, 32),
+            "noise": np.fromfile(staging / "noise.bin", dtype="<f4").reshape(1, CHUNK, 32),
         }
         arrays["token_masks"] = np.ones(arrays["tokens"].shape, dtype=np.bool_)
         inputs = tuple(torch.from_numpy(arrays[name]) for name in INPUT_NAMES)
         step_options = (
-            {"num_steps": 10}
+            {"num_steps": STEPS}
             if "num_steps" in inspect.signature(core.sample_actions).parameters
             else {}
         )
-        prefill, step_model = Prefill(core).eval(), Step(core, 10).eval()
-        timesteps = np.asarray([1.0 + i * (-1.0 / 10) for i in range(10)], dtype="<f4")
+        prefill, step_model = Prefill(core, CAMERAS).eval(), Step(core, STEPS).eval()
+        timesteps = np.asarray([1.0 + i * (-1.0 / STEPS) for i in range(STEPS)], dtype="<f4")
         with torch.no_grad():
             print("Computing original FP32 PyTorch reference...", flush=True)
             reference = core.sample_actions(
-                [inputs[0][:, i] for i in range(3)],
-                [inputs[1][:, i] for i in range(3)],
+                [inputs[0][:, i] for i in range(CAMERAS)],
+                [inputs[1][:, i] for i in range(CAMERAS)],
                 inputs[2],
                 inputs[3],
                 noise=inputs[4].clone(),
                 **step_options,
             )
             if (
-                reference.shape != (1, 50, 32)
+                reference.shape != (1, CHUNK, 32)
                 or reference.dtype != torch.float32
                 or not torch.isfinite(reference).all()
             ):
@@ -627,9 +708,12 @@ def export(args):
         graph_metadata = {}
 
         def export_graph(model, example, names_in, names_out, label):
-            path = staging / (label + ".fp32.onnx")
+            path = staging / (label + ".fp16.onnx")
             print(f"Exporting {label} graph...", flush=True)
-            # Keep the protobuf small; checkpoint tensors are attached as external data.
+            # Without folding, the protobuf stays small and the checkpoint tensors are attached
+            # by name. Folding computes new constants (transposed weights, constant
+            # subgraphs), so torch writes them itself, per tensor once over 2 GB.
+            fold = args.constant_folding
             torch.onnx.export(
                 model,
                 example,
@@ -638,41 +722,75 @@ def export(args):
                 output_names=names_out,
                 opset_version=18,
                 dynamo=False,
-                export_params=False,
-                do_constant_folding=False,
-                keep_initializers_as_inputs=True,
+                export_params=fold,
+                do_constant_folding=fold,
+                keep_initializers_as_inputs=not fold,
             )
             graph = onnx.load(str(path), load_external_data=False)
-            tensors = dict(model.named_parameters(remove_duplicate=False))
+            parameters = dict(model.named_parameters(remove_duplicate=False))
+            tensors = dict(parameters)
             tensors.update(dict(model.named_buffers(remove_duplicate=False)))
-            external_path = staging / (label + ".fp32.weights.bin")
+            external_path = staging / (label + ".fp16.weights.bin")
+            tensor_counts = Counter()
+
+            # All tensors go into one weights file, in the graph's order.
+            def append(external, name, array):
+                if array.dtype.kind == "f" and not np.isfinite(array).all():
+                    raise RuntimeError(f"non-finite values in {name}")
+                if array.dtype.byteorder == ">":
+                    array = array.byteswap().view(array.dtype.newbyteorder("<"))
+                array = np.ascontiguousarray(array)
+                offset = external.tell()
+                external.write(memoryview(array).cast("B"))
+                tensor = onnx.TensorProto(
+                    name=name,
+                    dims=array.shape,
+                    data_type=onnx.helper.np_dtype_to_tensor_dtype(array.dtype),
+                )
+                tensor.data_location = onnx.TensorProto.EXTERNAL
+                for key, text in (
+                    ("location", external_path.name),
+                    ("offset", str(offset)),
+                    ("length", str(array.nbytes)),
+                ):
+                    item = tensor.external_data.add()
+                    item.key, item.value = key, text
+                return tensor
+
             with external_path.open("wb") as external:
-                for value in graph.graph.input:
-                    if value.name in names_in:
-                        continue
-                    if value.name not in tensors:
-                        raise RuntimeError(
-                            f"unknown ONNX parameter {value.name}; cannot attach checkpoint"
-                        )
-                    array = tensors[value.name].detach().cpu().contiguous().numpy()
-                    if array.dtype.byteorder == ">":
-                        array = array.byteswap().view(array.dtype.newbyteorder("<"))
-                    offset = external.tell()
-                    external.write(memoryview(array).cast("B"))
-                    tensor = onnx.TensorProto(
-                        name=value.name,
-                        dims=array.shape,
-                        data_type=onnx.helper.np_dtype_to_tensor_dtype(array.dtype),
-                    )
-                    tensor.data_location = onnx.TensorProto.EXTERNAL
-                    for key, text in (
-                        ("location", external_path.name),
-                        ("offset", str(offset)),
-                        ("length", str(array.nbytes)),
-                    ):
-                        item = tensor.external_data.add()
-                        item.key, item.value = key, text
-                    graph.graph.initializer.append(tensor)
+                if fold:
+                    # Torch's initializers, inline or one file each: repacked, files removed as read.
+                    packed = []
+                    for initializer in graph.graph.initializer:
+                        array = onnx.numpy_helper.to_array(initializer, base_dir=str(staging))
+                        sources = {
+                            item.value
+                            for item in initializer.external_data
+                            if item.key == "location"
+                        }
+                        tensor_counts[f"initializers_{array.dtype.name}"] += 1
+                        packed.append(append(external, initializer.name, array))
+                        del array
+                        for source in sources:
+                            (staging / source).unlink(missing_ok=True)
+                    del graph.graph.initializer[:]
+                    graph.graph.initializer.extend(packed)
+                else:
+                    # Parameters are FP16 like the whole model; buffers (RoPE frequencies)
+                    # keep their type.
+                    for value in graph.graph.input:
+                        if value.name in names_in:
+                            continue
+                        if value.name not in tensors:
+                            raise RuntimeError(
+                                f"unknown ONNX parameter {value.name}; cannot attach checkpoint"
+                            )
+                        array = tensors[value.name].detach().cpu().contiguous().numpy()
+                        if value.name in parameters and array.dtype != np.float16:
+                            raise RuntimeError(f"expected an FP16 parameter: {value.name}")
+                        kind = "parameters" if value.name in parameters else "buffers"
+                        tensor_counts[f"{kind}_{array.dtype.name}"] += 1
+                        graph.graph.initializer.append(append(external, value.name, array))
             graph_inputs = [value for value in graph.graph.input if value.name in names_in]
             del graph.graph.input[:]
             graph.graph.input.extend(graph_inputs)
@@ -680,14 +798,16 @@ def export(args):
                 raise RuntimeError(f"unexpected {label} inputs")
             if [value.name for value in graph.graph.output] != names_out:
                 raise RuntimeError(f"unexpected {label} outputs")
+            # FP32 images, timestep and x; the K/V cache between the graphs is FP16.
             for value in [*graph.graph.input, *graph.graph.output]:
-                dtype = (
-                    onnx.TensorProto.BOOL
-                    if value.name in ("image_masks", "token_masks", "cache_mask")
-                    else (
-                        onnx.TensorProto.INT64 if value.name == "tokens" else onnx.TensorProto.FLOAT
-                    )
-                )
+                if value.name in ("image_masks", "token_masks", "cache_mask"):
+                    dtype = onnx.TensorProto.BOOL
+                elif value.name == "tokens":
+                    dtype = onnx.TensorProto.INT64
+                elif value.name[:1] in ("K", "V") and value.name[1:].isdigit():
+                    dtype = onnx.TensorProto.FLOAT16
+                else:
+                    dtype = onnx.TensorProto.FLOAT
                 if value.type.tensor_type.elem_type != dtype:
                     raise RuntimeError(f"incorrect ONNX boundary dtype: {value.name}")
             onnx.save_model(graph, str(path))
@@ -695,7 +815,11 @@ def export(args):
             canonical = canonicalize_graph(graph)
             onnx.save_model(graph, str(path))
             checked = validate_model(path)
-            graph_metadata[label] = {"canonicalization": canonical, "validation": checked}
+            graph_metadata[label] = {
+                "canonicalization": canonical,
+                "validation": checked,
+                "tensors": dict(sorted(tensor_counts.items())),
+            }
             print(f"{label}: {len(graph.graph.node)} nodes; strict ONNX checks passed", flush=True)
 
         with torch.no_grad(), materialized_kv_heads(), fp32_rope_frequencies():
@@ -705,7 +829,7 @@ def export(args):
             if layers != 18 or any(
                 tuple(value.shape) != (1, 1, prefix_length, 256) for value in cache[1:]
             ):
-                raise RuntimeError("unexpected pi05 3B K/V cache shape")
+                raise RuntimeError("unexpected pi05 K/V cache shape")
             current, baseline = inputs[4].clone(), inputs[4].clone()
             step_errors = []
             for time_value in timesteps:
@@ -713,33 +837,60 @@ def export(args):
                 velocity = core.denoise_step(
                     cache[0], cache_from_tensors(cache[1:]), baseline, timestep
                 )
-                baseline = baseline + (-1.0 / 10) * velocity
+                baseline = baseline + (-1.0 / STEPS) * velocity
                 current = step_model(current, timestep, *cache)
                 torch.testing.assert_close(current, baseline, rtol=1e-5, atol=2e-5)
                 step_errors.append(float((current - baseline).abs().max()))
             torch.testing.assert_close(current, reference, rtol=1e-5, atol=2e-5)
             split_error = float((current - reference).abs().max())
             print(
-                f"Split CPU reference: max_abs={split_error:.6g}; all ten steps matched", flush=True
+                f"Split CPU reference: max_abs={split_error:.6g}; all {STEPS} steps matched",
+                flush=True,
             )
-            kv_names = [name + str(layer) for layer in range(layers) for name in ("K", "V")]
-            export_graph(prefill, inputs[:4], INPUT_NAMES[:4], ["cache_mask", *kv_names], "prefill")
-            export_graph(
-                step_model,
-                (inputs[4], torch.ones(1, dtype=torch.float32), *cache),
-                ["x_t", "timestep", "cache_mask", *kv_names],
-                ["x_next"],
-                "step",
-            )
-        reference.cpu().numpy().astype("<f4").tofile(staging / "reference.bin")
+
+            # The checked split, now in FP16: parameters, activations and the K/V cache.
+            # Buffers (the RoPE frequencies) stay FP32, and the model code's own FP32
+            # islands (RMSNorm variance, softmax) stay as they are.
+            print("Converting the parameters to FP16...", flush=True)
+            for parameter in core.parameters():
+                parameter.data = parameter.data.to(torch.float16)
+            with images_in_model_dtype(core):
+                print("Running the FP16 split on the CPU...", flush=True)
+                cache = prefill(*inputs[:4])
+                if any(value.dtype != torch.float16 for value in cache[1:]):
+                    raise RuntimeError("expected an FP16 K/V cache")
+                current = inputs[4].clone()
+                for time_value in timesteps:
+                    timestep = torch.tensor([float(time_value)], dtype=torch.float32)
+                    current = step_model(current, timestep, *cache)
+                if current.dtype != torch.float32 or not torch.isfinite(current).all():
+                    raise RuntimeError("invalid FP16 action chunk")
+                fp16_error = float((current - reference).abs().max())
+                print(f"FP16 split vs FP32 reference: max_abs={fp16_error:.6g}", flush=True)
+                kv_names = [name + str(layer) for layer in range(layers) for name in ("K", "V")]
+                export_graph(
+                    prefill, inputs[:4], INPUT_NAMES[:4], ["cache_mask", *kv_names], "prefill"
+                )
+                export_graph(
+                    step_model,
+                    (inputs[4], torch.ones(1, dtype=torch.float32), *cache),
+                    ["x_t", "timestep", "cache_mask", *kv_names],
+                    ["x_next"],
+                    "step",
+                )
         metadata = {
             "checkpoint": checkpoint,
             "revision": args.revision,
             "versions": versions,
-            "steps": 10,
+            "cameras": CAMERAS,
+            "chunk": CHUNK,
+            "steps": STEPS,
             "seed": 0,
             "prompt": (staging / "prompt.txt").read_text(),
-            "bundle_version": 2,
+            "bundle_version": 5,
+            "precision": "FP16 parameters, activations and K/V cache; FP32 images, timestep, x and Euler update",
+            "cpu_fp16_max_abs": fp16_error,
+            "constant_folding": args.constant_folding,
             "layers": layers,
             "prefix_length": prefix_length,
             "input_shapes": {name: list(arrays[name].shape) for name in INPUT_NAMES},
@@ -748,7 +899,10 @@ def export(args):
             "cpu_step_max_abs": step_errors,
         }
         (staging / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")
-        (staging / "config.txt").write_text(f"2 10 50 32 {layers} {prefix_length}\n")
+        # bench::pi05::detail::readBundleConfig in migraphx/net.h reads it in this order.
+        (staging / "config.txt").write_text(
+            f"5 {CAMERAS} {STEPS} {CHUNK} 32 {layers} {prefix_length}\n"
+        )
         output.mkdir(exist_ok=True)
         # Same-filesystem hard links publish without replacing existing files.
         # config.txt is last, so partial publication never looks ready.
@@ -762,7 +916,7 @@ def export(args):
         raise
     finally:
         shutil.rmtree(staging)
-    print(f"Exported shared ONNX and fixtures to {output}; ONNX checker passed.")
+    print(f"Exported the MIGraphX bundle to {output}; ONNX checker passed.")
 
 
 if __name__ == "__main__":

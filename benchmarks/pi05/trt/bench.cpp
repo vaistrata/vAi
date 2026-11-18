@@ -1,6 +1,5 @@
 #include "runtime/pi05Policy.h"
 #include "common/trtUtils.h"
-#include "../common/profile.h"
 #include "../common/workload.h"
 #include "bench-utils.h"
 #include <cuda_fp16.h>
@@ -46,28 +45,25 @@ struct CudaStream
 
 void usage(const char* argv0)
 {
-    fprintf(stderr, "usage: %s [--size NAME] [--engineDir PATH] [--showActions] [--atol N] [--rtol N]\n", argv0);
+    fprintf(stderr, "usage: %s [--engineDir PATH] [--showActions] [--atol N] [--rtol N]\n", argv0);
     fprintf(
         stderr,
-        "  --size         model folder under data/benchmarks/pi05/ (default: %s), one of:",
-        common::workloads[0].size);
-    for (const common::Workload& w : common::workloads)
-        fprintf(stderr, " %s", w.size);
-    fprintf(stderr, "\n");
-    fprintf(
-        stderr,
-        "  --engineDir    prebuilt Edge-LLM engines (default: PI05_ENGINE_DIR or "
-        "data/benchmarks/pi05/<size>/engines)\n");
+        "  --engineDir    prebuilt Edge-LLM engines (default: PI05_ENGINE_DIR or %s)\n",
+        (common::vsTensorRT.dataDir() / "engines").string().c_str());
     fprintf(stderr, "  EDGELLM_PLUGIN_PATH overrides the Edge-LLM plugin library\n");
     fprintf(stderr, "  --showActions  print the first five actions after the table\n");
-    fprintf(stderr, "  --atol/--rtol  tolerances against reference.bin (default: 0.002 / 0.001)\n");
+    fprintf(
+        stderr,
+        "  --atol/--rtol  tolerances against %s (default: 0.002 / 0.001)\n",
+        common::vsTensorRT.referencePath().string().c_str());
 }
 
 
 int main(int argc, char** argv)
 {
+    // Edge-LLM serves openpi's pi05_libero, as its pi0.5 guide builds it.
+    const common::Workload& workload = common::vsTensorRT;
     VLABenchOptions options;
-    const char* sizeName = common::workloads[0].size;
     const char* engineDir = std::getenv("PI05_ENGINE_DIR");
 
     for (int i = 1; i < argc; ++i)
@@ -93,17 +89,6 @@ int main(int argc, char** argv)
             engineDir = argv[i];
             continue;
         }
-        if (!strcmp(argv[i], "--size"))
-        {
-            if (++i == argc)
-            {
-                fprintf(stderr, "error: --size needs a name\n");
-                usage(argv[0]);
-                return 1;
-            }
-            sizeName = argv[i];
-            continue;
-        }
         if (!strcmp(argv[i], "--atol") || !strcmp(argv[i], "--rtol"))
         {
             const char* key = argv[i];
@@ -127,16 +112,7 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    // Edge-LLM runs OpenPI's pi05 configuration and returns normalized actions.
-    const common::ProfileSpec& profile = common::profileSpec(common::Profile::OpenPI);
-    const common::Workload* workload = common::findWorkload(sizeName);
-    if (!workload)
-    {
-        fprintf(stderr, "error: unknown --size '%s'\n", sizeName);
-        usage(argv[0]);
-        return 1;
-    }
-    const std::string defaultEngineDir = (workload->dataDir() / "engines").string();
+    const std::string defaultEngineDir = (workload.dataDir() / "engines").string();
     if (!engineDir || !*engineDir)
         engineDir = defaultEngineDir.c_str();
 
@@ -184,8 +160,7 @@ int main(int argc, char** argv)
     }
 
     // Load engines built beforehand with pi05_policy_build.
-    printf("model: pi0.5 %s\n", workload->size);
-    printf("profile: %s\n", profile.name);
+    printf("model: pi0.5 %s\n", workload.dataset);
     printf("engines: %s\n", engineDir);
     fflush(stdout);
 
@@ -205,28 +180,31 @@ int main(int argc, char** argv)
     }
     auto& runtime = policy->runtime();
     const auto& engineConfig = runtime.getConfig();
-    if (engineConfig.actionHorizon != int32_t(workload->actionChunk) ||
-        engineConfig.actionDim != int32_t(workload->actionDim))
+    if (engineConfig.actionHorizon != int32_t(workload.actionChunk) ||
+        engineConfig.actionDim != int32_t(workload.actionDim))
     {
         fprintf(
-            stderr, "error: TensorRT engines must match action chunk [50, 32]; rebuild engines or set --engineDir\n");
+            stderr,
+            "error: TensorRT engines must match action chunk [%u, %u]; rebuild engines or set --engineDir\n",
+            workload.actionChunk,
+            workload.actionDim);
         return 1;
     }
-    runtime.setNumDenoiseSteps(int32_t(workload->denoiseSteps));
+    runtime.setNumDenoiseSteps(int32_t(workload.denoiseSteps));
     // CUDA Graph is mandatory for this benchmark; there is no eager-mode option.
     runtime.setUseCudaGraph(true);
     printf("cuda graph: always on\n");
 
-    const uint32_t B = workload->cameras;
-    const uint32_t C = workload->imageChannels;
-    const uint32_t S = workload->imageSize;
+    const uint32_t B = workload.cameras;
+    const uint32_t C = workload.imageChannels;
+    const uint32_t S = workload.imageSize;
     policy->validateViewCount(int32_t(B));
 
-    const common::Inputs inputs = common::prepareInputs(*workload, profile);
+    const common::Inputs inputs = common::prepareInputs(workload, common::signedCHW);
     const uint32_t nPrompt = (uint32_t)inputs.tokens.size();
-    if (nPrompt > workload->maxPromptTokens)
+    if (nPrompt > workload.maxPromptTokens)
     {
-        fprintf(stderr, "error: the prompt has %u tokens, the model allows %u\n", nPrompt, workload->maxPromptTokens);
+        fprintf(stderr, "error: the prompt has %u tokens, the model allows %u\n", nPrompt, workload.maxPromptTokens);
         return 1;
     }
 
@@ -258,7 +236,7 @@ int main(int argc, char** argv)
             return false;
 
         nextAction = std::move(chunk.normalizedActions);
-        if (nextAction.size() != workload->actionCount())
+        if (nextAction.size() != workload.actionCount())
         {
             fprintf(stderr, "error: TensorRT returned an unexpected action chunk size\n");
             return false;
@@ -266,21 +244,19 @@ int main(int argc, char** argv)
         return true;
     };
 
-    printf(
-        "input: %u cameras x %ux%u, %u prompt tokens, action chunk %ux%u, %u denoise steps, seed %llu\n",
-        B,
-        S,
-        S,
-        nPrompt,
-        workload->actionChunk,
-        workload->actionDim,
-        workload->denoiseSteps,
-        (unsigned long long)vlaNoiseSeed);
-
+    common::printWorkload(workload, inputs);
     // The first predictions also initialize and capture the runtime's CUDA graphs: the
     // reference run and the warmup happen before any latency sample.
-    options.referencePath = common::referencePath(profile, workload->dataDir());
+    options.referencePath = workload.referencePath().string();
+    options.denoiseSteps = workload.denoiseSteps;
     auto actions = [&] { return (const float*)nextAction.data(); };
     return runVLABench(
-        "TensorRT Edge-LLM", int(nPrompt), options, workload->actionChunk, workload->actionDim, predict, actions);
+        "TensorRT Edge-LLM",
+        int(workload.imageTokens()),
+        int(nPrompt),
+        options,
+        workload.actionChunk,
+        workload.actionDim,
+        predict,
+        actions);
 }

@@ -1,5 +1,4 @@
 #include "vla.h"
-#include "../common/profile.h"
 #include "../common/workload.h"
 #include "bench-utils.h"
 #include <cuda_runtime_api.h>
@@ -16,29 +15,25 @@ namespace common = bench::pi05;
 
 void usage(const char* argv0)
 {
+    fprintf(stderr, "usage: %s [--model PATH] [--config PATH] [--showActions] [--atol N] [--rtol N]\n", argv0);
     fprintf(
         stderr,
-        "usage: %s [--size NAME] [--model PATH] [--config PATH] [--showActions] [--atol N] [--rtol N]\n",
-        argv0);
-    fprintf(
-        stderr,
-        "  --size         model folder under data/benchmarks/pi05/ (default: %s), one of:",
-        common::workloads[0].size);
-    for (const common::Workload& w : common::workloads)
-        fprintf(stderr, " %s", w.size);
-    fprintf(stderr, "\n");
-    fprintf(stderr,
-            "  --model        GGUF checkpoint (default: VLA_MODEL_PATH or data/benchmarks/pi05/<size>/model.gguf)\n");
+        "  --model        GGUF checkpoint (default: VLA_MODEL_PATH or %s)\n",
+        (common::vsVlaCpp.dataDir() / "model.gguf").string().c_str());
     fprintf(stderr, "  --config       runtime config (default: VLA_CONFIG_PATH or %s)\n", VLACPP_RUNTIME_CONFIG);
     fprintf(stderr, "  --showActions  print the first five actions after the table\n");
-    fprintf(stderr, "  --atol/--rtol  tolerances against reference.bin (default: 0.002 / 0.001)\n");
+    fprintf(
+        stderr,
+        "  --atol/--rtol  tolerances against %s (default: 0.002 / 0.001)\n",
+        common::vsVlaCpp.referencePath().string().c_str());
 }
 
 
 int main(int argc, char** argv)
 {
+    // vla.cpp runs the LeRobot LIBERO policy.
+    const common::Workload& workload = common::vsVlaCpp;
     VLABenchOptions options;
-    const char* sizeName = common::workloads[0].size;
     const char* modelPath = std::getenv("VLA_MODEL_PATH");
     const char* configPath = std::getenv("VLA_CONFIG_PATH");
 
@@ -69,17 +64,6 @@ int main(int argc, char** argv)
                 configPath = argv[i];
             continue;
         }
-        if (!strcmp(argv[i], "--size"))
-        {
-            if (++i == argc)
-            {
-                fprintf(stderr, "error: --size needs a name\n");
-                usage(argv[0]);
-                return 1;
-            }
-            sizeName = argv[i];
-            continue;
-        }
         if (!strcmp(argv[i], "--atol") || !strcmp(argv[i], "--rtol"))
         {
             const char* key = argv[i];
@@ -103,16 +87,7 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    // vla.cpp takes raw images and returns unnormalized actions: the LeRobot convention.
-    const common::ProfileSpec& profile = common::profileSpec(common::Profile::LeRobot);
-    const common::Workload* workload = common::findWorkload(sizeName);
-    if (!workload)
-    {
-        fprintf(stderr, "error: unknown --size '%s'\n", sizeName);
-        usage(argv[0]);
-        return 1;
-    }
-    const std::string defaultModelPath = (workload->dataDir() / "model.gguf").string();
+    const std::string defaultModelPath = (workload.dataDir() / "model.gguf").string();
     if (!modelPath || !*modelPath)
         modelPath = defaultModelPath.c_str();
     // vla.cpp takes the weight dtype only from a runtime config file, BF16 without one; the bench's
@@ -149,8 +124,7 @@ int main(int argc, char** argv)
     printf("device: CUDA %d, %s\n", device, gpuNames[device].c_str());
 
     // Load the GGUF checkpoint and vla.cpp runtime config.
-    printf("model: pi0.5 %s\n", workload->size);
-    printf("profile: %s\n", profile.name);
+    printf("model: pi0.5 %s\n", workload.dataset);
     printf("checkpoint: %s\nconfig: %s\n", modelPath, configPath);
     fflush(stdout);
 
@@ -162,22 +136,27 @@ int main(int argc, char** argv)
         fprintf(stderr, "error: failed to load VLA model or read its config\n");
         return 1;
     }
-    if (config.max_state_dim != int64_t(workload->actionDim) || config.max_action_dim != int64_t(workload->actionDim) ||
-        config.n_suffix != int64_t(workload->actionChunk) || config.num_steps != int32_t(workload->denoiseSteps))
+    if (config.max_state_dim != int64_t(workload.actionDim) || config.max_action_dim != int64_t(workload.actionDim) ||
+        config.n_suffix != int64_t(workload.actionChunk) || config.num_steps != int32_t(workload.denoiseSteps))
     {
-        fprintf(stderr, "error: VLA config must match state/action dim 32, action chunk 50 and 10 denoise steps\n");
+        fprintf(
+            stderr,
+            "error: VLA config must match state/action dim %u, action chunk %u and %u denoise steps\n",
+            workload.actionDim,
+            workload.actionChunk,
+            workload.denoiseSteps);
         return 1;
     }
 
     // vla.cpp normalizes internally; its float input is interleaved RGB [0, 1].
-    const common::Inputs inputs = common::prepareInputs(*workload, profile);
-    const uint32_t B = workload->cameras;
-    const uint32_t C = workload->imageChannels;
-    const uint32_t S = workload->imageSize;
+    const common::Inputs inputs = common::prepareInputs(workload, common::unitHWC);
+    const uint32_t B = workload.cameras;
+    const uint32_t C = workload.imageChannels;
+    const uint32_t S = workload.imageSize;
     const uint32_t nPrompt = (uint32_t)inputs.tokens.size();
-    if (nPrompt > workload->maxPromptTokens)
+    if (nPrompt > workload.maxPromptTokens)
     {
-        fprintf(stderr, "error: the prompt has %u tokens, the model allows %u\n", nPrompt, workload->maxPromptTokens);
+        fprintf(stderr, "error: the prompt has %u tokens, the model allows %u\n", nPrompt, workload.maxPromptTokens);
         return 1;
     }
 
@@ -217,30 +196,32 @@ int main(int argc, char** argv)
             fprintf(stderr, "error: vla_predict failed (status=%d)\n", int(status));
             return false;
         }
-        if (!actions || numValues != int64_t(workload->actionCount()))
+        if (!actions || numValues != int64_t(workload.actionCount()))
         {
-            fprintf(stderr, "error: vla.cpp output must match action chunk [50, 32]\n");
+            fprintf(
+                stderr,
+                "error: vla.cpp output must match action chunk [%u, %u]\n",
+                workload.actionChunk,
+                workload.actionDim);
             return false;
         }
         return true;
     };
 
-    printf(
-        "input: %u cameras x %ux%u, %u prompt tokens, action chunk %ux%u, %u denoise steps, seed %llu\n",
-        B,
-        S,
-        S,
-        nPrompt,
-        workload->actionChunk,
-        workload->actionDim,
-        workload->denoiseSteps,
-        (unsigned long long)vlaNoiseSeed);
-
+    common::printWorkload(workload, inputs);
     // vla.cpp applies the GGUF's dataset statistics to the actions, so they match the
     // reference only for statistics that leave the actions as the model gives them
     // (q01 = -1, q99 = 1).
-    options.referencePath = common::referencePath(profile, workload->dataDir());
+    options.referencePath = workload.referencePath().string();
+    options.denoiseSteps = workload.denoiseSteps;
     auto actions = [&] { return (const float*)nextAction.get(); };
     return runVLABench(
-        "vla.cpp", int(nPrompt), options, workload->actionChunk, workload->actionDim, predict, actions);
+        "vla.cpp",
+        int(workload.imageTokens()),
+        int(nPrompt),
+        options,
+        workload.actionChunk,
+        workload.actionDim,
+        predict,
+        actions);
 }
