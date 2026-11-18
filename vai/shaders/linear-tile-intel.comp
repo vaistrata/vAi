@@ -3,6 +3,17 @@
      OpenVINO's fully_connected_gpu_bf_tiled: one subgroup per workgroup, no
      shared memory, no barrier (tests/linear-tune-intel, variant 21)
 
+ Ported from openvinotoolkit/openvino at 66fbe0c (2026-10-29), under
+ src/plugins/intel_gpu/src/kernel_selector/:
+   - kernel:        cl_kernels/fully_connected_gpu_bf_tiled.cl
+   - kernel body:   cl_kernels/include/fully_connected_gpu_bf_tiled_common.cl
+   - host / tuning: kernels/fully_connected/fully_connected_kernel_bf_tiled.cpp
+                    kernels/fully_connected/fully_connected_kernel_bf_tiled.h
+ https://github.com/openvinotoolkit/openvino/blob/66fbe0ceaf5f1567e54f022425a6e4ff2164d9dc/src/plugins/intel_gpu/src/kernel_selector/cl_kernels/fully_connected_gpu_bf_tiled.cl
+ https://github.com/openvinotoolkit/openvino/blob/66fbe0ceaf5f1567e54f022425a6e4ff2164d9dc/src/plugins/intel_gpu/src/kernel_selector/cl_kernels/include/fully_connected_gpu_bf_tiled_common.cl
+ https://github.com/openvinotoolkit/openvino/blob/66fbe0ceaf5f1567e54f022425a6e4ff2164d9dc/src/plugins/intel_gpu/src/kernel_selector/kernels/fully_connected/fully_connected_kernel_bf_tiled.cpp
+ https://github.com/openvinotoolkit/openvino/blob/66fbe0ceaf5f1567e54f022425a6e4ff2164d9dc/src/plugins/intel_gpu/src/kernel_selector/kernels/fully_connected/fully_connected_kernel_bf_tiled.h
+
      O[m, n] = sum_k I[m, k] * W[n, k]
 
      M = flattened batch, N = outDim, K = inDim
