@@ -4,6 +4,7 @@
 // Attention (separate-Q/K/V KV-cache attention, GQA-capable;
 // the FA kernels are ports of the ggml/llama.cpp Vulkan flash_attn kernels).
 #include "common.h"
+#include "linear.h"
 #include <algorithm>
 #include <array>
 #include <cstring>
@@ -74,7 +75,7 @@ namespace vai::node {
 
 /*=============================================================================
   Attention - fused KV cache append + causal attention (GQA),
-  split between four paths
+  split between five paths
   Input : Q [..., Hq, Tq, headDim], K / V [..., Hkv, Tkv, headDim]
   Output: out0 attention [..., Tq, Hq, headDim]
 
@@ -92,14 +93,23 @@ namespace vai::node {
     and the only FA tile past Dh 256 (384 / 512 on NVIDIA / AMD).
   - scalar FA (attention-fa): flash attention with per-(shape,
     vendor) tuned tiles, Dh <= 256; everything the cm gates reject.
-  - Intel FA (attention-fa-intel): Intel parts without a coopmat path;
-    a 16-row tile packs one KV group's heads, subgroup-broadcast products.
+  - Intel FA (attention-fa-intel): Intel parts without a coopmat path, and
+    Xe3 where its three-pass path does not apply; a 16-row tile packs one KV
+    group's heads, subgroup-broadcast products.
   - naive (attention): the unconditional fallback — unfamiliar
     devices degrade instead of crashing. See supportsFlashAttention().
+  - Xe3 on the fork's 2D block loads (ANV_CMAT_BLOCK2D=1), fp16 throughout:
+    the two products run on the Linear kernel, S = Q K^T and O = P V
+    (linear-cm-xe3), with attention-softmax-xe3 between them, after
+    attention-prep-xe3 appends to the cache and lays V out. With a cache: one
+    sequence and one KV head, no ring. Without one: any, a KV head a product
+    of one batched dispatch. Smaller grids (under 64 rows a KV head) and
+    everything else on Xe3 keep the kernels below. See prepare().
 
-  Intel's coopmat tiles (Xe2 / Xe3) run attention-fa-cm-intel, the kernel
-  Intel was verified with, under the tuning it was verified with; the other
-  vendors' tuning moved attention-fa-cm on.
+  Intel's coopmat tiles (Xe2, and Xe3 for the grids the Intel kernel leaves)
+  run attention-fa-cm-intel, the kernel Intel was verified with, under the
+  tuning it was verified with; the other vendors' tuning moved
+  attention-fa-cm on.
 
   The path and tuning are selected per (shape, device) in prepare(); a tuning
   change re-requests the pipeline from the pool. Every path leaves the KV
@@ -257,6 +267,7 @@ public:
     bool usingFa() const { return useFa; }
     bool usingCm() const { return useFa && pipeParamsFA.coopmat; }
     bool usingIntel() const { return useFa && pipeParamsFA.intel; }
+    bool usingXe3() const { return xe3_; }
     const PipeParamsFA& getPipeParamsFA() const { return pipeParamsFA; }
     uint32_t getSplitKCount() const { return splitKCount; }
     uint32_t getGqaRatio() const { return gqaRatioOf(pipeParamsFA); }
@@ -277,6 +288,19 @@ private:
     uint32_t Tq_ = 0;           // per-forward: query rows
     uint32_t Tkv = 0;           // per-forward: K / V input rows (0 = the cache alone)
     uint32_t splitKCount = 1;   // KV splits = the grid multiplier
+
+    // Xe3 path: three passes over chunks of query rows (see prepare()). A group is one KV head of
+    // one sequence with the query heads that share it; a chunk is some heads of the only group, or
+    // whole groups run as one batched dispatch.
+    bool xe3_ = false;
+    uint32_t xe3Keys_ = 0;       // key columns of S: the cache's capacity, or Tkv without one
+    uint32_t xe3KeyRows_ = 0;    // xe3Keys_ up to whole 16s: key rows of P and V
+    uint32_t xe3Dh16_ = 0;       // headDim up to whole 16s (Q is padded to it when they differ)
+    uint32_t xe3PerChunk_ = 0;   // heads (one group) or groups a chunk of S / P holds
+    Xe3Pick xe3QkPick_ = {}, xe3PvPick_ = {};
+    eva::ComputePipeline pipeXe3Prep_, pipeXe3Qk_, pipeXe3Softmax_, pipeXe3Pv_;
+    eva::DescriptorSet descSetXe3Prep_, descSetXe3Softmax_;
+    std::vector<eva::DescriptorSet> descSetXe3Qk_, descSetXe3Pv_;   // one per chunk: each binds its own rows
 };
 
 
@@ -732,15 +756,20 @@ inline void amdFlashAttentionOptions(Attention::PipeParamsFA& t, uint32_t Dh, ui
 // 16 taking 8 keys each, at most 22 KB of shared memory. The KV group has to
 // fit the tile and its rows to fill it (Tq x groupSize >= 16). Otherwise the
 // ggml kernels: cm on Xe2 / Xe3, else the scalar tile.
+// Xe3 takes the Intel kernel too: its matrix engine serves the three-pass path
+// (prepare()'s xe3_), and where that does not apply this kernel runs pi0.5's
+// attention in half the time of the coopmat one (121 ms against 240 ms an
+// inference on an Arc B390), with 128 threads up to Dh 127.
 inline Attention::PipeParamsFA intelFlashAttentionTile(uint32_t Dh, uint32_t nRows, uint32_t nKv, uint32_t groupSize,
                                                        uint32_t Tq, eva::Device device)
 {
     const bool xe2Plus = device.architectureID() == eva::Architecture::INTEL_XE2 ||
                          device.architectureID() == eva::Architecture::INTEL_XE3;
 
-    if (!xe2Plus && device.supportsSubgroupExtendedTypes() && groupSize <= 16u && Tq * groupSize >= 16u)
+    const bool xe3 = device.architectureID() == eva::Architecture::INTEL_XE3;
+    if ((!xe2Plus || xe3) && device.supportsSubgroupExtendedTypes() && groupSize <= 16u && Tq * groupSize >= 16u)
     {
-        const uint32_t wgSize = Dh <= 64u ? 128u : 256u;
+        const uint32_t wgSize = Dh <= (xe3 ? 127u : 64u) ? 128u : 256u;
         Attention::PipeParamsFA t = {
             .wgSize = wgSize, .sgSize = 16u, .wgRows = 16u, .wgKv = wgSize / 2u, .dhSplit = 1u, .rowGroups = 1u
         };
@@ -952,6 +981,13 @@ inline Attention::Attention(Config config)
     addSlot("V", NodeSlot::input);
     addSlot("partialO", NodeSlot::temporary);    // split-K partials, assigned when kCount > 1
     addSlot("partialML", NodeSlot::temporary);
+    addSlot("xe3Kt",
+            NodeSlot::temporary);   // Xe3 path: K and Q padded (odd head dims), V padded, S / P / 1 / sum of one chunk
+    addSlot("xe3V", NodeSlot::temporary);
+    addSlot("xe3S", NodeSlot::temporary);
+    addSlot("xe3P", NodeSlot::temporary);
+    addSlot("xe3Q", NodeSlot::temporary);
+    addSlot("xe3L", NodeSlot::temporary);
 
     Hkv = config_.numKVHeads > 0 ? config_.numKVHeads : config_.numQHeads;
     VAI_ASSERT(config_.numQHeads % Hkv == 0);
@@ -1032,7 +1068,86 @@ inline void Attention::prepare()
     const uint32_t Dh = config_.headDim;
     const uint32_t nKv =
         config_.kvCacheRing && !intelKernels ? std::min(cached + Tkv, config_.kvCacheSize) : cached + Tkv;
-    useFa = supportsFlashAttention(Dh, device());
+    // Xe3 on the fork's 2D block loads: Q K^T and P V run on the Linear kernel (linear-cm-xe3) with a
+    // softmax pass between them, fp16 throughout. With a cache: one sequence, one KV head, no ring, and
+    // every size is the cache's capacity, so the recording holds while the counter moves. Without one:
+    // any sequences and heads, each KV head a product of a batched dispatch.
+    const bool caching = config_.kvCacheSize > 0;
+    xe3_ =
+        device().vendorID() == eva::VENDOR_ID::INTEL && device().architectureID() == eva::Architecture::INTEL_XE3 &&
+        ggmlCoopmatShape(device()).valid() && intelBlock2dDriver() && iDtype == Dtype::Fp16 &&
+        (!hasKv || K.dtype() == Dtype::Fp16) && Dh >= 16u && Dh % 4u == 0u && groupSize_ * Tq >= 64u &&
+        (caching ? (B == 1u && Hkv == 1u && !config_.kvCacheRing && config_.kvCacheDtype == Dtype::Fp16)
+                 : (hasKv && Tkv >= 16u));
+    if (xe3_)
+    {
+        const uint32_t Hq = config_.numQHeads, groups = B * Hkv, groupRows = groupSize_ * Tq;
+        xe3Keys_ = caching ? config_.kvCacheSize : Tkv;
+        xe3KeyRows_ = ROUNDUP(xe3Keys_, 16u);
+        xe3Dh16_ = ROUNDUP(Dh, 16u);
+        const bool padQ = xe3Dh16_ != Dh;
+        const uint32_t ldv = xe3WeightPitch(Dh);
+        // Chunks whose S stays about 8 MB, so S and P stay in the cache between the passes.
+        const uint64_t sBudget = 8ull << 20;
+        const uint32_t productRows = groups == 1u ? Tq : groupRows;   // rows of what a chunk counts
+        xe3PerChunk_ =
+            std::clamp(uint32_t(sBudget / (uint64_t(productRows) * xe3KeyRows_ * 4u)), 1u, groups == 1u ? Hq : groups);
+        const uint32_t chunkRows = xe3PerChunk_ * productRows;
+        const uint32_t chunks = CEIL_DIV(groups == 1u ? Hq : groups, xe3PerChunk_);
+        const uint32_t gemmRows = groups == 1u ? chunkRows : groupRows;   // M of one product
+        xe3QkPick_ = xe3LinearPick(gemmRows, xe3Dh16_, xe3KeyRows_, false);
+        xe3PvPick_ = xe3LinearPick(gemmRows, xe3KeyRows_, Dh, false);
+
+        auto gemm = [&](const Xe3Pick& k, Dtype out, uint32_t oPerm) {   // oPerm: the P V product, else Q K^T
+            // clang-format off
+            return pipelinePool().request("linear-cm-xe3", {
+                eva::constant_id<0>(16u * k.sgM * k.sgN),   // wgSize
+                eva::constant_id<1>(k.sgM),
+                eva::constant_id<2>(k.sgN),
+                eva::constant_id<3>(k.uM),
+                eva::constant_id<4>(k.uN),
+                eva::constant_id<5>(k.kUnroll),
+                eva::constant_id<6>(k.order),
+                eva::constant_id<7>(k.prefetch),            // pf
+                eva::constant_id<8>(k.prefetch),            // bar (with pf)
+                eva::constant_id<9>(0u),                    // skew
+                eva::constant_id<10>(0u),                   // smod
+                eva::constant_id<11>(oPerm),                // token-major O
+                eva::constant_id<12>(1u),                   // z = a product
+                eva::constant_id<13>(oPerm),                // rows scaled by the softmax pass's 1 / sum
+                eva::constant_id<14>(1u - oPerm),           // Q K^T: K as it lies, [key, Dh], loaded transposed
+                eva::constant_id<SPEC_ID_TYPE_O>(out)
+            }, {
+                .requiredSubgroupSize = 16,
+            });
+            // clang-format on
+        };
+        pipeXe3Qk_ = gemm(xe3QkPick_, Dtype::Fp32, 0u);
+        pipeXe3Pv_ = gemm(xe3PvPick_, oDtype, 1u);
+        pipeXe3Prep_ = pipelinePool().request(
+            "attention-prep-xe3", { eva::constant_id<0>(uint32_t(caching)), eva::constant_id<1>(uint32_t(padQ)) });
+        pipeXe3Softmax_ = pipelinePool().request(
+            "attention-softmax-xe3", { eva::constant_id<0>(uint32_t(caching)) }, { .requiredSubgroupSize = 16 });
+        if (!descSetXe3Prep_)
+        {
+            descSetXe3Prep_ = gVaiDestSetPool(pipeXe3Prep_.descSetLayout(0));
+            descSetXe3Softmax_ = gVaiDestSetPool(pipeXe3Softmax_.descSetLayout(0));
+        }
+        while (descSetXe3Qk_.size() < chunks)
+        {
+            descSetXe3Qk_.push_back(gVaiDestSetPool(pipeXe3Qk_.descSetLayout(0)));
+            descSetXe3Pv_.push_back(gVaiDestSetPool(pipeXe3Pv_.descSetLayout(0)));
+        }
+
+        (*this)["xe3Kt"] = padQ ? Tensor({ groups, xe3KeyRows_, xe3Dh16_ }, Dtype::Fp16) : Tensor();
+        (*this)["xe3V"] = Tensor({ groups, xe3KeyRows_, ldv }, Dtype::Fp16);
+        (*this)["xe3S"] = Tensor({ chunkRows, xe3KeyRows_ }, Dtype::Fp32);
+        (*this)["xe3P"] = Tensor({ chunkRows, xe3KeyRows_ }, Dtype::Fp16);
+        (*this)["xe3L"] = Tensor({ chunkRows }, Dtype::Fp32);
+        (*this)["xe3Q"] = padQ ? Tensor({ groups * groupRows, xe3Dh16_ }, Dtype::Fp16) : Tensor();
+    }
+
+    useFa = !xe3_ && supportsFlashAttention(Dh, device());
 
     if (useFa)
     {
@@ -1197,7 +1312,7 @@ inline void Attention::prepare()
     }
 
     const PipeParamsNaive n = { .iDtype = iDtype, .kvDtype = kvDtype };
-    if (!useFa && (!pipeNaive || n != pipeParamsNaive))
+    if (!useFa && !xe3_ && (!pipeNaive || n != pipeParamsNaive))
     {
         pipeParamsNaive = n;
         // clang-format off
@@ -1235,6 +1350,101 @@ inline void Attention::run(eva::CommandBuffer cmdBuff)
     auto K_cache = caching ? (*this)["K_cache"].buffer() : eva::Buffer();
     auto V_cache = caching ? (*this)["V_cache"].buffer() : eva::Buffer();
     auto counter = caching ? kvCacheCounter : eva::Buffer();
+
+    if (xe3_)
+    {
+        const uint32_t Dh = config_.headDim, Dh16 = xe3Dh16_, Hq = config_.numQHeads;
+        const uint32_t groups = B * Hkv, groupRows = groupSize_ * Tq_;
+        const uint32_t ldv = xe3WeightPitch(Dh);
+        const bool padQ = Dh16 != Dh;
+        auto Kp = padQ ? (*this)["xe3Kt"].buffer() : eva::Buffer();
+        auto Vp = (*this)["xe3V"].buffer();
+        auto S = (*this)["xe3S"].buffer();
+        auto P = (*this)["xe3P"].buffer();
+        auto L = (*this)["xe3L"].buffer();
+        auto Qp = padQ ? (*this)["xe3Q"].buffer() : eva::Buffer();
+        const auto computeToCompute = eva::SYNC_SCOPE::COMPUTE_WRITE / eva::SYNC_SCOPE::COMPUTE_READ;
+
+        // The keys of this dispatch, laid out for both products, and the append.
+        const uint32_t prepConsts[] = {
+            Dh / 4u, Dh16 / 4u, Tkv, config_.kvCacheSize, xe3KeyRows_, ldv / 4u, groupRows
+        };
+        descSetXe3Prep_.write({ Kp, Vp, K, V, K_cache, V_cache, counter, Qp, Q });
+        cmdBuff.bindPipeline(pipeXe3Prep_)
+            .bindDescSets({ descSetXe3Prep_ })
+            .setPushConstants(0, sizeof(prepConsts), prepConsts)
+            .dispatch(CEIL_DIV(Dh16 / 4u, 16u), std::max(xe3KeyRows_, padQ ? groupRows : 0u), groups)
+            .barrier(computeToCompute);
+
+        descSetXe3Softmax_.write({ P, S, counter, causalMask, L });
+        auto grid = [](const Xe3Pick& k, uint32_t M, uint32_t N, uint32_t& gx, uint32_t& gy) {
+            const uint32_t tilesM = CEIL_DIV(M, k.sgM * k.uM * 8u), tilesN = CEIL_DIV(N, k.sgN * k.uN * 16u);
+            gx = k.order == 0u ? tilesN : tilesM;
+            gy = k.order == 0u ? tilesM : tilesN;
+        };
+        const uint32_t maxX = device().maxComputeWorkGroupCount()[0];
+        const uint32_t units = groups == 1u ? Hq : groups;   // what a chunk counts: heads, or groups
+        const uint64_t qPitch = padQ ? Dh16 : Dh;
+        for (uint32_t u0 = 0, chunk = 0; u0 < units; u0 += xe3PerChunk_, ++chunk)
+        {
+            const uint32_t count = std::min(xe3PerChunk_, units - u0);
+            // One group: `count` of its heads as one product. Else `count` groups, a product each.
+            const uint32_t products = groups == 1u ? 1u : count;
+            const uint32_t h0 = groups == 1u ? u0 : 0u, g0 = groups == 1u ? 0u : u0;
+            const uint32_t M = groups == 1u ? count * Tq_ : groupRows, rows = products * M;
+            const uint64_t row0 = groups == 1u ? uint64_t(h0) * Tq_ : uint64_t(g0) * groupRows;
+            uint32_t gx, gy;
+
+            // S = Q K^T against every key row. K is read where it lies: the cache (the append is in), the
+            // input without one, or the padded copy.
+            const bool caching = config_.kvCacheSize > 0;
+            const uint32_t kRows = padQ ? xe3KeyRows_ : caching ? config_.kvCacheSize : Tkv;   // of one group
+            auto kSrc = padQ ? Kp : caching ? K_cache : K;
+            // N is the key rows up to whole 16s: the columns past the keys hold nothing the softmax reads.
+            const uint32_t qkConsts[] = {
+                M, xe3KeyRows_, Dh16, Dh16, uint32_t(qPitch), Dh16, 0u, 0u, 0u, 1u, 0u, M, kRows
+            };
+            descSetXe3Qk_[chunk].write(
+                { S,
+                  (padQ ? Qp : Q)(row0 * qPitch * 2u, uint64_t(rows) * qPitch * 2u),
+                  kSrc(uint64_t(g0) * kRows * Dh16 * 2u, uint64_t(products) * kRows * Dh16 * 2u),
+                  L });
+            grid(xe3QkPick_, M, xe3KeyRows_, gx, gy);
+            cmdBuff.bindPipeline(pipeXe3Qk_)
+                .bindDescSets({ descSetXe3Qk_[chunk] })
+                .setPushConstants(0, sizeof(qkConsts), qkConsts)
+                .dispatch(gx, gy, products)
+                .barrier(computeToCompute);
+
+            // P = softmax over the keys each query may read.
+            const uint32_t smY = CEIL_DIV(rows, maxX), smX = CEIL_DIV(rows, smY);
+            struct
+            {
+                uint32_t M, Tq, Tkv, ld;
+                float scale;
+                uint32_t gridX;
+            } smConsts = { rows, Tq_, Tkv, xe3KeyRows_, 1.0f / std::sqrt(float(Dh)), smX };
+            cmdBuff.bindPipeline(pipeXe3Softmax_)
+                .bindDescSets({ descSetXe3Softmax_ })
+                .setPushConstants(0, sizeof(smConsts), &smConsts)
+                .dispatch(smX, smY, 1)
+                .barrier(computeToCompute);
+
+            // O = P V, stored [sequence, token, head].
+            const uint32_t pvConsts[] = {
+                M, Dh, xe3KeyRows_, xe3KeyRows_, xe3KeyRows_, ldv, Tq_, Hq, h0, Hkv, g0, M, xe3KeyRows_
+            };
+            descSetXe3Pv_[chunk].write(
+                { O, P, Vp(uint64_t(g0) * xe3KeyRows_ * ldv * 2u, uint64_t(products) * xe3KeyRows_ * ldv * 2u), L });
+            grid(xe3PvPick_, M, Dh, gx, gy);
+            cmdBuff.bindPipeline(pipeXe3Pv_)
+                .bindDescSets({ descSetXe3Pv_[chunk] })
+                .setPushConstants(0, sizeof(pvConsts), pvConsts)
+                .dispatch(gx, gy, products)
+                .barrier(computeToCompute);
+        }
+        return;
+    }
 
     // Bindings: 0 O, 1 Q, 2 K, 3 V, 4 K_cache, 5 V_cache, 6 kvCacheCount, then the
     // causal mask at 7 (naive) or 9 (FA, after the split-K partials).

@@ -56,6 +56,15 @@
 
  Dispatch (host): order 0: (ceil(N / wgTileN), ceil(M / wgTileM), splits),
                   order 1: x and y swapped (M tiles on x).
+
+ Attention's Xe3 path runs its two products on this kernel:
+   batch:  workgroup z is one of several products with no K split; I, W and O
+           step iBatch rows, wBatch rows and M rows from one to the next.
+   wNk:    W is [N, ldnW >= K] rows, loaded transposed: Q K^T reads the keys
+           as they lie, [key, Dh].
+   oPerm:  O is stored [sequence, token, head] (see the push constants).
+   oScale: O row m of product z is scaled by L[z * M + m] (binding 3), the
+           softmax pass's 1 / sum.
 =============================================================================*/
 #version 450
 #extension GL_GOOGLE_include_directive : require
@@ -80,12 +89,17 @@ layout(constant_id = 7) const uint pf      = 0;     // > 0: prefetch the workgro
 layout(constant_id = 8) const uint bar     = 0;     // 1: split barrier every trip
 layout(constant_id = 9) const uint skew    = 0;     // > 0: M row g of subgroups runs 16 * skew * g k ahead
 layout(constant_id = 10) const uint smod   = 0;     // > 0: the lead repeats every smod M rows
+layout(constant_id = 11) const uint oPerm  = 0;     // 1: O rows go out token-major (Attention's Xe3 path)
+layout(constant_id = 12) const uint batch  = 0;     // 1: workgroup z is one of several products, not a K split
+layout(constant_id = 13) const uint oScale = 0;     // 1: O row m of product z is scaled by L[z * M + m]
+layout(constant_id = 14) const uint wNk    = 0;     // 1: W is [N, ldnW >= K] rows, loaded transposed (keys as they lie)
 layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0;  // O (output) dtype
 
 layout(set = 0, binding = 0) writeonly buffer O_BUF_F32 { float bufferO_f32[]; };
 layout(set = 0, binding = 0) writeonly buffer O_BUF_F16 { float16_t bufferO_f16[]; };
 layout(set = 0, binding = 1) readonly buffer I_BUF { float16_t bufferI[]; };
 layout(set = 0, binding = 2) readonly buffer W_BUF { float16_t bufferW[]; };
+layout(set = 0, binding = 3) readonly buffer L_BUF { float bufferL[]; };   // oScale only (else any buffer)
 
 layout(push_constant) uniform PushConstants {
     uint M;
@@ -94,6 +108,15 @@ layout(push_constant) uniform PushConstants {
     uint splitSize;   // K span per workgroup-z (= K without splitting)
     uint ldkI;        // row pitch of I in elements (>= K)
     uint ldnW;        // pitch of W's k rows in elements (>= N)
+    // oPerm: product g = oG0 + z is (sequence g / oHkv, KV head g % oHkv), and its row m is
+    // (head oH0 + m / oTq of that KV head's, token m % oTq): O is [sequence, token, head].
+    uint oTq;
+    uint oHq;
+    uint oH0;
+    uint oHkv;
+    uint oG0;
+    uint iBatch;      // batch: rows of I and of W from one product to the next
+    uint wBatch;
 };
 
 void writeO(uint i, float v) { if (typeO == DTYPE_F32) bufferO_f32[i] = v; else bufferO_f16[i] = float16_t(v); }
@@ -119,7 +142,9 @@ void main()
     if (bar == 0u && (n0 >= N || m0 >= M))   // with barriers every subgroup stays
         return;
 
-    const uint kBegin = gl_WorkGroupID.z * splitSize, kEnd = min(K, kBegin + splitSize);
+    const uint kBegin = (batch == 0u) ? gl_WorkGroupID.z * splitSize : 0u, kEnd = min(K, kBegin + splitSize);
+    const uint iRow0 = (batch == 0u) ? 0u : gl_WorkGroupID.z * iBatch;   // the product's first row of I, of W
+    const uint wRow0 = (batch == 0u) ? 0u : gl_WorkGroupID.z * wBatch;
 
     MAT_C acc[uM * uN];
     [[unroll]] for (uint t = 0; t < uM * uN; t++)
@@ -130,10 +155,13 @@ void main()
     {                                                                                               \
         MAT_B b[uN];                                                                                \
         [[unroll]] for (uint j = 0; j < uN; j++)                                                    \
-            coopMatLoad(b[j], bufferW, (kb) * ldnW + (n0 + j * TN), ldnW, gl_CooperativeMatrixLayoutRowMajor); \
+            if (wNk == 0u)                                                                          \
+                coopMatLoad(b[j], bufferW, (wRow0 + (kb)) * ldnW + (n0 + j * TN), ldnW, gl_CooperativeMatrixLayoutRowMajor); \
+            else                                                                                    \
+                coopMatLoad(b[j], bufferW, (wRow0 + n0 + j * TN) * ldnW + (kb), ldnW, gl_CooperativeMatrixLayoutColumnMajor); \
         MAT_A a[uM];                                                                                \
         [[unroll]] for (uint i = 0; i < uM; i++)                                                    \
-            coopMatLoad(a[i], bufferI, (m0 + i * TM) * ldkI + (kb), ldkI, gl_CooperativeMatrixLayoutRowMajor); \
+            coopMatLoad(a[i], bufferI, (iRow0 + m0 + i * TM) * ldkI + (kb), ldkI, gl_CooperativeMatrixLayoutRowMajor); \
         [[unroll]] for (uint j = 0; j < uN; j++)                                                    \
             [[unroll]] for (uint i = 0; i < uM; i++)                                                \
                 acc[i * uN + j] = coopMatMulAdd(a[i], b[j], acc[i * uN + j]);                       \
@@ -167,19 +195,23 @@ void main()
                 const uint r = sg + q * NSG;
                 MAT_A pfm;
                 if (r < PF_A && skew == 0u)
-                    coopMatLoad(pfm, bufferI, (wgM0 + (r / PF_K) * 32u) * ldkI + kBegin + t + pf * CHUNK + (r % PF_K) * 32u,
+                    coopMatLoad(pfm, bufferI, (iRow0 + wgM0 + (r / PF_K) * 32u) * ldkI + kBegin + t + pf * CHUNK + (r % PF_K) * 32u,
                                 ldkI | PF_STRIDE, gl_CooperativeMatrixLayoutRowMajor);
                 else if (r < PF_A)
                 {
                     const uint g = r / (PF_RM * PF_K), rr = r % (PF_RM * PF_K);
                     const uint row = (rr / PF_K) * 32u;
-                    coopMatLoad(pfm, bufferI, (wgM0 + g * SG_TILE_M + row) * ldkI
+                    coopMatLoad(pfm, bufferI, (iRow0 + wgM0 + g * SG_TILE_M + row) * ldkI
                                 + K_AT(t + pf * CHUNK, g) + (rr % PF_K) * 32u,
                                 ldkI | PF_STRIDE, gl_CooperativeMatrixLayoutRowMajor);
                 }
-                else if (r < PF_A + PF_B)
-                    coopMatLoad(pfm, bufferW, (K_AT(t + pf * CHUNK, gLead) + ((r - PF_A) % PF_K) * 32u) * ldnW
+                else if (r < PF_A + PF_B && wNk == 0u)
+                    coopMatLoad(pfm, bufferW, (wRow0 + K_AT(t + pf * CHUNK, gLead) + ((r - PF_A) % PF_K) * 32u) * ldnW
                                 + wgN0 + ((r - PF_A) / PF_K) * 32u,
+                                ldnW | PF_STRIDE, gl_CooperativeMatrixLayoutRowMajor);
+                else if (r < PF_A + PF_B)
+                    coopMatLoad(pfm, bufferW, (wRow0 + wgN0 + ((r - PF_A) / PF_K) * 32u) * ldnW
+                                + K_AT(t + pf * CHUNK, gLead) + ((r - PF_A) % PF_K) * 32u,
                                 ldnW | PF_STRIDE, gl_CooperativeMatrixLayoutRowMajor);
                 if (M == 0xFFFFFFFFu)   // never: keeps the request alive
                     writeO(0, float(pfm[0]));
@@ -197,6 +229,7 @@ void main()
 
     // C[r][lane] = O[m + r][n + lane]; partials to P[z].
     const uint zOff = gl_WorkGroupID.z * M * N;
+    const uint oG = oG0 + gl_WorkGroupID.z;
     [[unroll]] for (uint i = 0; i < uM; i++)
         [[unroll]] for (uint j = 0; j < uN; j++)
         {
@@ -205,7 +238,9 @@ void main()
             {
                 const uint m = m0 + i * TM + r;
                 if (m < M && n < N)
-                    writeO(zOff + m * N + n, acc[i * uN + j][r]);
+                    writeO((oPerm == 0u) ? zOff + m * N + n
+                                         : (((oG / oHkv) * oTq + m % oTq) * oHq + (oG % oHkv) * (oHq / oHkv) + oH0 + m / oTq) * N + n,
+                           (oScale == 0u) ? acc[i * uN + j][r] : acc[i * uN + j][r] * bufferL[gl_WorkGroupID.z * M + m]);
             }
         }
 }

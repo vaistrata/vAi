@@ -3130,6 +3130,8 @@ inline void Linear::run(eva::CommandBuffer cmdBuff)
     if (amdKernel)
         set.write(
             { dst, inBuf, wBuf, hasBias() ? (*this)["bias"].buffer() : dst, config_.acceptResidual ? rBuf : dst });
+    else if (xe3_)
+        set.write({ dst, inBuf, wBuf, dst });   // 3: linear-cm-xe3's row scale, read by Attention's Xe3 path only
     else
         set.write({ dst, inBuf, wBuf });
     cmdBuff.bindPipeline(pipeTile).bindDescSets({ set }).setPushConstants(0, constantsSize, constants);

@@ -1,0 +1,77 @@
+/*=============================================================================
+ attention-prep-xe3.comp: the cache append and the padded copies the Xe3
+     attention passes read (Attention's Xe3 path)
+
+     Group g (workgroup z) is one KV head of one sequence. Its key row r
+     (r < keys = kvCacheCount + Tkv) is the cache's row r below kvCacheCount,
+     else the K / V input row r - kvCacheCount, which is appended to the cache.
+     Vp [G, rows, ldv]:   Vp[g, r, d] = V[r, d], 0 from keys on
+                          (linear-cm-xe3's W for P V: whole 16-row steps, a 32 pitch)
+     padQ (Dh not whole 16s), with zeros from Dh to Dh16:
+     Qp [G * R, Dh16] = Q's rows,  Kp [G, rows, Dh16] = the key rows of K.
+
+ The sizes are the cache's capacity (rows = Tmax up to whole 16s), so a
+ recording holds while the counter moves. kvCaching == 0: no cache, the keys
+ are the Tkv inputs. Dh is whole 4s; one invocation per (4 head dims, r, g).
+=============================================================================*/
+#version 450
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+layout(local_size_x = 16, local_size_y = 1, local_size_z = 1) in;
+
+layout(constant_id = 0) const uint kvCaching = 1;   // 0: the cache and counter bindings are null
+layout(constant_id = 1) const uint padQ = 0;        // 1: Q and K are copied into Qp and Kp
+
+layout(set = 0, binding = 0) writeonly buffer KP_BUF { f16vec4 bufferKp[]; };
+layout(set = 0, binding = 1) writeonly buffer VP_BUF { f16vec4 bufferVp[]; };
+layout(set = 0, binding = 2) readonly buffer K_BUF { f16vec4 bufferK[]; };
+layout(set = 0, binding = 3) readonly buffer V_BUF { f16vec4 bufferV[]; };
+layout(set = 0, binding = 4) buffer KCACHE_BUF { f16vec4 bufferKCache[]; };
+layout(set = 0, binding = 5) buffer VCACHE_BUF { f16vec4 bufferVCache[]; };
+layout(set = 0, binding = 6) uniform UB { uint kvCacheCount; };
+layout(set = 0, binding = 7) writeonly buffer QP_BUF { f16vec4 bufferQp[]; };
+layout(set = 0, binding = 8) readonly buffer Q_BUF { f16vec4 bufferQ[]; };
+
+// Every count is in quads (4 elements).
+layout(push_constant) uniform PushConstants {
+    uint Dh4;     // Dh / 4
+    uint Dh16q;   // Dh up to whole 16s, / 4
+    uint Tkv;     // K / V input rows
+    uint Tmax;    // the cache's rows per KV head
+    uint rows;    // key rows laid out
+    uint ldv4;    // pitch of Vp's rows / 4
+    uint R;       // query rows of a group
+};
+
+void main()
+{
+    const uint d = gl_GlobalInvocationID.x, r = gl_GlobalInvocationID.y, g = gl_GlobalInvocationID.z;
+    if (d >= Dh16q) return;
+
+    if (padQ != 0u && r < R)
+        bufferQp[(g * R + r) * Dh16q + d] = (d < Dh4) ? bufferQ[(g * R + r) * Dh4 + d] : f16vec4(0.0);
+    if (r >= rows) return;
+
+    const uint cached = (kvCaching != 0u) ? kvCacheCount : 0u;
+    f16vec4 k = f16vec4(0.0), v = f16vec4(0.0);
+    if (d < Dh4 && r < cached)
+    {
+        if (padQ != 0u)
+            k = bufferKCache[(g * Tmax + r) * Dh4 + d];
+        v = bufferVCache[(g * Tmax + r) * Dh4 + d];
+    }
+    else if (d < Dh4 && r < cached + Tkv)
+    {
+        k = bufferK[(g * Tkv + r - cached) * Dh4 + d];
+        v = bufferV[(g * Tkv + r - cached) * Dh4 + d];
+        if (kvCaching != 0u)
+        {
+            bufferKCache[(g * Tmax + r) * Dh4 + d] = k;
+            bufferVCache[(g * Tmax + r) * Dh4 + d] = v;
+        }
+    }
+    if (padQ != 0u)
+        bufferKp[(g * rows + r) * Dh16q + d] = k;
+    bufferVp[(g * rows + r) * ldv4 + d] = v;
+}

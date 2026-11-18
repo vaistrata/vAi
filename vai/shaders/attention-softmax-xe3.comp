@@ -1,0 +1,94 @@
+/*=============================================================================
+ attention-softmax-xe3.comp: the softmax between Q K^T and P V (Attention's
+     Xe3 path), one row a workgroup of one subgroup
+
+     S [M, ld] fp32: row m = (head, token t = m % Tq) of Q K^T against every
+                     key row
+     P [M, ld] fp16: exp(scale * (S - row max)) over the keys the query may
+                     read, [keyStart, kvCacheCount + keyEnd), 0 elsewhere
+     L [M] fp32:     1 / the row's sum of P as stored, which the P V product
+                     applies to its output row (linear-cm-xe3's oScale)
+
+ The key range is attention.comp's: the cache whole, the new keys up to the
+ mask's end, a span from below. An empty range leaves the row 0.
+ ld is whole 16s; a lane takes 4 columns a step, every 16th quad.
+=============================================================================*/
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#include "common/spec_constants.h"
+
+layout(local_size_x = 16, local_size_y = 1, local_size_z = 1) in;
+
+layout(constant_id = 0) const uint kvCaching = 1;   // 0: the counter binding is null
+
+layout(set = 0, binding = 0) writeonly buffer P_BUF { f16vec4 bufferP[]; };
+layout(set = 0, binding = 1) readonly buffer S_BUF { vec4 bufferS[]; };
+layout(set = 0, binding = 2) uniform UB { uint kvCacheCount; };
+layout(set = 0, binding = 4) writeonly buffer L_BUF { float bufferL[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint M;       // rows of this chunk
+    uint Tq;
+    uint Tkv;
+    uint ld;      // pitch of S and P in elements
+    float scale;
+    uint gridX;   // workgroups along x, so the y fold can be undone
+};
+
+#define CAUSAL_MASK_BINDING 3
+#include "common/causal_mask.h"
+
+bvec4 inRange(uvec4 c, uint a, uint b)
+{
+    return bvec4(c.x >= a && c.x < b, c.y >= a && c.y < b, c.z >= a && c.z < b, c.w >= a && c.w < b);
+}
+
+void main()
+{
+    const uint row = gl_WorkGroupID.y * gridX + gl_WorkGroupID.x;
+    if (row >= M) return;
+    const uint lane = gl_LocalInvocationID.x;
+    const uint t = row % Tq;
+    const uint cached = (kvCaching != 0u) ? kvCacheCount : 0u;
+
+    // attention.comp's keyPos / keyStart / keyEnd.
+    const uint pos = cached + uint(max(int(t + Tkv) - int(Tq), 0));
+    const uint first = keyStart(pos);
+    const uint last = min(cached + uint(max(int(newTokenEnd(t) + Tkv) - int(Tq), 0)), ld);
+    const uint q0 = row * (ld / 4u), quads = ld / 4u;
+    const uvec4 off = uvec4(0u, 1u, 2u, 3u);
+
+    float mx = -3.0e38;
+    for (uint q = lane; q < quads; q += 16u)
+    {
+        const uvec4 c = uvec4(q * 4u) + off;
+        if (c.w < first || c.x >= last) continue;
+        const vec4 s = mix(vec4(-3.0e38), bufferS[q0 + q], inRange(c, first, last));
+        mx = max(mx, max(max(s.x, s.y), max(s.z, s.w)));
+    }
+    mx = subgroupMax(mx);
+
+    // The sum is of the values P holds (fp16), so the row sums to 1 after the scale.
+    float sum = 0.0;
+    for (uint q = lane; q < quads; q += 16u)
+    {
+        const uvec4 c = uvec4(q * 4u) + off;
+        f16vec4 e = f16vec4(0.0);
+        if (c.w >= first && c.x < last)
+        {
+            const bvec4 in4 = inRange(c, first, last);
+            e = f16vec4(mix(vec4(0.0), exp((bufferS[q0 + q] - mx) * scale), in4));
+            const vec4 ef = vec4(e);
+            sum += (ef.x + ef.y) + (ef.z + ef.w);
+        }
+        bufferP[q0 + q] = e;
+    }
+    sum = subgroupAdd(sum);
+    if (lane == 0u)
+        bufferL[row] = (sum > 0.0) ? 1.0 / sum : 0.0;
+}
