@@ -159,6 +159,21 @@ The `vAi` column names the commit the results hold for. They were measured with 
 
 `trt`'s TensorRT Edge-LLM row is measured with `--atol 0.2 --rtol 0.1`; the other rows pass the default tolerances.
 
+#### NVIDIA GeForce RTX 4090
+
+| OS | Vulkan driver | Compute stack | GPU clock (core / memory) | vAi |
+|---|---|---|---|---|
+| Ubuntu 24.04.5 LTS | NVIDIA 615.71.09 | CUDA 13.4, TensorRT 10.16.1, TensorRT Edge-LLM 0.11.1, vla.cpp v0.4.0 | Default | `5c08886` |
+
+| Comparison | Image + text tokens | Framework | Latency (ms) | Min (ms) | Max abs error |
+|---|---:|---|---:|---:|---:|
+| `vlacpp` | 512 + 154 | **vAi** | **52.20 ± 0.33** | 51.81 | 0.0019 |
+| | | vla.cpp | 55.55 ± 0.04 | 55.47 | 0.00284 |
+| `trt` | 512 + 17 | vAi | 45.02 ± 0.52 | 44.16 | 0.00273 |
+| | | **TensorRT Edge-LLM** | **32.01 ± 0.39** | 31.85 | 0.00341 |
+
+Each row is the median of three runs. Only `vlacpp`'s vAi row passes the default tolerances; vla.cpp's row is measured with `--atol 0.005`, and both `trt` rows with `--atol 0.2 --rtol 0.1`. vAi's `trt` row, which passes the default tolerances on the RTX 5090, misses them here by one of 320 values.
+
 #### AMD Strix Halo (Radeon 8060S, gfx1151)
 
 | OS | Vulkan driver | Compute stack | GPU clock (core / memory) | vAi |

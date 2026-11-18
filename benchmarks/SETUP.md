@@ -13,6 +13,8 @@ Each framework's setup script installs a pinned release into a user cache outsid
 
 The vAi sources need GCC 14+ or Clang 18+. Where the default compiler is older, name one when configuring, e.g. `-DCMAKE_CXX_COMPILER=g++-14`.
 
+The shaders need a recent `glslc`. Ubuntu 24.04's (shaderc 2023.8) fails to optimize `linear-cm-amd.comp` ("Cooperative matrix type must be B Type"); the LunarG Vulkan SDK's, or conda-forge's `shaderc` (2026.4 works), builds it. Name it when configuring, e.g. `-DVulkan_GLSLC_EXECUTABLE=<prefix>/bin/glslc`.
+
 > [!WARNING]
 > WSL cannot be benched: its Vulkan runs through a D3D12 translation layer (Mesa dzn). Use a native Windows build.
 
@@ -221,6 +223,15 @@ mkdir -p data/benchmarks/pi05/libero
 - Python 3 with its venv module (Ubuntu: `python3-venv`)
 - CUDA 12 or 13 (`nvcc`; `CUDA_HOME` where it is not on `PATH`)
 - A TensorRT C++ SDK built for that CUDA, with its plugins and ONNX parser (`TRT_PACKAGE_DIR` for an extracted SDK, default `/usr`)
+
+From NVIDIA's CUDA apt repository, pin every package to one release, `libnvinfer-safe-headers-dev` included: left unpinned, apt picks the newest release for it, and the install fails on its dependencies. The results were measured with TensorRT 10.16.1:
+
+```bash
+V=10.16.1.11-1+cuda13.2
+sudo apt-get install libnvinfer-dev=$V libnvinfer-headers-dev=$V libnvinfer-safe-headers-dev=$V libnvinfer10=$V \
+    libnvinfer-plugin-dev=$V libnvinfer-headers-plugin-dev=$V libnvinfer-plugin10=$V \
+    libnvonnxparsers-dev=$V libnvonnxparsers10=$V
+```
 
 [setup-trt-edge-llm.sh](scripts/setup-trt-edge-llm.sh) installs TensorRT Edge-LLM `v0.11.1`: its C++ libraries, the experimental pi0.5 runtime and the policy tools (`pi05_policy_build`), with its CuTe DSL kernels for the SM of GPU `GPU_INDEX` (default 0; `CUDA_ARCH` names another). It links the install at `~/.cache/vai/TensorRT-Edge-LLM`, where CMake reads `TensorRTEdgeLLM_ROOT`, and keeps the clone with its submodules in `~/.cache/vai/TensorRT-Edge-LLM-v0.11.1-src`, from which the export below installs its exporter.
 
