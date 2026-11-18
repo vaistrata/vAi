@@ -1264,23 +1264,22 @@ inline void Attention::run(eva::CommandBuffer cmdBuff)
         cmdBuff.bindPipeline(pipeFA)
             .bindDescSets({ descSetFA })
             .setPushConstants(0, sizeof(faConsts), &faConsts)
-            .dispatch(CEIL_DIV(Tq_, p.tileTokens) * splitKCount, config_.numQHeads / p.tileHeads, B);
+            .dispatch(CEIL_DIV(Tq_, p.tileTokens) * splitKCount, config_.numQHeads / p.tileHeads, B)
+            .barrier(eva::SYNC_SCOPE::COMPUTE_WRITE / eva::SYNC_SCOPE::COMPUTE_READ);
 
         if (split)
         {
             struct { uint32_t Dh, kCount; } reduceConsts = { config_.headDim, splitKCount };
 
             descSetReduce.write({ O, PO, PML });
-            cmdBuff.barrier(eva::SYNC_SCOPE::COMPUTE_WRITE / PO / eva::SYNC_SCOPE::COMPUTE_READ)
-                .barrier(eva::SYNC_SCOPE::COMPUTE_WRITE / PML / eva::SYNC_SCOPE::COMPUTE_READ)
-                .bindPipeline(pipeReduce)
+            cmdBuff.bindPipeline(pipeReduce)
                 .bindDescSets({ descSetReduce })
                 .setPushConstants(0, sizeof(reduceConsts), &reduceConsts)
                 // One workgroup per output row; the Intel reduce splits the head dim across y.
                 .dispatch(
-                    outRows(), pipeParamsReduce.intel ? CEIL_DIV(config_.headDim, pipeParamsReduce.blockSize) : 1u, 1);
+                    outRows(), pipeParamsReduce.intel ? CEIL_DIV(config_.headDim, pipeParamsReduce.blockSize) : 1u, 1)
+                .barrier(eva::SYNC_SCOPE::COMPUTE_WRITE / O / eva::SYNC_SCOPE::COMPUTE_READ);
         }
-        cmdBuff.barrier(eva::SYNC_SCOPE::COMPUTE_WRITE / O / eva::SYNC_SCOPE::COMPUTE_READ);
     }
     else
     {
@@ -1300,7 +1299,7 @@ inline void Attention::run(eva::CommandBuffer cmdBuff)
             .bindDescSets({ descSetNaive })
             .setPushConstants(0, sizeof(constants), &constants)
             .dispatch2(config_.headDim, Tq_, B * config_.numQHeads)
-            .barrier(eva::SYNC_SCOPE::COMPUTE_WRITE / O / eva::SYNC_SCOPE::COMPUTE_READ);
+            .barrier(eva::SYNC_SCOPE::COMPUTE_WRITE / eva::SYNC_SCOPE::COMPUTE_READ);
     }
 }
 
