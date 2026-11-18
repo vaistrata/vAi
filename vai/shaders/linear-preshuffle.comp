@@ -1,0 +1,99 @@
+/*=============================================================================
+ linear-preshuffle.comp: rewrites a Linear weight W [N, K] into a layout
+     linear-cm-amd.comp reads (Linear::packWeightAmd, once per weight and
+     layout). The output is fp16.
+
+     weightLayout (= Linear::WeightLayout):
+       Rows       W'[n, k] = W[n, k]: a copy, fp16 W only
+       Fragments  W'[n / 16, k / 16, (n % 16) * 16 + k % 16] = W[n, k]:
+                  one 16x16 coopmat fragment per block, zero-padded
+       PermuteN   the lane schedule's fragments. A block is 32 lanes of 8
+                  values: lane l holds 8 consecutive k of one channel, lanes
+                  0..15 the block's first 8 k and 16..31 the next 8. The 8
+                  blocks of 128 channels are its four 32-channel groups, even
+                  channels first, then the odd ones. Zero-padded
+       Kn         W'[k, n] = W[n, k], in 64x64 blocks through shared memory;
+                  fp16 W only, N and K multiples of 64
+
+ Dispatch (host): Rows / Fragments (ceil(K / 16), ceil(N / 16)), PermuteN
+ (ceil(K / 16), ceil(N / 128) * 8), Kn (K / 64, N / 64); 256 threads each.
+=============================================================================*/
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#include "common/spec_constants.h"
+
+layout(local_size_x = 256) in;
+
+layout(constant_id = SPEC_ID_TYPE_W) const uint typeW = 0;
+layout(constant_id = 0) const uint weightLayout = 1;   // LAYOUT_* below
+
+// weightLayout (= Linear::WeightLayout)
+const uint LAYOUT_ROWS = 0u, LAYOUT_FRAGMENTS = 1u, LAYOUT_PERMUTE_N = 2u, LAYOUT_KN = 3u;
+
+// 0 = W' (fp16), 1 = W. Kn moves fp16 pairs as raw words.
+layout(set = 0, binding = 0) writeonly buffer DST { float16_t dst[]; };
+layout(set = 0, binding = 1) readonly buffer W_F32 { float wF32[]; };
+layout(set = 0, binding = 1) readonly buffer W_F16 { float16_t wF16[]; };
+
+layout(set = 0, binding = 0) writeonly buffer PACKED_WORDS { uint packedWords[]; };
+layout(set = 0, binding = 1) readonly buffer WEIGHT_WORDS { uint weightWords[]; };
+shared uint knPackTile[weightLayout == LAYOUT_KN ? 64u * 33u : 1u];
+
+layout(push_constant) uniform PushConstants { uint N; uint K; uint numKb; };   // numKb = ceil(K / 16)
+
+void main()
+{
+    if (weightLayout == LAYOUT_KN)
+    {
+        const uint sourceK = gl_WorkGroupID.x * 64u;
+        const uint sourceN = gl_WorkGroupID.y * 64u;
+
+        for (uint word = gl_LocalInvocationID.x; word < 64u * 32u; word += 256u)
+        {
+            const uint rowN = word / 32u;
+            const uint pairK = word % 32u;
+            knPackTile[rowN * 33u + pairK] =
+                weightWords[(sourceN + rowN) * (K / 2u) + sourceK / 2u + pairK];
+        }
+        barrier();
+
+        for (uint word = gl_LocalInvocationID.x; word < 64u * 32u; word += 256u)
+        {
+            const uint rowK = word / 32u;
+            const uint pairN = word % 32u;
+            const uint shift = (rowK & 1u) * 16u;
+            const uint a = knPackTile[(2u * pairN) * 33u + rowK / 2u];
+            const uint b = knPackTile[(2u * pairN + 1u) * 33u + rowK / 2u];
+            packedWords[(sourceK + rowK) * (N / 2u) + sourceN / 2u + pairN] =
+                ((a >> shift) & 0xffffu) | (((b >> shift) & 0xffffu) << 16u);
+        }
+        return;
+    }
+
+    // One 16x16 block of W per workgroup: thread t is (n, k) = (t / 16, t % 16).
+    const uint nb = gl_WorkGroupID.y;
+    const uint kb = gl_WorkGroupID.x;
+    const uint t = gl_LocalInvocationIndex;
+    const uint offset = (nb * numKb + kb) * 256u + t;
+    uint n = nb * 16u + t / 16u;
+    uint k = kb * 16u + t % 16u;
+
+    if (weightLayout == LAYOUT_ROWS)
+    {
+        if (n < N && k < K) dst[n * K + k] = wF16[n * K + k];
+        return;
+    }
+    if (weightLayout == LAYOUT_PERMUTE_N)
+    {
+        // Each of 32 lane slots holds eight consecutive K values for one even or odd channel.
+        uint lane = t / 8u;
+        n = nb / 8u * 128u + nb % 4u * 32u + lane % 16u * 2u + nb / 4u % 2u;
+        k = kb * 16u + lane / 16u * 8u + t % 8u;
+    }
+    float16_t value = 0.0hf;
+    if (n < N && k < K)
+        value = typeW == DTYPE_F32 ? float16_t(wF32[n * K + k]) : wF16[n * K + k];
+    dst[offset] = value;
+}
