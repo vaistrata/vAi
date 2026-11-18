@@ -4,6 +4,7 @@
 // Linear / fully-connected layer, tile (scalar / coopmat) and slab kernels
 // (ports of the ggml/llama.cpp Vulkan mul_mm / mul_mat_vec kernels).
 #include "common.h"
+#include "linear-tune-table.h"
 #include <optional>
 #include <bit>
 #include <cmath>
@@ -319,7 +320,7 @@ public:
 
 #ifndef VAI_NO_XE3_TUNE
     // Tuning hook (tests/linear-tune-intel-cm/pi05-cfg): the Xe3 path runs these
-    // parameters and split count in place of xe3LinearPick()'s. oDtype is
+    // parameters and split count in place of xe3LinearChoose()'s. oDtype is
     // prepare()'s; the next recording picks the change up.
     // VAI_NO_XE3_TUNE leaves the hook out; define it for the whole build or not at all.
     void setXe3Tune(const PipeParamsXe3& params, uint32_t splits)
@@ -396,7 +397,7 @@ private:
     PipeParamsXe3 pipeParamsXe3_;
 #ifndef VAI_NO_XE3_TUNE
     PipeParamsXe3 xe3Tune_;        // setXe3Tune()
-    uint32_t xe3TuneSplits_ = 0;   // 0: no tuning, xe3LinearPick() decides
+    uint32_t xe3TuneSplits_ = 0;   // 0: no tuning, xe3LinearChoose() decides
 #endif
     PipeParamsTile pipeParamsTile;
     PipeParamsSlab pipeParamsSlab;
@@ -2162,30 +2163,59 @@ struct Xe3Pick
     uint32_t skew, smod;
 };
 
-// The configuration for M x K x N (tests/linear-tune-intel-cm/10-cm4-heuristic.md,
-// cm4-heuristic.py): the register tile and subgroup grid with the highest
-//   score = eff[tile] * fill * sqrt(min(1, threads / 384)) * 0.95 ^ log2(split)
+// Register tiles uM x uN and their relative speed when nothing is wasted and
+// the GPU is full (the score's eff). searched: xe3LinearPick() tries the tile,
+// in this order. 1 x 4 comes only from the measured table; its eff is an
+// estimate between 1 x 2 and 2 x 2, not fitted.
+struct Xe3Tile
+{
+    uint32_t uM, uN;
+    double eff;
+    bool searched;
+};
+inline constexpr Xe3Tile xe3Tiles[] = {
+    { 6, 3, 1.00, true },  { 5, 4, 0.92, true },   { 6, 2, 0.92, true },  { 3, 4, 0.94, true },
+    { 4, 2, 0.89, true },  { 2, 2, 0.83, true },   { 2, 1, 0.715, true }, { 1, 2, 0.685, true },
+    { 1, 1, 0.60, true },  { 1, 4, 0.78, false },
+};
+inline constexpr double xe3ThreadsFull = 384.0;   // subgroups * split at which the GPU counts as full
+inline constexpr double xe3SplitCost = 0.95;      // score factor per doubling of split
+
+// A tile's eff, 0 for a tile the score does not know.
+inline double xe3TileEff(uint32_t uM, uint32_t uN)
+{
+    for (const Xe3Tile& t : xe3Tiles)
+        if (t.uM == uM && t.uN == uN)
+            return t.eff;
+    return 0.0;
+}
+
+// How well p fits an M x N output (tests/linear-tune-intel-cm/10-cm4-heuristic.md 1.2):
+//   fit     = eff[tile] * fill * sqrt(min(1, threads / 384)) * 0.95 ^ log2(split)
 //   fill    = M N / (rows x columns the workgroups cover)
 //   threads = subgroups * split
+// The shape-dependent part of xe3LinearPick()'s score, and the rerank score of
+// xe3LinearChoose().
+inline double xe3Fit(uint32_t M, uint32_t N, const Xe3Pick& p)
+{
+    const uint32_t tm = p.sgM * p.uM * 8u, tn = p.sgN * p.uN * 16u;   // workgroup tile
+    const uint32_t gm = CEIL_DIV(M, tm), gn = CEIL_DIV(N, tn);         // workgroups along M and N
+    const uint64_t threads = uint64_t(gm) * gn * p.sgM * p.sgN * p.split;
+    const double fill = double(M) * N / (double(gm) * tm * gn * tn);
+    return xe3TileEff(p.uM, p.uN) * fill * std::sqrt(std::min(1.0, double(threads) / xe3ThreadsFull)) *
+           std::pow(xe3SplitCost, std::log2(double(p.split)));
+}
+
+// The heuristic configuration for M x K x N (tests/linear-tune-intel-cm/10-cm4-heuristic.md,
+// cm4-heuristic.py): the searched tile and subgroup grid with the highest
+//   score = xe3Fit() * grid preference
 // padOk: the caller gives the activation rows a pitch of K + padI when padI
 // comes back non-zero; without it the k skew stands in where it helps.
 inline Xe3Pick xe3LinearPick(uint32_t M, uint32_t K, uint32_t N, bool padOk)
 {
-    struct Tile
-    {
-        uint32_t uM, uN;
-        double eff;
-    };
-    // Register tile: relative speed when nothing is wasted and the GPU is full.
-    static constexpr Tile tileTable[] = {
-        { 6, 3, 1.00 }, { 5, 4, 0.92 },  { 6, 2, 0.92 },  { 3, 4, 0.94 }, { 4, 2, 0.89 },
-        { 2, 2, 0.83 }, { 2, 1, 0.715 }, { 1, 2, 0.685 }, { 1, 1, 0.60 }
-    };
-    constexpr double threadsFull = 384.0;    // subgroups * split at which the GPU counts as full
     constexpr uint64_t threadsSplit = 256;   // split-K doubles while subgroups * split is below this ...
     constexpr uint32_t splitMinK = 512;      // ... and every split keeps at least this much K
     constexpr uint32_t splitMax = 16;
-    constexpr double splitCost = 0.95;   // score factor per doubling of split
     constexpr double halfGrid = 0.95;    // score factor per axis with 2 subgroups instead of 4
     constexpr double tileMinK = 16.0;    // a tile needs uM * uN <= K / 16
     constexpr uint32_t longK = 8192;     // from here on I and W no longer fit the caches
@@ -2206,9 +2236,9 @@ inline Xe3Pick xe3LinearPick(uint32_t M, uint32_t K, uint32_t N, bool padOk)
     const uint32_t m8 = ROUNDUP(M, 8u), n16 = ROUNDUP(N, 16u);
     double best = -1.0;
     uint32_t bSm = 1, bSn = 1, bUm = 1, bUn = 1, bGm = 1, bGn = 1, bSplit = 1;
-    for (const Tile& t : tileTable)
+    for (const Xe3Tile& t : xe3Tiles)
     {
-        if (double(t.uM * t.uN) > std::max(1.0, K / tileMinK))
+        if (!t.searched || double(t.uM * t.uN) > std::max(1.0, K / tileMinK))
             continue;
         const bool long54 = t.uM == 5u && t.uN == 4u && K >= longK;
         const Grid grids[] = {
@@ -2239,10 +2269,8 @@ inline Xe3Pick xe3LinearPick(uint32_t M, uint32_t K, uint32_t N, bool padOk)
                 split *= 2u;
             if (grids[g].sgM == 8u && (split > 1u || sm < 8u))
                 continue;
-            const double fill = double(M) * N / (double(gm) * tm * gn * tn);
             const double score =
-                t.eff * grids[g].f * fill * std::sqrt(std::min(1.0, double(subgroups * split) / threadsFull)) *
-                std::pow(splitCost, std::log2(double(split)));
+                grids[g].f * xe3Fit(M, N, { .sgM = sm, .sgN = sn, .uM = t.uM, .uN = t.uN, .split = split });
             if (best < 0.0 || score > best * 1.0001)
             {
                 best = score;
@@ -2290,10 +2318,74 @@ inline Xe3Pick xe3LinearPick(uint32_t M, uint32_t K, uint32_t N, bool padOk)
     return p;
 }
 
+// A measured configuration of a nearby shape made to run M x K x N, or none
+// when the shape cannot use it (the revise step of linearTunePick()). It keeps
+// what was measured (tile, grid, k unroll, order, split) and changes only what
+// the new shape forces:
+//   - tile: one the score knows, within K (uM * uN <= K / 16)
+//   - grid: no more subgroups per axis than the shape has tiles (as xe3LinearPick())
+//   - none: the workgroup tile alone is twice the problem
+//   - split: halved until every split keeps 128 k (the sweeps' floor)
+//   - k unroll: 1 when a split holds fewer than 32 k
+//   - k skew: only where xe3LinearPick() would skew (I rows K apart alias)
+inline std::optional<Xe3Pick> xe3Revise(const LinearShape& s, Xe3Pick p)
+{
+    constexpr uint32_t splitMinK = 128;
+    constexpr uint32_t longK = 8192;   // as xe3LinearPick(): rows from here alias when K % 2048 == 0
+    const uint32_t M = s.M, K = s.K, N = s.N;
+
+    if (xe3TileEff(p.uM, p.uN) <= 0.0 || p.uM * p.uN > std::max(1u, K / 16u))
+        return std::nullopt;
+    p.sgM = std::min(p.sgM, std::bit_ceil(CEIL_DIV(M, 8u * p.uM)));
+    p.sgN = std::min(p.sgN, std::bit_ceil(CEIL_DIV(N, 16u * p.uN)));
+    const uint32_t tm = p.sgM * p.uM * 8u, tn = p.sgN * p.uN * 16u;
+    if ((tm >= 2u * ROUNDUP(M, 8u) && p.uM > 1u) || (tn >= 2u * ROUNDUP(N, 16u) && p.uN > 1u))
+        return std::nullopt;
+
+    while (p.split > 1u && K / p.split < splitMinK)
+        p.split /= 2u;
+    if (K / p.split < 32u)
+        p.kUnroll = 1;
+
+    const bool aliasing = K >= longK && K % 2048u == 0u && M >= 64u;
+    if (p.skew > 0u && !(aliasing && p.sgM >= 2u && p.split == 1u))
+        p.skew = p.smod = 0;
+    else if (p.skew > 0u && p.sgM < 4u)   // the grid shrank: xe3LinearPick()'s skew for 2 rows
+    {
+        p.skew = 1;
+        p.smod = 0;
+    }
+
+    p.prefetch = 1;   // as measured for the table, and as the node always runs
+    p.padI = 0;       // the Linear node keeps I rows K apart
+    return p;
+}
+
+// The configuration for M x K x N on the Linear node: the measured table
+// (linear-xe3-table.inc, written by tests/linear-tune-intel-cm/xe3-table.py)
+// by exact shape; a shape outside it takes xe3LinearPick(), or under
+// LinearTuneMiss::Neighbour (VAI_LINEAR_TUNE_MISS=neighbour) the measured
+// configurations of the nearest shapes, revised (xe3Revise) and reranked by
+// xe3Fit(). The reference use of LinearTuneTable (linear-tune-table.h).
+inline LinearTuneResult<Xe3Pick> xe3LinearChoose(uint32_t M, uint32_t K, uint32_t N,
+                                                 LinearTuneMiss miss = linearTuneMiss())
+{
+    static constexpr LinearTuneEntry<Xe3Pick> rows[] = {
+#include "linear-xe3-table.inc"
+    };
+    static const LinearTuneTable<Xe3Pick> table{ rows };
+    constexpr uint32_t neighbours = 4;
+
+    return linearTunePick(
+        table, { .M = M, .K = K, .N = N }, miss, neighbours, xe3Revise,
+        [](const LinearShape& s, const Xe3Pick& p) { return xe3Fit(s.M, s.N, p); },
+        [](const LinearShape& s) { return xe3LinearPick(s.M, s.K, s.N, false); });
+}
+
 // The pick as pipeline parameters. I rows are K apart here (no activation padding).
 inline Linear::PipeParamsXe3 xe3LinearTile(uint32_t M, uint32_t N, uint32_t K, Dtype oDtype, uint32_t& splitCount)
 {
-    const Xe3Pick k = xe3LinearPick(M, K, N, false);
+    const Xe3Pick k = xe3LinearChoose(M, K, N).cfg;
     splitCount = k.split;
     return {
         .wgSgM = k.sgM,
