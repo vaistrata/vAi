@@ -15,6 +15,7 @@
 =============================================================================*/
 #version 450
 #extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_control_flow_attributes : enable
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 #extension GL_EXT_scalar_block_layout : require
@@ -25,6 +26,8 @@
 layout(local_size_x = 16, local_size_y = 1, local_size_z = 1) in;
 
 layout(constant_id = 0) const uint kvCaching = 1;   // 0: the counter binding is null
+layout(constant_id = 1) const uint held = 0;        // > 0: ceil(ld / 64), a lane keeps its row's quads in registers
+                                                    // between the two sweeps instead of reading S twice
 
 layout(set = 0, binding = 0) writeonly buffer P_BUF { f16vec4 bufferP[]; };
 layout(set = 0, binding = 1) readonly buffer S_BUF { vec4 bufferS[]; };
@@ -62,6 +65,40 @@ void main()
     const uint last = min(cached + uint(max(int(newTokenEnd(t) + Tkv) - int(Tq), 0)), ld);
     const uint q0 = row * (ld / 4u), quads = ld / 4u;
     const uvec4 off = uvec4(0u, 1u, 2u, 3u);
+
+    if (held > 0u)
+    {
+        vec4 sv[held > 0u ? held : 1u];
+        float mxh = -3.0e38;
+        [[unroll]] for (uint i = 0; i < held; i++)
+        {
+            const uint q = lane + i * 16u;
+            const uvec4 c = uvec4(q * 4u) + off;
+            sv[i] = vec4(-3.0e38);
+            if (q < quads && c.w >= first && c.x < last)
+            {
+                sv[i] = mix(vec4(-3.0e38), bufferS[q0 + q], inRange(c, first, last));
+                mxh = max(mxh, max(max(sv[i].x, sv[i].y), max(sv[i].z, sv[i].w)));
+            }
+        }
+        mxh = subgroupMax(mxh);
+
+        float sumh = 0.0;
+        [[unroll]] for (uint i = 0; i < held; i++)
+        {
+            const uint q = lane + i * 16u;
+            if (q >= quads) continue;
+            // A quad out of the range holds -3e38 against a finite maximum: exp gives 0.
+            const f16vec4 e = f16vec4(exp((sv[i] - mxh) * scale));
+            const vec4 ef = vec4(e);
+            sumh += (ef.x + ef.y) + (ef.z + ef.w);
+            bufferP[q0 + q] = e;
+        }
+        sumh = subgroupAdd(sumh);
+        if (lane == 0u)
+            bufferL[row] = (sumh > 0.0 && mxh > -1.0e38) ? 1.0 / sumh : 0.0;
+        return;
+    }
 
     float mx = -3.0e38;
     for (uint q = lane; q < quads; q += 16u)

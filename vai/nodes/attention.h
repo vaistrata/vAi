@@ -302,6 +302,7 @@ private:
     // One pass (attention-cm-xe3) in place of the three, where the rows fill the GPU.
     bool xe3OnePass_ = false;
     uint32_t xe3Subgroups_ = 0, xe3KeyTiles_ = 0;   // subgroups a workgroup, 16-key tiles a block
+    uint32_t xe3Spans_ = 1;                         // key spans a tile (> 1: a workgroup is one tile)
     eva::ComputePipeline pipeXe3OnePass_, pipeXe3Append_;
     eva::DescriptorSet descSetXe3OnePass_, descSetXe3Append_;
     Xe3Pick xe3QkPick_ = {}, xe3PvPick_ = {};
@@ -1090,21 +1091,37 @@ inline void Attention::prepare()
     {
         const uint32_t Hq = config_.numQHeads, groups = B * Hkv, groupRows = groupSize_ * Tq;
 
-        // One pass (attention-cm-xe3) where the 8-row tiles fill the GPU by themselves: a subgroup sweeps
-        // every key of its rows in registers. Smaller grids keep the three passes below.
-        xe3OnePass_ = groups * CEIL_DIV(groupRows, 8u) >= 256u;
+        // One pass (attention-cm-xe3): a subgroup sweeps the keys of its 8 rows in registers. From 256
+        // tiles on they fill the GPU by themselves. Below that the kernel can split a tile's keys over
+        // the subgroups of a workgroup (key spans) and fold them in shared memory, but the three passes
+        // measured faster there (pi0.5's action expert, 50 tiles: 0.98 ms a step against 1.10 ms with 5
+        // spans), so small grids keep them. xe3SpansOnSmallGrids = true runs every grid in one pass.
+        constexpr bool xe3SpansOnSmallGrids = false;
+        const uint32_t tiles = groups * CEIL_DIV(groupRows, 8u);
+        xe3OnePass_ = tiles >= 256u || xe3SpansOnSmallGrids;
         if (xe3OnePass_)
         {
             // A subgroup holds the O tiles (Dh / 16) and a block's S tiles together: 2 key tiles beside
             // more than 8 O tiles, 4 beside fewer.
-            xe3Subgroups_ = 8;
-            xe3KeyTiles_ = CEIL_DIV(Dh, 16u) > 8u ? 2u : 4u;
+            const uint32_t oTiles = CEIL_DIV(Dh, 16u);
+            xe3KeyTiles_ = oTiles > 8u ? 2u : 4u;
+            // Key spans: 64 keys a span or more, the spans' O rows in fp16 within the shared memory (16 *
+            // 16 bytes an O tile a span), and no more spans than threads an EU holds of this kernel (5 with
+            // more than 8 O tiles, 8 with fewer): past that a workgroup's subgroups measured slower.
+            const uint32_t keys = caching ? config_.kvCacheSize : Tkv;
+            const uint32_t spanLimit = std::min(
+                { keys / 64u,
+                  uint32_t(device().maxComputeSharedMemorySize() / (oTiles * 256u + 64u)),
+                  oTiles > 8u ? 5u : 8u });
+            xe3Spans_ = tiles >= 256u ? 1u : std::clamp(CEIL_DIV(256u, tiles), 1u, std::max(1u, spanLimit));
+            xe3Subgroups_ = xe3Spans_ > 1u ? xe3Spans_ : 8u;
             // clang-format off
             pipeXe3OnePass_ = pipelinePool().request("attention-cm-xe3", {
                 eva::constant_id<0>(16u * xe3Subgroups_),      // wgSize
                 eva::constant_id<1>(CEIL_DIV(Dh, 16u)),        // dh steps and O tiles
                 eva::constant_id<2>(xe3KeyTiles_),             // 16-key tiles a block
                 eva::constant_id<3>(uint32_t(caching)),
+                eva::constant_id<4>(xe3Spans_),                // key spans a tile
                 eva::constant_id<SPEC_ID_TYPE_O>(oDtype)
             }, {
                 .requiredSubgroupSize = 16,
@@ -1163,8 +1180,13 @@ inline void Attention::prepare()
         pipeXe3Pv_ = gemm(xe3PvPick_, oDtype, 1u);
         pipeXe3Prep_ = pipelinePool().request(
             "attention-prep-xe3", { eva::constant_id<0>(uint32_t(caching)), eva::constant_id<1>(uint32_t(padQ)) });
+        // A lane keeps its quads of a row in registers between the softmax's two sweeps, up to 32 of them
+        // (2048 keys): one read of S a row in place of two.
+        const uint32_t held = CEIL_DIV(xe3KeyRows_, 64u) <= 32u ? CEIL_DIV(xe3KeyRows_, 64u) : 0u;
         pipeXe3Softmax_ = pipelinePool().request(
-            "attention-softmax-xe3", { eva::constant_id<0>(uint32_t(caching)) }, { .requiredSubgroupSize = 16 });
+            "attention-softmax-xe3",
+            { eva::constant_id<0>(uint32_t(caching)), eva::constant_id<1>(held) },
+            { .requiredSubgroupSize = 16 });
         if (!descSetXe3Prep_)
         {
             descSetXe3Prep_ = gVaiDestSetPool(pipeXe3Prep_.descSetLayout(0));
@@ -1407,7 +1429,8 @@ inline void Attention::run(eva::CommandBuffer cmdBuff)
                 .barrier(computeToCompute);
         }
 
-        const uint32_t wgs = CEIL_DIV(groups * CEIL_DIV(groupRows, 8u), xe3Subgroups_);
+        const uint32_t tiles = groups * CEIL_DIV(groupRows, 8u);
+        const uint32_t wgs = xe3Spans_ > 1u ? tiles : CEIL_DIV(tiles, xe3Subgroups_);
         const uint32_t gy = CEIL_DIV(wgs, device().maxComputeWorkGroupCount()[0]), gx = CEIL_DIV(wgs, gy);
         struct
         {

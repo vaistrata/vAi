@@ -26,12 +26,16 @@
  V rows read there are another group's, zeroed tail rows of the cache, or past
  the buffer, which reads zeros); rows past a group's are not stored.
 
- A subgroup sweeps every key of its rows, so the grid fills the GPU only when
- the rows do: the host keeps the three-pass path for small grids (key spans
- over workgroups with a fold after them measured slower there).
+ Key spans (kSpans > 1), for grids whose rows alone leave the GPU idle: a
+ workgroup is one 8-row tile, its kSpans subgroups each sweep a span of the
+ keys, and the workgroup folds them in shared memory:
+     every subgroup puts up its row maxima m and sums l and its rows of O in
+     fp16; the subgroups then add the spans' rows, an O tile each, weighted
+     exp(m - max m) / L, L = sum exp(m - max m) l, and store.
 
- Dispatch (host): ceil(groups * ceil(groupRows / 8) / (wgSize / 16)) workgroups,
- folded into (x, y) past the x limit.
+ Dispatch (host): kSpans == 1: ceil(tiles / (wgSize / 16)) workgroups, tiles =
+ groups * ceil(groupRows / 8); else tiles workgroups of 16 * kSpans. Folded
+ into (x, y) past the x limit.
 =============================================================================*/
 #version 450
 #extension GL_GOOGLE_include_directive : require
@@ -51,6 +55,7 @@ layout(constant_id = 0) const uint wgSize = 64;      // 16 x the subgroups of a 
 layout(constant_id = 1) const uint DT = 16;          // Dh / 16 up: dh steps of S, and O tiles
 layout(constant_id = 2) const uint BKT = 3;          // 16-key tiles a block
 layout(constant_id = 3) const uint kvCaching = 1;    // 0: the counter binding is null, the keys are the inputs
+layout(constant_id = 4) const uint kSpans = 1;       // > 1: the workgroup's subgroups split one tile's keys (wgSize = 16 * kSpans)
 layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0;
 
 layout(set = 0, binding = 0) writeonly buffer O_BUF_F32 { float bufferO_f32[]; };
@@ -78,6 +83,13 @@ layout(push_constant) uniform PushConstants {
 void writeO(uint i, float v) { if (typeO == DTYPE_F32) bufferO_f32[i] = v; else bufferO_f16[i] = float16_t(v); }
 
 const uint TM = 8, TN = 16, TK = 16;
+const float SLACK = 8.0;   // exp(8) = 2981, well inside fp16
+
+// Key spans: every span's (m rows 0-3 | m rows 4-7 | l rows 0-3 | l rows 4-7), and its rows of O in fp16
+// as [span][O tile][lane][rows 0-3 | rows 4-7].
+shared vec4 sML[kSpans > 1u ? kSpans * 4u : 1u];
+shared f16vec4 sO[kSpans > 1u ? kSpans * DT * 32u : 1u];
+
 #define MAT_A coopmat<float16_t, gl_ScopeSubgroup, TM, TK, gl_MatrixUseA>
 #define MAT_B coopmat<float16_t, gl_ScopeSubgroup, TK, TN, gl_MatrixUseB>
 #define MAT_C coopmat<float, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator>
@@ -86,7 +98,8 @@ void main()
 {
     const uint lane = gl_SubgroupInvocationID;
     const uint groupRows = groupSize * Tq, groupTiles = (groupRows + TM - 1u) / TM;
-    const uint tile = (gl_WorkGroupID.y * gridX + gl_WorkGroupID.x) * (wgSize / 16u) + gl_SubgroupID;
+    const uint wg = gl_WorkGroupID.y * gridX + gl_WorkGroupID.x;
+    const uint tile = (kSpans > 1u) ? wg : wg * (wgSize / 16u) + gl_SubgroupID;
     const uint g = tile / groupTiles, row0 = (tile % groupTiles) * TM;   // rows row0 .. of group g
     if (g >= groups) return;
     const uint m0 = g * groupRows + row0, key0 = g * keyRows;
@@ -107,6 +120,13 @@ void main()
         }
     }
     kBegin = (kBegin / TN) * TN;
+    if (kSpans > 1u && kEnd > kBegin)
+    {
+        // This subgroup's span, whole key tiles each.
+        const uint span = (((kEnd - kBegin + kSpans - 1u) / kSpans + TN - 1u) / TN) * TN;
+        kBegin = min(kBegin + gl_SubgroupID * span, kEnd);
+        kEnd = min(kBegin + span, kEnd);
+    }
 
     MAT_C acc[DT];
     [[unroll]] for (uint t = 0; t < DT; t++)
@@ -131,47 +151,59 @@ void main()
                 [[unroll]] for (uint i = 0; i < TM; i++)
                     q[i] = float16_t(0.0);
             [[unroll]] for (uint j = 0; j < BKT; j++)
-                if (kb + j * TN < kEnd)   // the last block may hold fewer tiles
-                {
-                    MAT_B k;
-                    coopMatLoad(k, bufferK, (key0 + kb + j * TN) * Dh + d * TK, Dh, gl_CooperativeMatrixLayoutColumnMajor);
-                    s[j] = coopMatMulAdd(q, k, s[j]);
-                }
+            {
+                MAT_B k;
+                coopMatLoad(k, bufferK, (key0 + kb + j * TN) * Dh + d * TK, Dh, gl_CooperativeMatrixLayoutColumnMajor);
+                s[j] = coopMatMulAdd(q, k, s[j]);
+            }
         }
 
-        // Online softmax per row; p[j][r] is this lane's column of P.
-        float p[BKT][TM];
+        // Online softmax per row against a reference m that trails the row's maximum: P = exp(v - m) may
+        // pass 1 by e^SLACK, which fp16 holds. The rows of O are rescaled only when a maximum passes its
+        // reference by more than that, or a row gets its first one: touching a row of an O tile makes the
+        // compiler take the tile apart around every product, so the sweep must not do it as a rule.
+        float v[BKT][TM], mNew[TM];
+        bool move = false;
         [[unroll]] for (uint r = 0; r < TM; r++)
         {
-            float v[BKT];
             float bmax = -1.0e30;
             [[unroll]] for (uint j = 0; j < BKT; j++)
             {
                 const uint key = kb + j * TN + lane;
-                v[j] = (key >= first[r] && key < last[r]) ? s[j][r] * scale : -1.0e30;
-                bmax = max(bmax, v[j]);
+                v[j][r] = (key >= first[r] && key < min(last[r], kEnd)) ? s[j][r] * scale : -1.0e30;
+                bmax = max(bmax, v[j][r]);
             }
-            const float mNew = max(mRun[r], subgroupMax(bmax));
-            const float f = exp(mRun[r] - mNew);
+            bmax = subgroupMax(bmax);
+            mNew[r] = (bmax > mRun[r] + SLACK) ? bmax : mRun[r];
+            move = move || mNew[r] != mRun[r];
+        }
+        if (move)   // the same on every lane
+            [[unroll]] for (uint r = 0; r < TM; r++)
+            {
+                const float f = exp(mRun[r] - mNew[r]);
+                lRun[r] *= f;
+                [[unroll]] for (uint t = 0; t < DT; t++)
+                    acc[t][r] = acc[t][r] * f;
+                mRun[r] = mNew[r];
+            }
+
+        // p[j][r] is this lane's column of P.
+        float p[BKT][TM];
+        [[unroll]] for (uint r = 0; r < TM; r++)
+        {
             float sum = 0.0;
             [[unroll]] for (uint j = 0; j < BKT; j++)
             {
-                const uint key = kb + j * TN + lane;
-                const float16_t ph = (key >= first[r] && key < last[r]) ? float16_t(exp(v[j] - mNew)) : float16_t(0.0);
+                const float16_t ph = (v[j][r] > -1.0e29) ? float16_t(exp(v[j][r] - mRun[r])) : float16_t(0.0);
                 p[j][r] = float(ph);
                 sum += float(ph);
             }
-            lRun[r] = lRun[r] * f + subgroupAdd(sum);
-            if (mNew != mRun[r])   // the same on every lane
-                [[unroll]] for (uint t = 0; t < DT; t++)
-                    acc[t][r] = acc[t][r] * f;
-            mRun[r] = mNew;
+            lRun[r] += subgroupAdd(sum);
         }
 
         // O += P V.
         [[unroll]] for (uint j = 0; j < BKT; j++)
         {
-            if (kb + j * TN >= kEnd) break;
             MAT_A pa;
             [[unroll]] for (uint i = 0; i < TM / 2u; i++)
             {
@@ -191,6 +223,63 @@ void main()
 
     // O [sequence, token, head]: group g is (sequence g / Hkv, KV head g % Hkv), Hkv = Hq / groupSize.
     const uint Hkv = Hq / groupSize, seq = g / Hkv, kvHead = g % Hkv;
+
+    if (kSpans > 1u)
+    {
+        const uint sp = gl_SubgroupID;
+        if (lane == 0u)
+        {
+            sML[sp * 4u] = vec4(mRun[0], mRun[1], mRun[2], mRun[3]);
+            sML[sp * 4u + 1u] = vec4(mRun[4], mRun[5], mRun[6], mRun[7]);
+            sML[sp * 4u + 2u] = vec4(lRun[0], lRun[1], lRun[2], lRun[3]);
+            sML[sp * 4u + 3u] = vec4(lRun[4], lRun[5], lRun[6], lRun[7]);
+        }
+        [[unroll]] for (uint t = 0; t < DT; t++)
+        {
+            sO[((sp * DT + t) * 16u + lane) * 2u] = f16vec4(acc[t][0], acc[t][1], acc[t][2], acc[t][3]);
+            sO[((sp * DT + t) * 16u + lane) * 2u + 1u] = f16vec4(acc[t][4], acc[t][5], acc[t][6], acc[t][7]);
+        }
+        barrier();
+
+        // The fold. Weights of every span's rows: exp(m - max m) / L.
+        vec4 mLo = vec4(-1.0e30), mHi = vec4(-1.0e30);
+        for (uint k = 0; k < kSpans; k++)
+        {
+            mLo = max(mLo, sML[k * 4u]);
+            mHi = max(mHi, sML[k * 4u + 1u]);
+        }
+        vec4 LLo = vec4(0.0), LHi = vec4(0.0);
+        for (uint k = 0; k < kSpans; k++)
+        {
+            LLo += exp(sML[k * 4u] - mLo) * sML[k * 4u + 2u];
+            LHi += exp(sML[k * 4u + 1u] - mHi) * sML[k * 4u + 3u];
+        }
+        const vec4 invLo = mix(vec4(0.0), 1.0 / LLo, greaterThan(LLo, vec4(0.0)));
+        const vec4 invHi = mix(vec4(0.0), 1.0 / LHi, greaterThan(LHi, vec4(0.0)));
+
+        // O tile t goes to subgroup t % kSpans.
+        [[unroll]] for (uint t = 0; t < DT; t++)
+        {
+            if (t % kSpans != sp) continue;
+            vec4 lo = vec4(0.0), hi = vec4(0.0);
+            for (uint k = 0; k < kSpans; k++)
+            {
+                lo += exp(sML[k * 4u] - mLo) * vec4(sO[((k * DT + t) * 16u + lane) * 2u]);
+                hi += exp(sML[k * 4u + 1u] - mHi) * vec4(sO[((k * DT + t) * 16u + lane) * 2u + 1u]);
+            }
+            lo *= invLo;
+            hi *= invHi;
+            const uint n = t * TN + lane;
+            [[unroll]] for (uint r = 0; r < TM; r++)
+            {
+                if (row0 + r >= groupRows || n >= Dh) continue;
+                const uint head = kvHead * groupSize + (row0 + r) / Tq, tok = (row0 + r) % Tq;
+                writeO(((seq * Tq + tok) * Hq + head) * Dh + n, r < 4u ? lo[r] : hi[r - 4u]);
+            }
+        }
+        return;
+    }
+
     [[unroll]] for (uint r = 0; r < TM; r++)
     {
         if (row0 + r >= groupRows) continue;
