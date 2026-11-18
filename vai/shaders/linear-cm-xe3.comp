@@ -1,0 +1,211 @@
+/*=============================================================================
+ linear-cm-xe3.comp: Linear / fully-connected layer for Intel Xe3 XMX
+     (Panther Lake), cooperative matrices loaded with coopMatLoad straight
+     from global memory, the weights stored [K, N] as OpenVINO / oneDNN keep
+     them (tests/linear-tune-intel-cm linear-cm-4)
+
+     O[m, n] = sum_k I[m, k] * W[k, n]
+
+     M = flattened batch, N = outDim, K = inDim
+     I [M, ldkI] fp16, W [K, ldnW] fp16 (a row = one k, the N outputs
+     contiguous; packWeightXe3), O [M, N] typeO (or split-K partials
+     P[z, M, N] on binding 0); fp32 accumulation.
+
+ Needs the local Mesa fork (tests/linear-tune-intel-cm/4-xmx-coopmat-isa.md
+ section 10) run with ANV_CMAT_BLOCK2D=1 ANV_SPLIT_BARRIER=1: the driver turns
+ each coopMatLoad into one LSC 2D block load, reads rows past the buffer's end
+ as zeros, and takes two extensions:
+   coopMatLoad with stride | 0x80000000 = prefetch the 32 x 32 fp16 region at
+   the address into L1 / L3 (the matrix stays undefined; a stock driver loads
+   it for real and reads past the operand);
+   memoryBarrierImage() = barrier signal only, subgroupMemoryBarrierImage() =
+   barrier wait only (no images are used, so a stock driver drops them).
+ The host runs this kernel only when ANV_CMAT_BLOCK2D is set (useXe3Cm).
+
+ A subgroup owns uM x uN accumulator tiles = (8 uM) tokens x (16 uN) outputs,
+ a workgroup wgSgM x wgSgN subgroups:
+   A (8 x 16, M x K): I rows, row-major, stride ldkI  -> 2D block d16 16 x 8
+   B (16 x 16, K x N): W rows, row-major, stride ldnW -> 2D block d16 16 x 16
+     with the VNNI transform, two side by side in one message (oneDNN's
+     16 x 16 x 2 weight loads)
+ Per 16-k step all B tiles load, then all A tiles, then the DPAS B tile outer.
+
+ Why [K, N]: a workgroup reads its W as k rows it never returns to, so rows a
+ power-of-two pitch apart do not fight over cache sets and W needs no padded
+ pitch.
+
+ skew: I keeps the problem (the workgroup's rows are K apart, and K = 8192 /
+ 16384 puts every row in the same sets). With skew > 0 the subgroups of M row
+ g run 16 * skew * g k ahead of row 0, cyclic over the main span, so at any
+ time the workgroup's I rows are read at wgSgM different k and only a
+ subgroup row's 8 uM rows share sets. The subgroups of an M row still read
+ the same I at the same time; W is read by the leading M row first and by the
+ others up to (wgSgM - 1) * skew steps later (smod > 0: the lead repeats every
+ smod rows, g % smod, which shortens that). Costs W sharing where I does not
+ alias, so the host turns it on per shape (xe3LinearTile).
+
+ Main loop trip = kUnroll 16-k steps. pf: the workgroup's I and W regions of
+ the trip pf ahead are prefetched, 32 x 32 regions dealt out to the
+ subgroups. bar: split barrier per trip (wait, prefetch, signal), so the
+ subgroups drift at most a trip apart and share L1; with it every subgroup
+ stays to the end (edge subgroups load zeros and skip their stores).
+
+ Edges: none in the loads (rows past M / K and columns past the pitch read as
+ zeros and feed only outputs the stores skip). K % 16 == 0, splitSize % 16
+ == 0 and ldnW % 32 == 0 (host-checked).
+
+ Dispatch (host): order 0: (ceil(N / wgTileN), ceil(M / wgTileM), splits),
+                  order 1: x and y swapped (M tiles on x).
+=============================================================================*/
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_control_flow_attributes : enable
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_KHR_cooperative_matrix : require
+#extension GL_KHR_memory_scope_semantics : require
+#extension GL_KHR_shader_subgroup_basic : require
+#include "common/spec_constants.h"
+
+layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;   // = wgSize (same SpecId)
+
+layout(constant_id = 0) const uint wgSize  = 512;   // threads per workgroup (= 16 * wgSgM * wgSgN)
+layout(constant_id = 1) const uint wgSgM   = 4;     // subgroups along M
+layout(constant_id = 2) const uint wgSgN   = 4;     // subgroups along N
+layout(constant_id = 3) const uint uM      = 4;     // 8-token A tiles per subgroup
+layout(constant_id = 4) const uint uN      = 2;     // 16-output B tiles per subgroup
+layout(constant_id = 5) const uint kUnroll = 2;     // 16-k steps per loop trip
+layout(constant_id = 6) const uint order   = 0;     // 0: x walks N tiles, 1: x walks M tiles
+layout(constant_id = 7) const uint pf      = 0;     // > 0: prefetch the workgroup's operands pf trips ahead
+layout(constant_id = 8) const uint bar     = 0;     // 1: split barrier every trip
+layout(constant_id = 9) const uint skew    = 0;     // > 0: M row g of subgroups runs 16 * skew * g k ahead
+layout(constant_id = 10) const uint smod   = 0;     // > 0: the lead repeats every smod M rows
+layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0;  // O (output) dtype
+
+layout(set = 0, binding = 0) writeonly buffer O_BUF_F32 { float bufferO_f32[]; };
+layout(set = 0, binding = 0) writeonly buffer O_BUF_F16 { float16_t bufferO_f16[]; };
+layout(set = 0, binding = 1) readonly buffer I_BUF { float16_t bufferI[]; };
+layout(set = 0, binding = 2) readonly buffer W_BUF { float16_t bufferW[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint M;
+    uint N;
+    uint K;
+    uint splitSize;   // K span per workgroup-z (= K without splitting)
+    uint ldkI;        // row pitch of I in elements (>= K)
+    uint ldnW;        // pitch of W's k rows in elements (>= N)
+};
+
+void writeO(uint i, float v) { if (typeO == DTYPE_F32) bufferO_f32[i] = v; else bufferO_f16[i] = float16_t(v); }
+
+const uint TM = 8, TN = 16, TK = 16;
+#define MAT_A coopmat<float16_t, gl_ScopeSubgroup, TM, TK, gl_MatrixUseA>
+#define MAT_B coopmat<float16_t, gl_ScopeSubgroup, TK, TN, gl_MatrixUseB>
+#define MAT_C coopmat<float, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator>
+
+const uint SG_TILE_M = uM * TM, SG_TILE_N = uN * TN;
+const uint WG_TILE_M = wgSgM * SG_TILE_M, WG_TILE_N = wgSgN * SG_TILE_N;
+const uint PF_STRIDE = 0x80000000u;   // stride bit: prefetch instead of load (driver extension)
+
+void main()
+{
+    const uint sg = gl_SubgroupID, lane = gl_SubgroupInvocationID;
+    const uint sgN = sg % wgSgN, sgM = sg / wgSgN;
+
+    const uint wgN0 = ((order == 0u) ? gl_WorkGroupID.x : gl_WorkGroupID.y) * WG_TILE_N;
+    const uint wgM0 = ((order == 0u) ? gl_WorkGroupID.y : gl_WorkGroupID.x) * WG_TILE_M;
+    const uint n0 = wgN0 + sgN * SG_TILE_N;
+    const uint m0 = wgM0 + sgM * SG_TILE_M;
+    if (bar == 0u && (n0 >= N || m0 >= M))   // with barriers every subgroup stays
+        return;
+
+    const uint kBegin = gl_WorkGroupID.z * splitSize, kEnd = min(K, kBegin + splitSize);
+
+    MAT_C acc[uM * uN];
+    [[unroll]] for (uint t = 0; t < uM * uN; t++)
+        acc[t] = MAT_C(0.0);
+
+    // One 16-k step: every B tile, every A tile, then the DPAS B tile outer.
+    #define STEP(kb)                                                                                \
+    {                                                                                               \
+        MAT_B b[uN];                                                                                \
+        [[unroll]] for (uint j = 0; j < uN; j++)                                                    \
+            coopMatLoad(b[j], bufferW, (kb) * ldnW + (n0 + j * TN), ldnW, gl_CooperativeMatrixLayoutRowMajor); \
+        MAT_A a[uM];                                                                                \
+        [[unroll]] for (uint i = 0; i < uM; i++)                                                    \
+            coopMatLoad(a[i], bufferI, (m0 + i * TM) * ldkI + (kb), ldkI, gl_CooperativeMatrixLayoutRowMajor); \
+        [[unroll]] for (uint j = 0; j < uN; j++)                                                    \
+            [[unroll]] for (uint i = 0; i < uM; i++)                                                \
+                acc[i * uN + j] = coopMatMulAdd(a[i], b[j], acc[i * uN + j]);                       \
+    }
+
+    const uint CHUNK = TK * kUnroll;
+    const uint spanMain = ((kEnd - kBegin) / CHUNK) * CHUNK, kMain = kBegin + spanMain;
+
+    // k of main-loop position t for M row g of subgroups.
+    #define LEAD(g) (skew * (smod == 0u ? (g) : (g) % smod) * TK)
+    #define K_AT(t, g) (skew == 0u ? kBegin + (t) : kBegin + ((t) + LEAD(g)) % spanMain)
+    const uint gLead = (smod == 0u ? wgSgM : min(smod, wgSgM)) - 1u;   // the M row that reads W first
+
+    // Prefetch regions of a trip, 32 rows x 32 columns each, dealt out to the subgroups: the workgroup's
+    // I rows x the trip's k (with skew per M row of subgroups, each at its own k), then the trip's W rows
+    // (k) x the workgroup's outputs.
+    const uint PF_K = (CHUNK + 31u) / 32u, PF_RM = (SG_TILE_M + 31u) / 32u;
+    const uint PF_A = (skew == 0u ? (WG_TILE_M + 31u) / 32u : wgSgM * PF_RM) * PF_K, PF_B = ((WG_TILE_N + 31u) / 32u) * PF_K;
+    const uint NSG = wgSgM * wgSgN, PF_TRIPS = (PF_A + PF_B + NSG - 1u) / NSG;
+
+    if (bar == 1u)
+        memoryBarrierImage();               // signal ahead of the first trip's wait
+    for (uint t = 0; t < spanMain; t += CHUNK)
+    {
+        if (bar == 1u)
+            subgroupMemoryBarrierImage();   // wait for the previous trip's signal
+        if (pf != 0u)
+        {
+            [[unroll]] for (uint q = 0; q < PF_TRIPS; q++)
+            {
+                const uint r = sg + q * NSG;
+                MAT_A pfm;
+                if (r < PF_A && skew == 0u)
+                    coopMatLoad(pfm, bufferI, (wgM0 + (r / PF_K) * 32u) * ldkI + kBegin + t + pf * CHUNK + (r % PF_K) * 32u,
+                                ldkI | PF_STRIDE, gl_CooperativeMatrixLayoutRowMajor);
+                else if (r < PF_A)
+                {
+                    const uint g = r / (PF_RM * PF_K), rr = r % (PF_RM * PF_K);
+                    const uint row = (rr / PF_K) * 32u;
+                    coopMatLoad(pfm, bufferI, (wgM0 + g * SG_TILE_M + row) * ldkI
+                                + K_AT(t + pf * CHUNK, g) + (rr % PF_K) * 32u,
+                                ldkI | PF_STRIDE, gl_CooperativeMatrixLayoutRowMajor);
+                }
+                else if (r < PF_A + PF_B)
+                    coopMatLoad(pfm, bufferW, (K_AT(t + pf * CHUNK, gLead) + ((r - PF_A) % PF_K) * 32u) * ldnW
+                                + wgN0 + ((r - PF_A) / PF_K) * 32u,
+                                ldnW | PF_STRIDE, gl_CooperativeMatrixLayoutRowMajor);
+                if (M == 0xFFFFFFFFu)   // never: keeps the request alive
+                    writeO(0, float(pfm[0]));
+            }
+        }
+        if (bar == 1u)
+            memoryBarrierImage();           // signal this trip, a trip ahead of its wait
+        [[unroll]] for (uint s = 0; s < kUnroll; s++)   // with skew each step wraps on its own
+            STEP(K_AT(t + s * TK, sgM))
+    }
+    if (bar == 1u)
+        subgroupMemoryBarrierImage();       // closes the sequence
+    for (uint k = kMain; k < kEnd; k += TK)
+        STEP(k)
+
+    // C[r][lane] = O[m + r][n + lane]; partials to P[z].
+    const uint zOff = gl_WorkGroupID.z * M * N;
+    [[unroll]] for (uint i = 0; i < uM; i++)
+        [[unroll]] for (uint j = 0; j < uN; j++)
+        {
+            const uint n = n0 + j * TN + lane;
+            [[unroll]] for (uint r = 0; r < TM; r++)
+            {
+                const uint m = m0 + i * TM + r;
+                if (m < M && n < N)
+                    writeO(zOff + m * N + n, acc[i * uN + j][r]);
+            }
+        }
+}
