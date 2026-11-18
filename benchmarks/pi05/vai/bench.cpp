@@ -1,6 +1,6 @@
 #include "net.h"
 #include "lerobot-weights.h"
-#include "../common/workload.h"
+#include "../common/vla-config.h"
 #include "eva-runtime.h"
 #include "bench-utils.h"
 #include <cstdio>
@@ -11,7 +11,7 @@ namespace pi05 = model::experimental::pi05;
 namespace common = bench::pi05;
 
 
-// The checkpoints vAi loads, found by the workload's dataset: their variant is its folder.
+// The checkpoints vAi loads, found by the configuration's dataset: their variant is its folder.
 constexpr pi05::ModelConfig (*modelConfigs[])() = {
     &pi05::ModelConfig::_3B,
     &pi05::ModelConfig::_LIBERO,
@@ -20,23 +20,23 @@ constexpr pi05::ModelConfig (*modelConfigs[])() = {
 
 void usage(const char* argv0)
 {
-    fprintf(stderr, "usage: %s [--workload NAME] [--showActions] [--atol N] [--rtol N]\n", argv0);
+    fprintf(stderr, "usage: %s [--comparison NAME] [--showActions] [--atol N] [--rtol N]\n", argv0);
     fprintf(
         stderr,
-        "  --workload     the setting of the framework compared with (default: %s), one of:",
-        common::workloads[0]->name);
-    for (const common::Workload* w : common::workloads)
-        fprintf(stderr, " %s", w->name);
+        "  --comparison   the configuration of the framework compared with (default: %s), one of:",
+        common::comparisons[0].name);
+    for (const common::Comparison& c : common::comparisons)
+        fprintf(stderr, " %s", c.name);
     fprintf(stderr, "\n");
     fprintf(stderr, "  --showActions  print the first five actions after the table\n");
-    fprintf(stderr, "  --atol/--rtol  tolerances against the workload's reference (default: 0.002 / 0.001)\n");
+    fprintf(stderr, "  --atol/--rtol  tolerances against the configuration's reference (default: 0.002 / 0.001)\n");
 }
 
 
 int main(int argc, char** argv)
 {
     VLABenchOptions options;
-    const char* workloadName = common::workloads[0]->name;
+    const char* comparison = common::comparisons[0].name;
 
     for (int i = 1; i < argc; ++i)
     {
@@ -50,15 +50,15 @@ int main(int argc, char** argv)
             usage(argv[0]);
             return 0;
         }
-        if (!strcmp(argv[i], "--workload"))
+        if (!strcmp(argv[i], "--comparison"))
         {
             if (++i == argc)
             {
-                fprintf(stderr, "error: --workload needs a name\n");
+                fprintf(stderr, "error: --comparison needs a name\n");
                 usage(argv[0]);
                 return 1;
             }
-            workloadName = argv[i];
+            comparison = argv[i];
             continue;
         }
         if (!strcmp(argv[i], "--atol") || !strcmp(argv[i], "--rtol"))
@@ -85,36 +85,39 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    const common::Workload* workload = common::findWorkload(workloadName);
-    if (!workload)
+    const common::VlaConfig* found = common::findVlaConfig(comparison);
+    if (!found)
     {
-        fprintf(stderr, "error: unknown --workload '%s'\n", workloadName);
+        fprintf(stderr, "error: unknown --comparison '%s'\n", comparison);
         usage(argv[0]);
         return 1;
     }
+    const common::VlaConfig& config = *found;
     pi05::ModelConfig (*modelConfig)() = nullptr;
-    for (auto config : modelConfigs)
-        if (!strcmp(config().variant, workload->dataset))
-            modelConfig = config;
+
+    for (auto checkpoint : modelConfigs)
+        if (!strcmp(checkpoint().variant, config.dataset))
+            modelConfig = checkpoint;
+    
     if (!modelConfig)
     {
-        fprintf(stderr, "error: vAi has no pi0.5 checkpoint for the dataset '%s'\n", workload->dataset);
+        fprintf(stderr, "error: vAi has no pi0.5 checkpoint for the dataset '%s'\n", config.dataset);
         return 1;
     }
 
     eva::Device device = getVaiDevice();
     printf("device: vendorID 0x%04x, deviceID 0x%04x\n", device.vendorID(), device.deviceID());
 
-    // Load model. The chunk and the step count are the workload's, not the checkpoint's.
+    // Load model. The chunk and the step count are the configuration's, not the checkpoint's.
     pi05::ModelConfig modelCfg = modelConfig();
-    modelCfg.actionChunk = workload->actionChunk;
+    modelCfg.actionChunk = config.actionChunk;
     printf("model: pi0.5 %s\n", modelCfg.variant);
     fflush(stdout);
-    if (modelCfg.actionDim != common::Workload::actionDim ||
-        modelCfg.visionTrf.imageSize != common::Workload::imageSize ||
-        modelCfg.visionTrf.imageChannels != common::Workload::imageChannels || workload->cameras > modelCfg.maxCameras)
+    if (modelCfg.actionDim != common::Pi05Model::actionDim ||
+        modelCfg.visionTrf.imageSize != common::Pi05Model::imageSize ||
+        modelCfg.visionTrf.imageChannels != common::Pi05Model::imageChannels || config.cameras > modelCfg.maxCameras)
     {
-        fprintf(stderr, "error: the vAi model does not match the bench workload\n");
+        fprintf(stderr, "error: the vAi model does not match the bench configuration\n");
         return 1;
     }
 
@@ -123,17 +126,17 @@ int main(int argc, char** argv)
         .device = device,
         .wDefaultDtype = Dtype::Fp16,
         .oDefaultDtype = Dtype::Fp32,
-    }, modelCfg, { .denoiseSteps = workload->denoiseSteps });
+    }, modelCfg, { .denoiseSteps = config.denoiseSteps });
     // clang-format on
 
     // Load weights
     loadWeights<"lerobot">(net);
 
     // vAi takes its images in SigLIP's range whichever framework it is compared with.
-    const common::Inputs inputs = common::prepareInputs(*workload, common::signedCHW);
-    const uint32_t B = workload->cameras;
-    const uint32_t C = common::Workload::imageChannels;
-    const uint32_t S = common::Workload::imageSize;
+    const common::Inputs inputs = common::prepareInputs(config, common::signedCHW);
+    const uint32_t B = config.cameras;
+    const uint32_t C = common::Pi05Model::imageChannels;
+    const uint32_t S = common::Pi05Model::imageSize;
     const uint32_t nPrompt = (uint32_t)inputs.tokens.size();
     if (nPrompt > modelCfg.maxPromptTokens)
     {
@@ -145,7 +148,7 @@ int main(int argc, char** argv)
     // device buffer.
     Tensor inImages({ B, C, S, S });
     Tensor inTokenIds({ nPrompt });
-    Tensor nextAction({ workload->actionChunk, common::Workload::actionDim });
+    Tensor nextAction({ config.actionChunk, common::Pi05Model::actionDim });
 
     // Upload every input on each call. Readback waits for the complete action chunk.
     auto predict = [&] {
@@ -158,16 +161,17 @@ int main(int argc, char** argv)
     };
     auto actions = [&] { return nextAction.getData<float>(); };
 
-    common::printWorkload(*workload, inputs);
-    options.referencePath = workload->referencePath().string();
-    options.denoiseSteps = workload->denoiseSteps;
+    common::printVlaConfig(config, inputs);
+    options.referencePath = config.referencePath().string();
+    options.denoiseSteps = config.denoiseSteps;
+    
     return runVLABench(
         "vAi",
-        int(workload->imageTokens()),
+        int(config.imageTokens()),
         int(nPrompt),
         options,
-        workload->actionChunk,
-        common::Workload::actionDim,
+        config.actionChunk,
+        common::Pi05Model::actionDim,
         predict,
         actions);
 }

@@ -1,24 +1,30 @@
 #!/usr/bin/env bash
 #==============================================================================
 # Builds the TensorRT Edge-LLM engines the pi0.5 TensorRT bench reads, from the
-# checkpoint in data/ckpts/pi05/lerobot/<size>/, in three steps:
-#   1. exports it to FP16 ONNX with Edge-LLM's exporter, as the openpi
-#      configuration Edge-LLM's pi0.5 guide pairs with it (libero: pi05_libero,
-#      the bench's workload; 3B: pi05_aloha, pi05_base with the 50-action chunk),
-#      into data/benchmarks/pi05/<size>/trt-onnx/
-#   2. adds the normalization statistics the guide names for that configuration
-#   3. builds the engines on this GPU into data/benchmarks/pi05/<size>/engines/
+# checkpoint in data/ckpts/pi05/lerobot/<size>/, in four steps:
+#   1. installs Edge-LLM's Python exporter (trtedge) from the source
+#      setup-trt-edge-llm.sh keeps in ${XDG_CACHE_HOME:-~/.cache}/vai/
+#      TensorRT-Edge-LLM-v<version>-src into the virtual environment
+#      ${XDG_CACHE_HOME:-~/.cache}/vai/venv-trt-export, once
+#   2. exports the checkpoint to FP16 ONNX with it, as the openpi configuration
+#      Edge-LLM's pi0.5 guide pairs with it (libero: pi05_libero, the bench's
+#      configuration; 3B: pi05_aloha, pi05_base with the 50-action chunk), into
+#      data/benchmarks/pi05/<size>/trt-onnx/
+#   3. adds the normalization statistics the guide names for that configuration
+#   4. builds the engines on this GPU with the installed pi05_policy_build into
+#      data/benchmarks/pi05/<size>/engines/, where the bench reads them
 #
-# A finished export is reused, so a failed build does not repeat it; an
-# engine folder already there is never overwritten.
+# The exporter environment and a finished export are reused, so a failed build
+# does not repeat them; an engine folder already there is never overwritten.
 #
-# Needs Linux, curl, TensorRT Edge-LLM from setup-trt-edge-llm.sh
-# (TensorRTEdgeLLM_ROOT for another install) and the exporter's virtual
-# environment from benchmarks/SETUP.md (TRT_EXPORT_VENV for another one).
-# Set TRT_PACKAGE_DIR for an extracted TensorRT SDK, as for the setup script.
+# Needs Linux, curl, Python 3.10-3.12 with venv, and TensorRT Edge-LLM from
+# setup-trt-edge-llm.sh: its install (TensorRTEdgeLLM_ROOT for another) and the
+# source it keeps (TensorRTEdgeLLM_SRC for another checkout of the same tag).
+# TRT_EXPORT_VENV names another exporter environment. Set TRT_PACKAGE_DIR for an
+# extracted TensorRT SDK, as for the setup script.
 #
-#   ./benchmarks/pi05/scripts/build-trt-engines.sh                  # --size libero
-#   ./benchmarks/pi05/scripts/build-trt-engines.sh --size <size>
+#   ./benchmarks/pi05/scripts/export-trt.sh                  # --size libero
+#   ./benchmarks/pi05/scripts/export-trt.sh --size <size>
 #==============================================================================
 set -euo pipefail
 
@@ -27,8 +33,10 @@ VERSION=0.11.1
 
 [ -n "${HOME:-}" ] || { echo "HOME is not set" >&2; exit 2; }
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-EDGELLM="${TensorRTEdgeLLM_ROOT:-${XDG_CACHE_HOME:-$HOME/.cache}/vai/TensorRT-Edge-LLM}"
-VENV="${TRT_EXPORT_VENV:-$ROOT/.venv-trt-export}"
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/vai"
+EDGELLM="${TensorRTEdgeLLM_ROOT:-$CACHE_DIR/TensorRT-Edge-LLM}"
+EDGELLM_SRC="${TensorRTEdgeLLM_SRC:-$CACHE_DIR/TensorRT-Edge-LLM-v$VERSION-src}"
+VENV="${TRT_EXPORT_VENV:-$CACHE_DIR/venv-trt-export}"
 SIZE=libero
 
 usage() {
@@ -85,15 +93,32 @@ if [ ! -x "$BUILDER" ] || [ ! -f "$PLUGIN" ]; then
     echo "  run benchmarks/scripts/setup-trt-edge-llm.sh, or set TensorRTEdgeLLM_ROOT" >&2
     exit 1
 fi
-[ -x "$VENV/bin/trtedge" ] || {
-    echo "exporter not found at $VENV:" >&2
-    echo "  set it up as in benchmarks/SETUP.md, or set TRT_EXPORT_VENV" >&2
-    exit 1
+exporter_version() {
+    "$VENV/bin/python" -c 'import importlib.metadata as m; print(m.version("tensorrt-edgellm"))' 2>/dev/null || true
 }
-EXPORTER_VERSION="$("$VENV/bin/python" -c 'import importlib.metadata as m; print(m.version("tensorrt-edgellm"))' 2>/dev/null || true)"
-[ "$EXPORTER_VERSION" = "$VERSION" ] || {
-    echo "exporter in $VENV is tensorrt-edgellm ${EXPORTER_VERSION:-(not installed)}, not $VERSION" >&2; exit 1;
-}
+# The exporter is installed from the kept source only when the environment lacks it.
+if [ -x "$VENV/bin/trtedge" ]; then
+    EXPORTER_VERSION="$(exporter_version)"
+    [ "$EXPORTER_VERSION" = "$VERSION" ] || {
+        echo "exporter in $VENV is tensorrt-edgellm ${EXPORTER_VERSION:-(unknown)}, not $VERSION" >&2
+        echo "  remove $VENV to install it again from $EDGELLM_SRC" >&2
+        exit 1
+    }
+else
+    [ "$(git -C "$EDGELLM_SRC" rev-parse -q --verify HEAD 2>/dev/null || true)" = \
+      "$(git -C "$EDGELLM_SRC" rev-parse -q --verify "refs/tags/v$VERSION^{commit}" 2>/dev/null || echo none)" ] || {
+        echo "TensorRT Edge-LLM v$VERSION source not found at $EDGELLM_SRC:" >&2
+        echo "  run benchmarks/scripts/setup-trt-edge-llm.sh, which keeps it, or set TensorRTEdgeLLM_SRC" >&2
+        exit 1
+    }
+    command -v python3 >/dev/null 2>&1 || { echo "python3 not found" >&2; exit 1; }
+    python3 -c 'import sys; sys.exit(not ((3, 10) <= sys.version_info[:2] <= (3, 12)))' || {
+        echo "the exporter needs Python 3.10-3.12; python3 is $(python3 -V 2>&1)" >&2; exit 1;
+    }
+    python3 -c 'import ensurepip, venv' 2>/dev/null || {
+        echo "python3 cannot create a virtual environment: install its venv module (Ubuntu: python3-venv)" >&2; exit 1;
+    }
+fi
 [ ! -e "$ENGINE_DIR" ] || {
     echo "engines already exist: $ENGINE_DIR (remove the folder to rebuild)" >&2; exit 1;
 }
@@ -111,16 +136,39 @@ trap 'exit 143' TERM
 echo "=============================================================="
 echo " pi0.5 $SIZE -> TensorRT Edge-LLM $VERSION engines ($POLICY_CONFIG)"
 echo " checkpoint: $CHECKPOINT"
+echo " exporter:   $VENV"
 echo " engines:    $ENGINE_DIR"
 echo "=============================================================="
 
 #------------------------------------------------------------------------------
-# 1. Export to FP16 ONNX
+# 1. Exporter, from the kept Edge-LLM source
+#
+# The [export] extra is all the export needs: it runs on the CPU, without
+# Edge-LLM's native build.
+#------------------------------------------------------------------------------
+if [ -x "$VENV/bin/trtedge" ]; then
+    echo "[1/4] reusing the exporter in $VENV"
+else
+    echo "[1/4] installing the exporter from $EDGELLM_SRC into $VENV..."
+    mkdir -p "$(dirname "$VENV")"
+    PARTIAL="$VENV"
+    python3 -m venv "$VENV"
+    PYTHONNOUSERSITE=1 "$VENV/bin/python" -m pip install --quiet --upgrade pip
+    PYTHONNOUSERSITE=1 "$VENV/bin/python" -m pip install --quiet -e "$EDGELLM_SRC[export]"
+    EXPORTER_VERSION="$(exporter_version)"
+    [ "$EXPORTER_VERSION" = "$VERSION" ] || {
+        echo "installed tensorrt-edgellm ${EXPORTER_VERSION:-(unknown)}, not $VERSION" >&2; exit 1;
+    }
+    PARTIAL=""
+fi
+
+#------------------------------------------------------------------------------
+# 2. Export to FP16 ONNX
 #------------------------------------------------------------------------------
 if [ -e "$STAMP" ]; then
-    echo "[1/3] reusing the export in $ONNX_DIR"
+    echo "[2/4] reusing the export in $ONNX_DIR"
 else
-    echo "[1/3] exporting to FP16 ONNX in $ONNX_DIR..."
+    echo "[2/4] exporting to FP16 ONNX in $ONNX_DIR..."
     mkdir -p "$(dirname "$ONNX_DIR")"
     PARTIAL="$ONNX_DIR"
     PYTHONNOUSERSITE=1 "$VENV/bin/trtedge" export "$CHECKPOINT" "$ONNX_DIR" \
@@ -130,13 +178,13 @@ else
 fi
 
 #------------------------------------------------------------------------------
-# 2. Normalization statistics
+# 3. Normalization statistics
 #------------------------------------------------------------------------------
 NORM_STATS="$ONNX_DIR/assets/norm_stats.json"
 if [ -f "$NORM_STATS" ]; then
-    echo "[2/3] reusing $NORM_STATS"
+    echo "[3/4] reusing $NORM_STATS"
 else
-    echo "[2/3] downloading the normalization statistics..."
+    echo "[3/4] downloading the normalization statistics..."
     PARTIAL="$NORM_STATS.partial"
     curl --fail --location --silent --show-error --create-dirs --output "$NORM_STATS.partial" "$NORM_STATS_URL"
     mv "$NORM_STATS.partial" "$NORM_STATS"
@@ -144,9 +192,9 @@ else
 fi
 
 #------------------------------------------------------------------------------
-# 3. Engines, built on this GPU
+# 4. Engines, built on this GPU
 #------------------------------------------------------------------------------
-echo "[3/3] building the engines in $ENGINE_DIR..."
+echo "[4/4] building the engines in $ENGINE_DIR..."
 PARTIAL="$ENGINE_DIR"
 # TensorRT's builder opens its builder resource library by name, which outside the
 # system search paths (an extracted SDK in TRT_PACKAGE_DIR) only LD_LIBRARY_PATH finds.

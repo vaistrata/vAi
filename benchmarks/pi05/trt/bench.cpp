@@ -1,6 +1,6 @@
 #include "runtime/pi05Policy.h"
 #include "common/trtUtils.h"
-#include "../common/workload.h"
+#include "../common/vla-config.h"
 #include "bench-utils.h"
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
@@ -49,20 +49,20 @@ void usage(const char* argv0)
     fprintf(
         stderr,
         "  --engineDir    prebuilt Edge-LLM engines (default: PI05_ENGINE_DIR or %s)\n",
-        (common::vsTensorRT.dataDir() / "engines").string().c_str());
+        (common::vlaConfigs::openpiLibero.dataDir() / "engines").string().c_str());
     fprintf(stderr, "  EDGELLM_PLUGIN_PATH overrides the Edge-LLM plugin library\n");
     fprintf(stderr, "  --showActions  print the first five actions after the table\n");
     fprintf(
         stderr,
         "  --atol/--rtol  tolerances against %s (default: 0.002 / 0.001)\n",
-        common::vsTensorRT.referencePath().string().c_str());
+        common::vlaConfigs::openpiLibero.referencePath().string().c_str());
 }
 
 
 int main(int argc, char** argv)
 {
     // Edge-LLM serves openpi's pi05_libero, as its pi0.5 guide builds it.
-    const common::Workload& workload = common::vsTensorRT;
+    const common::VlaConfig& config = common::vlaConfigs::openpiLibero;
     VLABenchOptions options;
     const char* engineDir = std::getenv("PI05_ENGINE_DIR");
 
@@ -112,13 +112,14 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    const std::string defaultEngineDir = (workload.dataDir() / "engines").string();
+    const std::string defaultEngineDir = (config.dataDir() / "engines").string();
     if (!engineDir || !*engineDir)
         engineDir = defaultEngineDir.c_str();
 
     int nDevices = 0;
     if (!checkCuda(cudaGetDeviceCount(&nDevices), "cudaGetDeviceCount"))
         return 1;
+
     std::vector<std::string> gpuNames;
     for (int i = 0; i < nDevices; ++i)
     {
@@ -127,14 +128,17 @@ int main(int argc, char** argv)
             return 1;
         gpuNames.push_back(props.name);
     }
+
     if (gpuNames.empty())
     {
         fprintf(stderr, "error: no CUDA device found\n");
         return 1;
     }
+
     const int device = pickGpu(gpuNames);
     if (!checkCuda(cudaSetDevice(device), "cudaSetDevice"))
         return 1;
+
     printf("device: CUDA %d, %s\n", device, gpuNames[device].c_str());
 
     // Register the action engine's AttentionPlugin before deserializing engines.
@@ -160,13 +164,14 @@ int main(int argc, char** argv)
     }
 
     // Load engines built beforehand with pi05_policy_build.
-    printf("model: pi0.5 %s\n", workload.dataset);
+    printf("model: pi0.5 %s\n", config.dataset);
     printf("engines: %s\n", engineDir);
     fflush(stdout);
 
     CudaStream stream;
     if (!checkCuda(cudaStreamCreateWithFlags(&stream.handle, cudaStreamNonBlocking), "cudaStreamCreateWithFlags"))
         return 1;
+
     // The runtime throws when the engines or their files are missing.
     std::optional<pi05::Pi05Policy> policy;
     try
@@ -180,31 +185,35 @@ int main(int argc, char** argv)
     }
     auto& runtime = policy->runtime();
     const auto& engineConfig = runtime.getConfig();
-    if (engineConfig.actionHorizon != int32_t(workload.actionChunk) ||
-        engineConfig.actionDim != int32_t(workload.actionDim))
+    if (engineConfig.actionHorizon != int32_t(config.actionChunk) ||
+        engineConfig.actionDim != int32_t(common::Pi05Model::actionDim))
     {
         fprintf(
             stderr,
             "error: TensorRT engines must match action chunk [%u, %u]; rebuild engines or set --engineDir\n",
-            workload.actionChunk,
-            workload.actionDim);
+            config.actionChunk,
+            common::Pi05Model::actionDim);
         return 1;
     }
-    runtime.setNumDenoiseSteps(int32_t(workload.denoiseSteps));
+    runtime.setNumDenoiseSteps(int32_t(config.denoiseSteps));
     // CUDA Graph is mandatory for this benchmark; there is no eager-mode option.
     runtime.setUseCudaGraph(true);
     printf("cuda graph: always on\n");
 
-    const uint32_t B = workload.cameras;
-    const uint32_t C = workload.imageChannels;
-    const uint32_t S = workload.imageSize;
+    const uint32_t B = config.cameras;
+    const uint32_t C = common::Pi05Model::imageChannels;
+    const uint32_t S = common::Pi05Model::imageSize;
     policy->validateViewCount(int32_t(B));
 
-    const common::Inputs inputs = common::prepareInputs(workload, common::signedCHW);
+    const common::Inputs inputs = common::prepareInputs(config, common::signedCHW);
     const uint32_t nPrompt = (uint32_t)inputs.tokens.size();
-    if (nPrompt > workload.maxPromptTokens)
+    if (nPrompt > common::Pi05Model::maxPromptTokens)
     {
-        fprintf(stderr, "error: the prompt has %u tokens, the model allows %u\n", nPrompt, workload.maxPromptTokens);
+        fprintf(
+            stderr,
+            "error: the prompt has %u tokens, the model allows %u\n",
+            nPrompt,
+            common::Pi05Model::maxPromptTokens);
         return 1;
     }
 
@@ -214,6 +223,7 @@ int main(int argc, char** argv)
     halfPixels.reserve(inputs.pixels.size());
     for (float value : inputs.pixels)
         halfPixels.push_back(__float2half(value));
+
     trt_edgellm::rt::Tensor inImages(
         trt_edgellm::rt::Coords{ int64_t(B), int64_t(C), int64_t(S), int64_t(S) },
         trt_edgellm::rt::DeviceType::kGPU,
@@ -222,7 +232,8 @@ int main(int argc, char** argv)
 
     // Each prediction includes H2D pixels, inference and the host action chunk.
     // Edge-LLM uploads host tokens and resets the configured initial noise internally.
-    auto predict = [&]() -> bool {
+    auto predict = [&]() -> bool
+    {
         if (!checkCuda(cudaMemcpyAsync(
             inImages.rawPointer(),
             halfPixels.data(),
@@ -236,7 +247,7 @@ int main(int argc, char** argv)
             return false;
 
         nextAction = std::move(chunk.normalizedActions);
-        if (nextAction.size() != workload.actionCount())
+        if (nextAction.size() != config.actionCount())
         {
             fprintf(stderr, "error: TensorRT returned an unexpected action chunk size\n");
             return false;
@@ -244,19 +255,20 @@ int main(int argc, char** argv)
         return true;
     };
 
-    common::printWorkload(workload, inputs);
+    common::printVlaConfig(config, inputs);
     // The first predictions also initialize and capture the runtime's CUDA graphs: the
     // reference run and the warmup happen before any latency sample.
-    options.referencePath = workload.referencePath().string();
-    options.denoiseSteps = workload.denoiseSteps;
+    options.referencePath = config.referencePath().string();
+    options.denoiseSteps = config.denoiseSteps;
     auto actions = [&] { return (const float*)nextAction.data(); };
+    
     return runVLABench(
         "TensorRT Edge-LLM",
-        int(workload.imageTokens()),
+        int(config.imageTokens()),
         int(nPrompt),
         options,
-        workload.actionChunk,
-        workload.actionDim,
+        config.actionChunk,
+        common::Pi05Model::actionDim,
         predict,
         actions);
 }

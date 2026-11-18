@@ -3,17 +3,21 @@
 # Installs the MIGraphX the pi0.5 bench compares against: release 2.18.0 and
 # the ROCm 10.1.0 runtime it ships with, from AMD's prebuilt files (no build).
 #
-# Unpacks, without apt and without root, into
-# ${XDG_CACHE_HOME:-~/.cache}/vai/migraphx-<version>:
+# Downloads, into ${XDG_CACHE_HOME:-~/.cache}/vai/migraphx-<version>-download,
+# and keeps there for later runs:
 #   - the amdrocm10-migraphx and amdrocm10-migraphx-dev Ubuntu 24.04 packages;
-#   - from the ROCm 10.1.0 tarball of this GPU, the runtime MIGraphX loads
-#     (HIP, hiprtc, comgr, HSA, MIOpen, rocBLAS, hipBLASLt and their kernels),
-#     into the same lib folder, about 1.2 GB of the 2 GB download.
+#   - the ROCm 10.1.0 tarball of this GPU (about 2 GB).
+# Unpacks them, without apt and without root, into
+# ${XDG_CACHE_HOME:-~/.cache}/vai/migraphx-<version>: the packages, and from the
+# tarball only the runtime MIGraphX loads (HIP, hiprtc, comgr, HSA, MIOpen,
+# rocBLAS, hipBLASLt and their kernels), into the same lib folder, about 1.2 GB.
 # MIGraphX looks for its ROCm libraries next to itself, and the bench's RUNPATH
 # names that folder before the system ROCm's, so the bench runs on ROCm 10.1
 # whichever ROCm is installed; that one only provides the HIP headers to build.
-# It registers the prefix in CMake's user package registry: the bench asks for
-# 2.18, so find_package(migraphx) passes over another release ROCm carries.
+#
+# Links the install at ${XDG_CACHE_HOME:-~/.cache}/vai/migraphx, where the
+# bench's CMake looks for it before the MIGraphX ROCm carries. Builds no model
+# files.
 #
 # The bench then compiles its graphs with MIGraphX's MLIR GEMM path (CMake's
 # MIGRAPHX_GEMM_PROVIDER=mlir, the default) on the bundle export-onnx.py writes,
@@ -23,7 +27,8 @@
 # kernel driver of a ROCm 10.1 GPU (the tarball is per GPU, --arch).
 #
 #   ./benchmarks/scripts/setup-migraphx.sh                 # ~2.1 GB download, ~1.6 GB installed
-#   ./benchmarks/scripts/setup-migraphx.sh --uninstall     # remove the install + registration
+#   ./benchmarks/scripts/setup-migraphx.sh --arch gfx1151  # name the GPU
+#   ./benchmarks/scripts/setup-migraphx.sh --uninstall     # remove the install, downloads + link
 #
 # To use another install of the pinned release instead, configure vAi with
 # -Dmigraphx_DIR=<prefix>/lib/cmake/migraphx.
@@ -52,15 +57,17 @@ declare -A ROCM_SHA256=(
     [gfx1151]=50deb993035bc2f6a5aba5e3de8d476d8c512a2eec2cbfd5aa569d71e0b8b337
 )
 
-[ -n "${HOME:-}" ] || { echo "HOME is not set: the registry lives under \$HOME/.cmake; set it and re-run" >&2; exit 2; }
+[ -n "${HOME:-}" ] || { echo "HOME is not set: the install lives under \$HOME/.cache; set it and re-run" >&2; exit 2; }
 if [ "$(id -u)" -eq 0 ]; then
     echo "warning: running as root, so this installs into root's cache ($HOME), not yours" >&2
 fi
 
-# Deletes nothing outside these: the prefix, its download folder and its vai-* registry entries.
+# Deletes nothing outside these: the prefix, its download folder, the link to it and
+# the vai-* registry entries earlier versions of this script made.
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}"
 PREFIX="$CACHE_DIR/vai/migraphx-$VERSION"
 DOWNLOAD="$PREFIX-download"
+LINK="$CACHE_DIR/vai/migraphx"
 STAMP="$PREFIX/.vai-pin"
 CONFIG="$PREFIX/lib/cmake/migraphx/migraphx-config.cmake"
 REG_DIR="$HOME/.cmake/packages/migraphx"
@@ -75,8 +82,8 @@ usage() {
 
 Options:
   --arch NAME    the GPU whose ROCm tarball to take, e.g. gfx1151 (default: the first GPU)
-  --force        reinstall even if this release is already installed
-  --uninstall    remove the install, its download folder and the registry entry
+  --force        reinstall even if this release is already installed (the downloads are reused)
+  --uninstall    remove the install, its downloads and the link to it
   -h, --help     this text
 USAGE
 }
@@ -91,18 +98,20 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-# One vai-* registry entry only: with several, which one find_package picks is
-# undefined. -Dmigraphx_DIR still takes precedence over it.
-register() {
-    mkdir -p "$REG_DIR"
+# The link the bench's CMake reads. The registry entries earlier versions of this
+# script made go, so only the link names the install.
+link_install() {
+    ln -sfn "$PREFIX" "$LINK"
     rm -f "$REG_DIR"/vai-*
-    printf '%s\n' "$PREFIX/lib/cmake/migraphx" > "$REG_DIR/vai-$VERSION"
 }
 
 if [ $UNINSTALL -eq 1 ]; then
+    if [ "$(readlink "$LINK" 2>/dev/null || true)" = "$PREFIX" ]; then
+        rm -f "$LINK"
+    fi
     rm -rf "$PREFIX" "$DOWNLOAD"
     rm -f "$REG_DIR"/vai-*
-    echo "removed $PREFIX and the vai-* entries in $REG_DIR"
+    echo "removed $PREFIX and $DOWNLOAD"
     exit 0
 fi
 
@@ -126,9 +135,9 @@ PIN="$VERSION-$REVISION rocm-$ROCM_VERSION $ARCH"
 # Already installed?
 #------------------------------------------------------------------------------
 if [ $FORCE -eq 0 ] && [ -f "$CONFIG" ] && [ "$(cat "$STAMP" 2>/dev/null)" = "$PIN" ]; then
-    register    # restore the entry if it was removed by hand
+    link_install    # restore the link if it was removed by hand
     echo "MIGraphX $VERSION with ROCm $ROCM_VERSION ($ARCH) is already installed at $PREFIX"
-    echo "(re-run with --force to reinstall it)"
+    echo "linked from $LINK (re-run with --force to reinstall it)"
     exit 0
 fi
 
@@ -150,7 +159,8 @@ if [ -n "$missing" ]; then
 fi
 
 ROCM_TARBALL="therock-dist-linux-$ARCH-$ROCM_VERSION.tar.gz"
-if [ "$(curl -sIo /dev/null -w '%{http_code}' "$ROCM_REPO/$ROCM_TARBALL")" != 200 ]; then
+if [ ! -f "$DOWNLOAD/$ROCM_TARBALL" ] \
+   && [ "$(curl -sIo /dev/null -w '%{http_code}' "$ROCM_REPO/$ROCM_TARBALL")" != 200 ]; then
     echo "AMD publishes no ROCm $ROCM_VERSION tarball for $ARCH ($ROCM_REPO/$ROCM_TARBALL)" >&2
     exit 1
 fi
@@ -161,34 +171,56 @@ fi
 
 echo "=============================================================="
 echo " MIGraphX $VERSION + ROCm $ROCM_VERSION runtime ($ARCH) -> $PREFIX"
+echo " downloads: $DOWNLOAD"
 echo "=============================================================="
+
+# Downloads into $DOWNLOAD/<name>, reusing a file already there whose SHA256 is the
+# expected one. An empty expected hash accepts any file, with a warning naming its hash.
+# A download goes to <name>.partial first, so an interrupted one is never reused.
+fetch() {
+    local url=$1 name=$2 expected=$3 file="$DOWNLOAD/$2" actual
+    if [ -f "$file" ]; then
+        actual="$(sha256sum "$file" | cut -d' ' -f1)"
+        if [ -z "$expected" ] || [ "$actual" = "$expected" ]; then
+            echo "      reusing $file"
+            [ -n "$expected" ] || echo "warning: no pinned SHA256 for $name; it hashes to $actual" >&2
+            return
+        fi
+        echo "      $file has another SHA256; downloading it again"
+        rm -f "$file"
+    fi
+    curl -fL --retry 3 --progress-bar -o "$file.partial" "$url"
+    actual="$(sha256sum "$file.partial" | cut -d' ' -f1)"
+    if [ -z "$expected" ]; then
+        echo "warning: no pinned SHA256 for $name; it hashed to $actual" >&2
+    elif [ "$actual" != "$expected" ]; then
+        rm -f "$file.partial"
+        echo "checksum mismatch for $name: expected $expected, got $actual" >&2
+        exit 1
+    fi
+    mv "$file.partial" "$file"
+}
+
+mkdir -p "$DOWNLOAD"
+staging="$DOWNLOAD/root"
+rm -rf "$staging"
+mkdir -p "$staging"
+trap 'rm -rf "$staging" "$DOWNLOAD"/*.partial' EXIT
 
 #------------------------------------------------------------------------------
 # MIGraphX packages, checked against the pinned hashes
 #------------------------------------------------------------------------------
-mkdir -p "$CACHE_DIR/vai"
-rm -rf "$DOWNLOAD"
-mkdir -p "$DOWNLOAD"
-trap 'rm -rf "$DOWNLOAD"' EXIT
-staging="$DOWNLOAD/root"
-
 echo "[1/3] MIGraphX $VERSION packages..."
 for pkg in "${PACKAGES[@]}"; do
     deb="${pkg}_${VERSION}-${REVISION}_amd64.deb"
-    curl -fL --retry 3 --progress-bar -o "$DOWNLOAD/$deb" "$REPO/pool/main/$deb"
-    actual="$(sha256sum "$DOWNLOAD/$deb" | cut -d' ' -f1)"
-    if [ "$actual" != "${SHA256[$pkg]}" ]; then
-        echo "checksum mismatch for $deb: expected ${SHA256[$pkg]}, got $actual" >&2
-        exit 1
-    fi
+    fetch "$REPO/pool/main/$deb" "$deb" "${SHA256[$pkg]}"
     dpkg-deb -x "$DOWNLOAD/$deb" "$staging"
-    rm -f "$DOWNLOAD/$deb"
 done
 [ -f "$staging/$PKG_ROOT/lib/cmake/migraphx/migraphx-config.cmake" ] \
     || { echo "the packages carry no $PKG_ROOT/lib/cmake/migraphx: an unexpected layout" >&2; exit 1; }
 
 #------------------------------------------------------------------------------
-# ROCm runtime, streamed: only what MIGraphX loads is written to disk
+# ROCm runtime: only what MIGraphX loads is unpacked
 #
 # The libraries are the closure of MIGraphX's NEEDED entries through the
 # tarball's own RUNPATHs (lib, lib/llvm/lib, lib/rocm_sysdeps/lib), plus what
@@ -213,23 +245,11 @@ ROCM_MEMBERS=(
     "./.kpack/blas_lib_$ARCH.kpack" "./.kpack/miopen_lib_$ARCH.kpack"
 )
 
-echo "[2/3] ROCm $ROCM_VERSION runtime from $ROCM_TARBALL (2 GB, streamed)..."
+echo "[2/3] ROCm $ROCM_VERSION runtime from $ROCM_TARBALL (2 GB)..."
+fetch "$ROCM_REPO/$ROCM_TARBALL" "$ROCM_TARBALL" "${ROCM_SHA256[$ARCH]:-}"
 # Next to MIGraphX: its RUNPATH and the bench's both name this lib folder first.
 rocm="$staging/$PKG_ROOT"
-mkfifo "$DOWNLOAD/stream"
-sha256sum < "$DOWNLOAD/stream" | cut -d' ' -f1 > "$DOWNLOAD/rocm.sha256" &
-hasher=$!
-curl -fL --retry 3 --progress-bar "$ROCM_REPO/$ROCM_TARBALL" | tee "$DOWNLOAD/stream" \
-    | tar -xzf - -C "$rocm" --wildcards "${ROCM_MEMBERS[@]}"
-wait "$hasher"
-actual="$(cat "$DOWNLOAD/rocm.sha256")"
-expected="${ROCM_SHA256[$ARCH]:-}"
-if [ -z "$expected" ]; then
-    echo "warning: no pinned SHA256 for $ROCM_TARBALL; it hashed to $actual" >&2
-elif [ "$actual" != "$expected" ]; then
-    echo "checksum mismatch for $ROCM_TARBALL: expected $expected, got $actual" >&2
-    exit 1
-fi
+tar -xzf "$DOWNLOAD/$ROCM_TARBALL" -C "$rocm" --wildcards "${ROCM_MEMBERS[@]}"
 [ -e "$rocm/lib/libamdhip64.so.7" ] && [ -e "$rocm/lib/libMIOpen.so.1" ] \
     || { echo "$ROCM_TARBALL lacks the expected runtime libraries" >&2; exit 1; }
 
@@ -244,8 +264,8 @@ trap '' INT TERM
 rm -rf "$PREFIX"
 mv "$staging/$PKG_ROOT" "$PREFIX"
 printf '%s\n' "$PIN" > "$STAMP"
+link_install
 trap - INT TERM
-register
 
 #------------------------------------------------------------------------------
 # Done
@@ -253,10 +273,5 @@ register
 echo
 echo "installed MIGraphX $VERSION with the ROCm $ROCM_VERSION runtime for $ARCH ($(du -sh "$PREFIX" | cut -f1)) at:"
 echo "  $PREFIX"
-echo "registered for find_package(migraphx) in $REG_DIR"
-echo
-echo "Next (see benchmarks/pi05/README.md):"
-echo "  python benchmarks/pi05/scripts/export-onnx.py     # FP16 bundle, constants folded"
-echo "  cmake -B build -DCMAKE_BUILD_TYPE=Release -DVAI_BUILD_BENCH=ON -DMIGRAPHX_GEMM_PROVIDER=mlir"
-echo "  cmake --build build --target bench-pi05-migraphx"
-echo "  build/bin/bench-pi05-migraphx"
+echo "linked from $LINK"
+echo "downloads kept in $DOWNLOAD ($(du -sh "$DOWNLOAD" | cut -f1)); --uninstall removes them"

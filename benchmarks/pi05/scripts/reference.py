@@ -12,7 +12,7 @@ the model's own seeded noise. Written as little-endian FP32, each named <kind>_<
 The benches take all three, so they compare the model alone, not the image preprocessing.
 
 --policy openpi swaps in the prompt of openpi's pi05_libero, which TensorRT Edge-LLM serves: the
-task alone, without the state. The bench workloads (common/workload.h) name the values to run:
+task alone, without the state. The bench configurations (common/vla-config.h) name the values to run:
 
     MIGraphX, vla.cpp   --cameras 2 --chunk 50 --steps 10
     TensorRT            --cameras 2 --chunk 10 --steps 10 --policy openpi

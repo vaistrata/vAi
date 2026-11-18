@@ -1,7 +1,7 @@
 #include "vla.h"
 #include "ggml.h"
 #include "gguf.h"
-#include "../common/workload.h"
+#include "../common/vla-config.h"
 #include "bench-utils.h"
 #include <cuda_runtime_api.h>
 #include <cstdio>
@@ -100,20 +100,20 @@ void usage(const char* argv0)
     fprintf(
         stderr,
         "  --model        GGUF checkpoint (default: VLA_MODEL_PATH or %s)\n",
-        (common::vsVlaCpp.dataDir() / "model.gguf").string().c_str());
+        (common::vlaConfigs::lerobotLibero.dataDir() / "model.gguf").string().c_str());
     fprintf(stderr, "  --config       runtime config (default: VLA_CONFIG_PATH or %s)\n", VLACPP_RUNTIME_CONFIG);
     fprintf(stderr, "  --showActions  print the first five actions after the table\n");
     fprintf(
         stderr,
         "  --atol/--rtol  tolerances against %s (default: 0.002 / 0.001)\n",
-        common::vsVlaCpp.referencePath().string().c_str());
+        common::vlaConfigs::lerobotLibero.referencePath().string().c_str());
 }
 
 
 int main(int argc, char** argv)
 {
     // vla.cpp runs the LeRobot LIBERO policy.
-    const common::Workload& workload = common::vsVlaCpp;
+    const common::VlaConfig& vla = common::vlaConfigs::lerobotLibero;
     VLABenchOptions options;
     const char* modelPath = std::getenv("VLA_MODEL_PATH");
     const char* configPath = std::getenv("VLA_CONFIG_PATH");
@@ -168,7 +168,7 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    const std::string defaultModelPath = (workload.dataDir() / "model.gguf").string();
+    const std::string defaultModelPath = (vla.dataDir() / "model.gguf").string();
     if (!modelPath || !*modelPath)
         modelPath = defaultModelPath.c_str();
     // vla.cpp takes the weight dtype only from a runtime config file, BF16 without one; the bench's
@@ -205,7 +205,7 @@ int main(int argc, char** argv)
     printf("device: CUDA %d, %s\n", device, gpuNames[device].c_str());
 
     // Load the GGUF checkpoint and vla.cpp runtime config.
-    printf("model: pi0.5 %s\n", workload.dataset);
+    printf("model: pi0.5 %s\n", vla.dataset);
     printf("checkpoint: %s\nconfig: %s\n", modelPath, configPath);
     fflush(stdout);
 
@@ -217,27 +217,32 @@ int main(int argc, char** argv)
         fprintf(stderr, "error: failed to load VLA model or read its config\n");
         return 1;
     }
-    if (config.max_state_dim != int64_t(workload.actionDim) || config.max_action_dim != int64_t(workload.actionDim) ||
-        config.n_suffix != int64_t(workload.actionChunk) || config.num_steps != int32_t(workload.denoiseSteps))
+    if (config.max_state_dim != int64_t(common::Pi05Model::actionDim) ||
+        config.max_action_dim != int64_t(common::Pi05Model::actionDim) ||
+        config.n_suffix != int64_t(vla.actionChunk) || config.num_steps != int32_t(vla.denoiseSteps))
     {
         fprintf(
             stderr,
             "error: VLA config must match state/action dim %u, action chunk %u and %u denoise steps\n",
-            workload.actionDim,
-            workload.actionChunk,
-            workload.denoiseSteps);
+            common::Pi05Model::actionDim,
+            vla.actionChunk,
+            vla.denoiseSteps);
         return 1;
     }
 
     // vla.cpp normalizes internally; its float input is interleaved RGB [0, 1].
-    const common::Inputs inputs = common::prepareInputs(workload, common::unitHWC);
-    const uint32_t B = workload.cameras;
-    const uint32_t C = workload.imageChannels;
-    const uint32_t S = workload.imageSize;
+    const common::Inputs inputs = common::prepareInputs(vla, common::unitHWC);
+    const uint32_t B = vla.cameras;
+    const uint32_t C = common::Pi05Model::imageChannels;
+    const uint32_t S = common::Pi05Model::imageSize;
     const uint32_t nPrompt = (uint32_t)inputs.tokens.size();
-    if (nPrompt > workload.maxPromptTokens)
+    if (nPrompt > common::Pi05Model::maxPromptTokens)
     {
-        fprintf(stderr, "error: the prompt has %u tokens, the model allows %u\n", nPrompt, workload.maxPromptTokens);
+        fprintf(
+            stderr,
+            "error: the prompt has %u tokens, the model allows %u\n",
+            nPrompt,
+            common::Pi05Model::maxPromptTokens);
         return 1;
     }
 
@@ -267,29 +272,33 @@ int main(int argc, char** argv)
     std::unique_ptr<float, decltype(&vla_free_actions)> nextAction(nullptr, &vla_free_actions);
 
     // One synchronous public call includes input upload and host action readback.
-    auto predict = [&]() -> bool {
+    auto predict = [&]() -> bool
+    {
         float* actions = nullptr;
         int64_t numValues = 0;
         const int32_t status = vla_predict(model.get(), &input, &actions, &numValues);
         nextAction.reset(actions);
+
         if (status != VLA_OK)
         {
             fprintf(stderr, "error: vla_predict failed (status=%d)\n", int(status));
             return false;
         }
-        if (!actions || numValues != int64_t(workload.actionCount()))
+
+        if (!actions || numValues != int64_t(vla.actionCount()))
         {
             fprintf(
                 stderr,
                 "error: vla.cpp output must match action chunk [%u, %u]\n",
-                workload.actionChunk,
-                workload.actionDim);
+                vla.actionChunk,
+                common::Pi05Model::actionDim);
             return false;
         }
+
         return true;
     };
 
-    common::printWorkload(workload, inputs);
+    common::printVlaConfig(vla, inputs);
     // vla.cpp applies the GGUF's dataset statistics to the actions and zeroes the dims past
     // real_action_dim. The bench inverts the statistics outside the timed call, so any GGUF
     // compares with the reference, which holds the model's own actions, over the real dims.
@@ -303,26 +312,32 @@ int main(int argc, char** argv)
             "actions: %s statistics of the GGUF inverted, %lld of %u dims real\n",
             stats.quantiles ? "quantile" : "mean/std",
             (long long)config.real_action_dim,
-            workload.actionDim);
+            common::Pi05Model::actionDim);
         options.checkedDims = unsigned(config.real_action_dim);
     }
-    options.referencePath = workload.referencePath().string();
-    options.denoiseSteps = workload.denoiseSteps;
-    std::vector<float> modelActions(workload.actionCount());
-    auto actions = [&] {
+
+    options.referencePath = vla.referencePath().string();
+    options.denoiseSteps = vla.denoiseSteps;
+    std::vector<float> modelActions(vla.actionCount());
+
+    auto actions = [&]
+    {
         if (!denormalized)
             return (const float*)nextAction.get();
+
         std::memcpy(modelActions.data(), nextAction.get(), modelActions.size() * sizeof(float));
-        stats.normalize(modelActions.data(), workload.actionChunk, workload.actionDim);
+        stats.normalize(modelActions.data(), vla.actionChunk, common::Pi05Model::actionDim);
+        
         return (const float*)modelActions.data();
     };
+
     return runVLABench(
         "vla.cpp",
-        int(workload.imageTokens()),
+        int(vla.imageTokens()),
         int(nPrompt),
         options,
-        workload.actionChunk,
-        workload.actionDim,
+        vla.actionChunk,
+        common::Pi05Model::actionDim,
         predict,
         actions);
 }

@@ -7,27 +7,17 @@ project(bench-pi05)
 # prompt and noise helpers (processing.h), so every framework gets the same input.
 set(MODEL_DIR ${CMAKE_SOURCE_DIR}/models/experimental/pi05)
 
-# vla.cpp and TensorRT Edge-LLM ship no CMake package. Their setup scripts link the
-# install at <cache>/vai/vla.cpp and <cache>/vai/TensorRT-Edge-LLM, used here unless
-# vla_ROOT or TensorRTEdgeLLM_ROOT names another.
+################################################################################
+# common: what the comparison runtimes below share
+################################################################################
+# The setup scripts in benchmarks/scripts/ build each comparison framework in <cache>/vai
+# and link its install there; each runtime's section below looks for its link, unless
+# its own variable names another install.
 if(DEFINED ENV{XDG_CACHE_HOME} AND NOT "$ENV{XDG_CACHE_HOME}" STREQUAL "")
     set(_benchCache "$ENV{XDG_CACHE_HOME}/vai")
 else()
     set(_benchCache "$ENV{HOME}/.cache/vai")
 endif()
-if(NOT DEFINED vla_ROOT AND NOT DEFINED ENV{vla_ROOT} AND IS_DIRECTORY "${_benchCache}/vla.cpp")
-    set(vla_ROOT "${_benchCache}/vla.cpp")
-endif()
-if(NOT DEFINED TensorRTEdgeLLM_ROOT)
-    set(TensorRTEdgeLLM_ROOT "$ENV{TensorRTEdgeLLM_ROOT}")
-    if(NOT TensorRTEdgeLLM_ROOT)
-        set(TensorRTEdgeLLM_ROOT "${_benchCache}/TensorRT-Edge-LLM")
-    endif()
-endif()
-unset(_benchCache)
-
-# vla.cpp and TensorRT Edge-LLM run on CUDA: their benches list the CUDA devices to pick one.
-find_package(CUDAToolkit QUIET)
 
 # The comparison benches share only the CPU input preparation with vAi: its image
 # processor and tokenizer, compiled in without linking vAi itself.
@@ -60,8 +50,17 @@ target_link_libraries(bench-pi05-vai PRIVATE
 ################################################################################
 # vla.cpp
 ################################################################################
-# Optional, Linux only. vla.cpp installs libvla and vla.h but no record of its release,
-# so the release is read from the converter setup-vlacpp.sh keeps next to the install.
+# Optional, Linux only. vla.cpp ships no CMake package: setup-vlacpp.sh links its install
+# at <cache>/vai/vla.cpp, used unless vla_ROOT names another.
+if(NOT DEFINED vla_ROOT AND NOT DEFINED ENV{vla_ROOT} AND IS_DIRECTORY "${_benchCache}/vla.cpp")
+    set(vla_ROOT "${_benchCache}/vla.cpp")
+endif()
+
+# vla.cpp runs on CUDA: its bench lists the CUDA devices to pick one.
+find_package(CUDAToolkit QUIET)
+
+# vla.cpp installs libvla and vla.h but no record of its release, so the release is read
+# from the converter setup-vlacpp.sh keeps next to the install.
 find_path(vla_INCLUDE_DIR NAMES vla.h HINTS "${vla_ROOT}" ENV vla_ROOT PATH_SUFFIXES include)
 find_library(vla_LIBRARY NAMES vla HINTS "${vla_ROOT}" ENV vla_ROOT PATH_SUFFIXES lib lib64)
 # The bench reads the GGUF's action statistics with the gguf API in ggml-base, which libvla links.
@@ -124,9 +123,16 @@ unset(_vlaPrefix)
 ################################################################################
 # MIGraphX
 ################################################################################
-# Optional, Linux only. setup-migraphx.sh registers its install in CMake's package
-# registry. ROCm's own folder is searched first, so the pinned release is asked for by
-# version: a MIGraphX of another release that ROCm carries is passed over for it.
+# Optional, Linux only. setup-migraphx.sh links its install at <cache>/vai/migraphx, used
+# unless migraphx_DIR names another: naming the package's folder puts it ahead of the
+# MIGraphX ROCm carries.
+if(NOT DEFINED migraphx_DIR AND NOT DEFINED ENV{migraphx_DIR}
+   AND EXISTS "${_benchCache}/migraphx/lib/cmake/migraphx/migraphx-config.cmake")
+    set(migraphx_DIR "${_benchCache}/migraphx/lib/cmake/migraphx")
+endif()
+
+# Without the link, ROCm's own folder is searched first, so the pinned release is asked
+# for by version: a MIGraphX of another release that ROCm carries is passed over for it.
 if(DEFINED ENV{ROCM_PATH})
     list(APPEND CMAKE_PREFIX_PATH "$ENV{ROCM_PATH}")
 elseif(EXISTS "/opt/rocm")
@@ -234,9 +240,20 @@ unset(_migraphxVersion)
 ################################################################################
 # TensorRT Edge-LLM (pi0.5 runtime)
 ################################################################################
-# Optional, Linux only. Edge-LLM installs no CMake package, so this reads the layout
-# setup-trt-edge-llm.sh installs: headers under include/, libraries under lib/, and the
-# SM its kernels were built for in .cuda-arch.
+# Optional, Linux only. Edge-LLM ships no CMake package: setup-trt-edge-llm.sh links its
+# install at <cache>/vai/TensorRT-Edge-LLM, used unless TensorRTEdgeLLM_ROOT names another.
+if(NOT DEFINED TensorRTEdgeLLM_ROOT)
+    set(TensorRTEdgeLLM_ROOT "$ENV{TensorRTEdgeLLM_ROOT}")
+    if(NOT TensorRTEdgeLLM_ROOT)
+        set(TensorRTEdgeLLM_ROOT "${_benchCache}/TensorRT-Edge-LLM")
+    endif()
+endif()
+
+# Edge-LLM runs on CUDA: its bench lists the CUDA devices to pick one, and links the CUDA runtime.
+find_package(CUDAToolkit QUIET)
+
+# This reads the layout setup-trt-edge-llm.sh installs: headers under include/, libraries
+# under lib/, and the SM its kernels were built for in .cuda-arch.
 set(_edgellmVersion "")
 set(_edgellmVersionHeader "${TensorRTEdgeLLM_ROOT}/include/tensorrt_edgellm/common/version.h")
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND EXISTS "${_edgellmVersionHeader}"
@@ -323,3 +340,4 @@ else()
                    "For it run benchmarks/scripts/setup-trt-edge-llm.sh, or point TensorRTEdgeLLM_ROOT at the install it makes.")
 endif()
 unset(_edgellmVersion)
+unset(_benchCache)

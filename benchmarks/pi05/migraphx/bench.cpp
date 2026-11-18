@@ -1,5 +1,5 @@
 #include "net.h"
-#include "../common/workload.h"
+#include "../common/vla-config.h"
 #include "bench-utils.h"
 #include <migraphx/version.h>
 #include <hip/hip_runtime_api.h>
@@ -9,12 +9,12 @@
 #include <cstring>
 #include <filesystem>
 #include <optional>
-#include <stdexcept>
 #include <string>
+#include <system_error>
 #include <utility>
 #include <vector>
 
-// net.h and the bench's workload share one namespace.
+// net.h and the bench's VlaConfig share one namespace.
 namespace pi05 = bench::pi05;
 
 
@@ -22,19 +22,32 @@ void usage(const char* argv0)
 {
     fprintf(stderr, "usage: %s [bundle-dir] [--showActions] [--atol N] [--rtol N]\n", argv0);
     fprintf(
-        stderr, "  bundle-dir     the bundle to read, instead of %s\n", pi05::vsMIGraphX.dataDir().string().c_str());
+        stderr,
+        "  bundle-dir     the bundle to read, instead of %s\n",
+        pi05::vlaConfigs::lerobotLibero.dataDir().string().c_str());
     fprintf(stderr, "  --showActions  print the first five actions after the table\n");
     fprintf(
         stderr,
         "  --atol/--rtol  tolerances against %s (default: 0.002 / 0.001)\n",
-        pi05::vsMIGraphX.referencePath().string().c_str());
+        pi05::vlaConfigs::lerobotLibero.referencePath().string().c_str());
+}
+
+
+bool checkHip(hipError_t result, const char* operation)
+{
+    if (result != hipSuccess)
+    {
+        fprintf(stderr, "error: %s: %s\n", operation, hipGetErrorString(result));
+        return false;
+    }
+    return true;
 }
 
 
 struct HipStream
 {
     hipStream_t handle{};
-    HipStream() { pi05::hipCheck(hipStreamCreateWithFlags(&handle, hipStreamNonBlocking), "hipStreamCreate"); }
+    HipStream() = default;
     ~HipStream()
     {
         if (handle)
@@ -49,10 +62,9 @@ struct HipStream
 
 
 int main(int argc, char** argv)
-try
 {
     // MIGraphX runs the ONNX export of the LeRobot LIBERO policy.
-    const pi05::Workload& workload = pi05::vsMIGraphX;
+    const pi05::VlaConfig& config = pi05::vlaConfigs::lerobotLibero;
     VLABenchOptions options;
     std::filesystem::path bundle;
 
@@ -71,136 +83,208 @@ try
         if (argv[i][0] != '-')
         {
             if (!bundle.empty())
-                throw std::runtime_error("only one bundle directory is allowed");
+            {
+                fprintf(stderr, "error: only one bundle directory is allowed\n");
+                usage(argv[0]);
+                return 1;
+            }
             bundle = argv[i];
             continue;
         }
-        const std::string key = argv[i];
-        if (++i == argc)
-            throw std::runtime_error(key + " needs a value");
-        const std::string value = argv[i];
-        if (key == "--atol" || key == "--rtol")
+        if (!strcmp(argv[i], "--atol") || !strcmp(argv[i], "--rtol"))
         {
-            double tolerance = 0.0;
-            if (!parseNumber(value.c_str(), tolerance) || tolerance < 0)
+            const char* key = argv[i];
+            if (++i == argc)
             {
+                fprintf(stderr, "error: %s needs a value\n", key);
                 usage(argv[0]);
-                throw std::runtime_error("invalid tolerance for " + key);
+                return 1;
             }
-            (key == "--atol" ? options.atol : options.rtol) = tolerance;
+            double tolerance = 0.0;
+            if (!parseNumber(argv[i], tolerance) || tolerance < 0)
+            {
+                fprintf(stderr, "error: invalid tolerance for %s\n", key);
+                usage(argv[0]);
+                return 1;
+            }
+            (!strcmp(key, "--atol") ? options.atol : options.rtol) = tolerance;
+            continue;
         }
-        else
-        {
-            usage(argv[0]);
-            throw std::runtime_error("unknown option: " + key);
-        }
+        fprintf(stderr, "error: unknown option: %s\n", argv[i]);
+        usage(argv[0]);
+        return 1;
     }
     if (bundle.empty())
-        bundle = workload.dataDir();
+        bundle = config.dataDir();
 
     int nDevices = 0;
-    pi05::hipCheck(hipGetDeviceCount(&nDevices), "hipGetDeviceCount");
+    if (!checkHip(hipGetDeviceCount(&nDevices), "hipGetDeviceCount"))
+        return 1;
+
     std::vector<std::string> gpuNames;
     for (int i = 0; i < nDevices; ++i)
     {
         hipDeviceProp_t props{};
-        pi05::hipCheck(hipGetDeviceProperties(&props, i), "hipGetDeviceProperties");
+        if (!checkHip(hipGetDeviceProperties(&props, i), "hipGetDeviceProperties"))
+            return 1;
         gpuNames.push_back(std::string(props.name) + " (" + props.gcnArchName + ")");
     }
+
     if (gpuNames.empty())
-        throw std::runtime_error("no HIP device found");
+    {
+        fprintf(stderr, "error: no HIP device found\n");
+        return 1;
+    }
+
     const int device = pickGpu(gpuNames);
-    pi05::hipCheck(hipSetDevice(device), "hipSetDevice");
+    if (!checkHip(hipSetDevice(device), "hipSetDevice"))
+        return 1;
     int hipVersion = 0;
-    pi05::hipCheck(hipRuntimeGetVersion(&hipVersion), "hipRuntimeGetVersion");
+    if (!checkHip(hipRuntimeGetVersion(&hipVersion), "hipRuntimeGetVersion"))
+        return 1;
     printf(
         "model: pi0.5 %s, MIGraphX %d.%d, HIP %d\n",
-        workload.dataset,
+        config.dataset,
         MIGRAPHX_VERSION_MAJOR,
         MIGRAPHX_VERSION_MINOR,
         hipVersion);
     printf("device: HIP %d, %s\n", device, gpuNames[device].c_str());
     printf("precision: FP16 graphs (weights, activations, K/V cache); FP32 images, timestep, x\n");
+
+    // The runtime reads these files while compiling; report a missing one before it does.
+    for (const char* file : { "config.txt", "prefill.fp16.onnx", "step.fp16.onnx" })
+    {
+        std::error_code status;
+        if (!std::filesystem::is_regular_file(bundle / file, status))
+        {
+            fprintf(
+                stderr,
+                "error: %s is missing; see benchmarks/SETUP.md, MIGraphX\n",
+                (bundle / file).string().c_str());
+            return 1;
+        }
+    }
+
     const bool folded = pi05::bundleConstantsFolded(bundle);
     printf("bundle: %s (constants %s)\n", bundle.string().c_str(), folded ? "folded" : "not folded");
     if (!folded)
         printf("note: MLIR runs a bundle without folded constants far slower; for the default GEMM path "
-               "re-export it with benchmarks/pi05/scripts/export-onnx.py\n");
+               "re-export it with benchmarks/pi05/migraphx/export-onnx.py\n");
     fflush(stdout);
 
     // Compile the bundle's prefill and step graphs (untimed).
     // Declared before the policy, so the policy drains it before it is destroyed.
     HipStream stream;
+    if (!checkHip(hipStreamCreateWithFlags(&stream.handle, hipStreamNonBlocking), "hipStreamCreateWithFlags"))
+        return 1;
     const double compileStart = nowSec();
     std::optional<pi05::Pi05Policy> policy;
     policy.emplace(bundle, stream.handle);
     printf("compile: %.1f s (gpu, offload_copy off)\n", nowSec() - compileStart);
     const char* noMlir = std::getenv("MIGRAPHX_DISABLE_MLIR");
     const char* gemmProvider = std::getenv("MIGRAPHX_SET_GEMM_PROVIDER");
+
     printf(
         "gemm: MIGRAPHX_DISABLE_MLIR=%s, MIGRAPHX_SET_GEMM_PROVIDER=%s\n",
         noMlir ? noMlir : "unset",
         gemmProvider ? gemmProvider : "unset");
+
     auto& runtime = policy->runtime();
     const auto& modelCfg = runtime.getConfig();
+
     printf(
         "graphs: prefill once + reusable Euler step x%u, %d layers, prefix length %d\n",
-        workload.denoiseSteps,
+        config.denoiseSteps,
         modelCfg.numLayers,
         modelCfg.prefixLength);
+
     // The bundle keeps the shapes it was exported with.
-    if (modelCfg.numDenoiseSteps != int32_t(workload.denoiseSteps) ||
-        modelCfg.actionHorizon != int32_t(workload.actionChunk) || modelCfg.actionDim != int32_t(workload.actionDim))
-        throw std::runtime_error("the bundle does not match the bench workload");
-    runtime.setNumDenoiseSteps(int32_t(workload.denoiseSteps));
+    if (modelCfg.numDenoiseSteps != int32_t(config.denoiseSteps) ||
+        modelCfg.actionHorizon != int32_t(config.actionChunk) ||
+        modelCfg.actionDim != int32_t(pi05::Pi05Model::actionDim) ||
+        modelCfg.numViews != int32_t(config.cameras))
+    {
+        fprintf(
+            stderr,
+            "error: the bundle (%d steps, chunk [%d, %d], %d views) does not match the bench configuration "
+            "(%u steps, chunk [%u, %u], %u views); re-export it with benchmarks/pi05/migraphx/export-onnx.py\n",
+            modelCfg.numDenoiseSteps,
+            modelCfg.actionHorizon,
+            modelCfg.actionDim,
+            modelCfg.numViews,
+            config.denoiseSteps,
+            config.actionChunk,
+            pi05::Pi05Model::actionDim,
+            config.cameras);
+        return 1;
+    }
+    runtime.setNumDenoiseSteps(int32_t(config.denoiseSteps));
 
-    const uint32_t B = workload.cameras;
-    const uint32_t C = workload.imageChannels;
-    const uint32_t S = workload.imageSize;
-    policy->validateViewCount(int32_t(B));
+    const uint32_t B = config.cameras;
+    const uint32_t C = pi05::Pi05Model::imageChannels;
+    const uint32_t S = pi05::Pi05Model::imageSize;
 
-    // The bundle keeps its export's shapes, so a prompt of another length stops in
-    // inferTensors and any other change to the observation fails the reference check.
-    const pi05::Inputs inputs = pi05::prepareInputs(workload, pi05::signedCHW);
+    // The bundle keeps its export's shapes, so the prompt must have the exported length;
+    // any other change to the observation fails the reference check.
+    const pi05::Inputs inputs = pi05::prepareInputs(config, pi05::signedCHW);
     const uint32_t nPrompt = (uint32_t)inputs.tokens.size();
+    if (nPrompt != uint32_t(modelCfg.numPromptTokens))
+    {
+        fprintf(
+            stderr,
+            "error: the prompt has %u tokens, the bundle was exported for %d\n",
+            nPrompt,
+            modelCfg.numPromptTokens);
+        return 1;
+    }
+    if (inputs.noise.size() != config.actionCount())
+    {
+        fprintf(stderr, "error: the initial noise must hold %zu values\n", config.actionCount());
+        return 1;
+    }
     runtime.setInitialNoise(inputs.noise);
     pi05::Tensor inImages({ B, C, S, S }, migraphx_shape_float_type);
     std::vector<float> nextAction;
 
     // Each prediction includes H2D pixels, inference and the host action chunk.
     // The runtime uploads host tokens and the configured initial noise internally.
-    auto predict = [&] {
-        pi05::hipCheck(
+    auto predict = [&]() -> bool
+    {
+        if (!checkHip(
             hipMemcpyAsync(
                 inImages.rawPointer(),
                 inputs.pixels.data(),
                 inputs.pixels.size() * sizeof(float),
                 hipMemcpyHostToDevice,
                 stream.handle),
-            "hipMemcpyAsync(pixels)");
+            "hipMemcpyAsync(pixels)"))
+            return false;
+
         auto chunk = policy->inferTensors(inImages, inputs.tokens, 1);
-        pi05::hipCheck(hipStreamSynchronize(stream.handle), "hipStreamSynchronize");
+        if (!checkHip(hipStreamSynchronize(stream.handle), "hipStreamSynchronize"))
+            return false;
+
         nextAction = std::move(chunk.normalizedActions);
-        if (nextAction.size() != workload.actionCount())
-            throw std::runtime_error("MIGraphX returned an unexpected action chunk size");
+        if (nextAction.size() != config.actionCount())
+        {
+            fprintf(stderr, "error: MIGraphX returned an unexpected action chunk size\n");
+            return false;
+        }
+        return true;
     };
 
-    pi05::printWorkload(workload, inputs);
-    options.referencePath = workload.referencePath().string();
-    options.denoiseSteps = workload.denoiseSteps;
+    pi05::printVlaConfig(config, inputs);
+    options.referencePath = config.referencePath().string();
+    options.denoiseSteps = config.denoiseSteps;
     auto actions = [&] { return (const float*)nextAction.data(); };
+
     return runVLABench(
         "MIGraphX",
-        int(workload.imageTokens()),
+        int(config.imageTokens()),
         int(nPrompt),
         options,
-        workload.actionChunk,
-        workload.actionDim,
+        config.actionChunk,
+        pi05::Pi05Model::actionDim,
         predict,
         actions);
-}
-catch (const std::exception& error)
-{
-    fprintf(stderr, "error: %s\n", error.what());
-    return 1;
 }

@@ -21,7 +21,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 BUILD_DIR="${BUILD_DIR:-$REPO_ROOT/build}"
 BENCHES=(
-    "bench-pi05-vai --workload migraphx"
+    "bench-pi05-vai --comparison migraphx"
     "bench-pi05-migraphx"
 )
 SAMPLE_PERIOD=0.2   # seconds between clock samples

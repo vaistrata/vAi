@@ -331,8 +331,7 @@ struct VLABenchOptions
 // One untimed prediction checked against options.referencePath. True when it matches or
 // when there is no reference to check.
 template<typename Predict, typename Actions>
-bool checkVLAReference(
-    const VLABenchOptions& options, unsigned horizon, unsigned dim, Predict&& predict, Actions&& actions)
+bool checkVLAReference(const VLABenchOptions& options, unsigned horizon, unsigned dim, Predict&& predict, Actions&& actions)
 {
     const std::vector<float> reference = readReference(options.referencePath, size_t(horizon) * dim);
     if (reference.empty())
@@ -341,17 +340,21 @@ bool checkVLAReference(
         fflush(stdout);
         return true;
     }
+
     printf("reference: %s\n", options.referencePath.c_str());
     if (options.checkedDims && options.checkedDims < dim)
         printf("compared: the first %u of %u action dims\n", options.checkedDims, dim);
+    
     std::vector<double> once;
     if (!measureLatency(0, 1, predict, once))
         return false;
+    
     if (!checkReference(actions(), reference, options.atol, options.rtol, dim, options.checkedDims))
     {
         fprintf(stderr, "error: reference mismatch; latency results suppressed\n");
         return false;
     }
+
     return true;
 }
 
@@ -378,17 +381,20 @@ bool runVLARow(
 // A bench of one prompt: the reference check, the table of one row and optionally the
 // actions. Returns the process exit code.
 template <typename Predict, typename Actions>
-int runVLABench(
-    const char* framework, int nImage, int nText, const VLABenchOptions& options, unsigned horizon, unsigned dim,
-    Predict&& predict, Actions&& actions)
+int runVLABench(const char* framework, int nImage, int nText, const VLABenchOptions& options,
+    unsigned horizon, unsigned dim, Predict&& predict, Actions&& actions)
 {
     if (!checkVLAReference(options, horizon, dim, predict, actions))
         return 1;
+
     printVLAHeader(options.nWarm, options.nReps, options.denoiseSteps, horizon);
+    
     if (!runVLARow(framework, nImage, nText, options, horizon, dim, predict, actions))
         return 1;
+    
     if (options.showActions)
         printActionChunk(actions(), horizon, dim);
+    
     return 0;
 }
 

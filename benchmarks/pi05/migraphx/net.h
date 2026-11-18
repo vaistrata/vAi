@@ -11,7 +11,7 @@
 //     policy.validateViewCount(2);
 //     auto chunk = policy.inferTensors(images, tokens, 1);   // chunk.normalizedActions
 //
-// The bundle is the v5 split export of scripts/export-onnx.py: prefill.fp16.onnx, run once
+// The bundle is the v5 split export of migraphx/export-onnx.py: prefill.fp16.onnx, run once
 // per prediction to fill the K/V cache, and step.fp16.onnx, one reusable Euler step. Both
 // are FP16 graphs (weights, activations, the K/V cache between them) with FP32 images,
 // timestep and x. Its config.txt names the camera views, steps and chunk it was exported with.
@@ -211,7 +211,7 @@ inline BundleConfig readBundleConfig(const std::filesystem::path& bundle)
         throw std::runtime_error(
             "v" + std::to_string(version) +
             " pi05 bundle (FP32 graph) is unsupported; re-export with python "
-            "benchmarks/pi05/scripts/export-onnx.py --output NEW_DIR, then pass NEW_DIR to this benchmark");
+            "benchmarks/pi05/migraphx/export-onnx.py --output NEW_DIR, then pass NEW_DIR to this benchmark");
     if (!(file >> config.views >> config.steps >> config.horizon >> config.actionDim >> config.layers >>
           config.prefixLength) ||
         version != 5 || config.views < 1 || config.views > 3 || config.steps < 1 || config.horizon < 1 ||
