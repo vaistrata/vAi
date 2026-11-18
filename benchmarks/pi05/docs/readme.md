@@ -245,7 +245,7 @@ configure 로그에서 다음 줄이 보여야 MIGraphX 벤치가 빌드됩니�
 
 ```bash
 ./benchmarks/pi05/scripts/run-amd.sh
-./benchmarks/pi05/scripts/run-amd.sh -- --atol 0.002 --rtol 0.001   # -- 뒤의 인자는 두 벤치에 모두 전달
+./benchmarks/pi05/scripts/run-amd.sh -- --atol 0.2 --rtol 0.1   # -- 뒤의 인자는 두 벤치에 모두 전달 (MIGraphX는 기본 허용 오차를 넘음, §9.6)
 BUILD_DIR=build-other AMD_CARD=/sys/class/drm/card1 ./benchmarks/pi05/scripts/run-amd.sh
 ```
 
@@ -291,7 +291,7 @@ echo auto | sudo tee /sys/class/drm/card<N>/device/power_dpm_force_performance_l
 
 ## 9. 정밀도
 
-기준은 **vAi의 정밀도가 MIGraphX보다 높아야 한다**는 것입니다 (§10: max abs error vAi 0.000981, MIGraphX 0.00221–0.00225). 아래 내용은 2026-11-18, 커밋 `e979c71` 기준입니다.
+기준은 **vAi의 정밀도가 MIGraphX보다 높아야 한다**는 것입니다 (§10: max abs error vAi 0.00116, MIGraphX 0.00221). 아래 내용은 2026-11-18 기준이고, vAi는 커밋 `8552ebe`의 타워별 정밀도(`TowerPrecision`)를 따릅니다.
 
 - **vAi:** 코드와 셰이더를 직접 읽어 확인했습니다. 장치 조건(device ID 0x1586, CU 40개, subgroup 64, `VK_KHR_cooperative_matrix`, `shaderFloat16`)은 `vulkaninfo`와 `rocminfo`로 확인했습니다.
 - **MIGraphX:** export한 ONNX 그래프를 shape inference로 집계했습니다. 컴파일 결과는 `migraphx-driver compile --gpu`, `MIGRAPHX_TRACE_COMPILE=1`(pass별 IR), `MIGRAPHX_MLIR_DUMP`(MLIR 모듈)로 확인했습니다.
@@ -301,12 +301,14 @@ echo auto | sudo tee /sys/class/drm/card<N>/device/power_dpm_force_performance_l
 | | reference.py | vAi | MIGraphX |
 |---|---|---|---|
 | 가중치 저장 | FP32 | FP16 (norm 계수, condition table, RoPE 주파수는 FP32) | FP16 (RMSNorm 계수 `1+w`만 FP32 상수) |
-| 연산 사이 활성값 (residual 포함) | FP32 | **FP32** (`oDefaultDtype`) | **FP16** |
-| GEMM, attention의 행렬곱 입력 | FP32 | FP16 (커널 안에서 FP32 → FP16 반올림) | FP16 |
+| 블록 branch 활성값 (norm, Q/K/V, RoPE, attention, FFN hidden) | FP32 | **FP16** (`branchFp16`, 세 타워 모두) | FP16 |
+| residual stream | FP32 | vision, language **FP32**, action expert FP16 (`residualFp16`) | FP16 |
+| 그 밖의 활성값 (블록 밖 norm, projector, velocity) | FP32 | FP32 (`oDefaultDtype`) | FP16 |
+| GEMM, attention의 행렬곱 입력 | FP32 | FP16 (FP32 입력은 커널 안에서 FP16으로 반올림) | FP16 |
 | GEMM 누산 | FP32 | FP32 (coopmat accumulator) | 확인 불가 (rocMLIR 내부) |
-| GEMM 후처리 (bias, residual, GELU) | FP32 | FP32 | FP16 |
+| GEMM 후처리 (bias, residual, GELU) | FP32 | FP32로 계산한 뒤 출력 dtype으로 저장 | FP16 |
 | softmax | FP32 | FP32, P는 FP16 | FP32 (MIGraphX가 변환), P는 FP16 |
-| norm (LayerNorm, RMSNorm) | FP32 | 통계, 출력 모두 FP32 | 통계는 FP32, 출력은 FP16 |
+| norm (LayerNorm, RMSNorm) | FP32 | 통계 FP32, 블록 안 norm 출력 FP16 | 통계는 FP32, 출력은 FP16 |
 | K/V cache | FP32 | FP16 | FP16 |
 | timestep, condition | FP32 | 호스트에서 double/FP32로 미리 계산 | timestep을 FP16으로 반올림한 뒤 GPU에서 계산 |
 | velocity, Euler update | FP32 | FP32 | velocity는 FP16, update는 FP32 |
@@ -316,13 +318,23 @@ echo auto | sudo tee /sys/class/drm/card<N>/device/power_dpm_force_performance_l
 
 ### 9.2 vAi 상세
 
-설정은 [`vai/bench.cpp`](../vai/bench.cpp)의 `wDefaultDtype = Fp16`, `oDefaultDtype = Fp32`와 `RuntimeConfig::kvCacheDtype = Fp16`(기본값, [`production/pi05/net.h:75`](../../../models/production/pi05/net.h#L75))입니다.
+설정은 [`vai/bench.cpp`](../vai/bench.cpp)의 `wDefaultDtype = Fp16`, `oDefaultDtype = Fp32`, `RuntimeConfig::kvCacheDtype = Fp16`(기본값, [`production/pi05/net.h:75`](../../../models/production/pi05/net.h#L75)), 그리고 [`experimental/pi05/net.h`](../../../models/experimental/pi05/net.h)의 타워별 `TowerPrecision`입니다.
+
+| 타워 | `branchFp16` | `residualFp16` | `accF32` |
+|---|---|---|---|
+| vision (SigLIP) | on | off | on (AMD에서는 효과 없음) |
+| language (Gemma prefill) | on | off | off |
+| action expert | on | **on** | off |
+
+- `branchFp16`: 블록 안에서 residual stream에서 갈라져 나가는 branch(norm 2개, Q/K/V, RoPE, attention, FFN hidden과 게이팅)의 출력이 FP16입니다.
+- `residualFp16`: residual stream(residual을 더하는 출력 projection, action expert의 gated residual)과 타워 입력(`actionProj`)도 FP16입니다.
+- `accF32`: Linear 누산을 FP32로 바꿉니다. AMD는 원래 FP32로 누산하므로 이 벤치에서는 바뀌는 것이 없습니다.
 
 **공통 규칙**
 
-- **노드 출력:** 모든 노드가 `oDtype_`가 없으면 `oDefaultDtype`을 씁니다 (예: [`linear.h:2293`](../../../vai/nodes/linear.h#L2293)). 그래서 GPU 메모리에 쓰이는 활성값, Linear split-K partial, attention partial이 전부 FP32입니다. FP16 활성값 버퍼는 없습니다.
+- **노드 출력:** 위 스위치가 FP16으로 정한 노드 외에는 모두 `oDefaultDtype`(FP32)을 씁니다 (예: [`linear.h:2293`](../../../vai/nodes/linear.h#L2293)). 블록 밖의 노드(patch embedding, post_layernorm, projector, token embedding, 최종 norm, velocityHead)는 FP32입니다. Linear split-K partial은 출력 dtype으로 저장되고, attention split-K partial은 FP32입니다.
 - **가중치 변환:** 로드할 때 호스트에서 FP32 → FP16으로 바꿉니다 ([`tensor.cpp:46-69`](../../../vai/engine/tensor.cpp#L46-L69)). round-to-nearest-even이고, **FP16 subnormal(|w| < 2⁻¹⁴ ≈ 6.1e-5)은 0으로 flush**됩니다 (`tensor.cpp:66`). torch의 `.to(float16)`는 subnormal을 남기므로 MIGraphX 번들과 이 부분이 다릅니다. GPU 업로드는 변환 없는 memcpy입니다.
-- **GEMM과 attention 입력:** FP32 활성값을 커널 안에서 읽을 때 FP16으로 반올림해서 cooperative matrix(f16×f16)에 넣습니다. 누산은 FP32입니다. 그 외 연산(norm, RoPE, GELU, gating, embedding scale, bias, residual, Euler)은 FP32로 계산합니다.
+- **GEMM과 attention 입력:** FP16 활성값은 그대로, FP32 활성값은 커널 안에서 읽을 때 FP16으로 반올림해서 cooperative matrix(f16×f16)에 넣습니다. 누산은 FP32입니다. 그 외 연산(norm, RoPE, GELU, gating, embedding scale, bias, residual, Euler)은 FP32로 계산한 뒤 출력 dtype으로 저장합니다.
 
 **가중치 저장 dtype** ([`experimental/pi05/lerobot-weights.h`](../../../models/experimental/pi05/lerobot-weights.h))
 
@@ -338,45 +350,48 @@ echo auto | sudo tee /sys/class/drm/card<N>/device/power_dpm_force_performance_l
 | condition table [10 step, 110 행, 1024] | **FP32** | 아래 action decoder 참고 |
 | RoPE 주파수 | **FP32** | 노드가 호스트에서 생성 ([`rope.h`](../../../vai/nodes/rope.h)) |
 
-**단계별** (activation은 모두 GPU 메모리에 FP32로 저장, "→FP16"은 커널이 읽을 때 반올림한다는 뜻)
+**단계별** (출력 열이 GPU 메모리에 저장되는 dtype, "→FP16"은 FP32 입력을 커널이 읽을 때 반올림한다는 뜻)
 
 | 단계 | 연산 | 입력 | 계산 / 누산 | 출력 |
 |---|---|---|---|---|
 | Vision (SigLIP 27 block, 2 카메라 × 256 patch) | patchify | FP32 이미지 | 복사 | FP32 |
 | | patch Linear + bias(position 포함) | FP32 →FP16 | f16 coopmat, FP32 누산, bias FP32 | FP32 |
-| | LayerNorm (block마다 2개, post_layernorm) | FP32 | 평균/분산 FP32 | FP32 |
-| | q/k/v Linear | FP32 →FP16 | FP32 누산, bias FP32 | FP32 |
-| | attention (head dim 72) | Q/K/V FP32 →FP16 | 아래 attention 참고 | FP32 |
-| | o Linear + residual | FP32 →FP16, residual FP32 | FP32 누산, residual FP32 | FP32 |
-| | fc1 + GELU(tanh) | FP32 →FP16 | FP32 누산, GELU FP32 | FP32 |
-| | fc2 + residual | FP32 →FP16 | FP32 누산 (split-K partial FP32, reduce FP32) | FP32 |
+| | LayerNorm (block마다 2개) | FP32 | 평균/분산 FP32 | **FP16** |
+| | q/k/v Linear | FP16 | FP32 누산, bias FP32 | **FP16** |
+| | attention (head dim 72) | Q/K/V FP16 | 아래 attention 참고 | **FP16** |
+| | o Linear + residual | FP16, residual FP32 | FP32 누산, residual FP32 | FP32 |
+| | fc1 + GELU(tanh) | FP16 | FP32 누산, GELU FP32 | **FP16** |
+| | fc2 + residual | FP16, residual FP32 | FP32 누산 (split-K partial FP32, reduce FP32) | FP32 |
+| | post_layernorm | FP32 | 평균/분산 FP32 | FP32 |
 | Projector, prompt | projector Linear | FP32 →FP16 | FP32 누산, bias FP32 | FP32 |
 | | token embedding | 정수 id | FP16 표를 FP32로 읽고 `×√2048` (FP32) | FP32 |
 | | 카메라 + prompt concat | FP32 | 복사 | FP32 |
-| Prefill (Gemma 2B 18 block, 666 토큰) | RMSNorm | FP32 | 제곱합, `inversesqrt` FP32 | FP32 |
-| | q/k/v/o Linear | FP32 →FP16 | FP32 누산 | FP32 |
-| | RoPE (Q, K) | FP32 | 각도와 sin/cos FP32 | FP32 |
-| | attention + KV cache 쓰기 | Q/K/V FP32 →FP16 | K/V를 FP16으로 cache에 append | FP32 |
-| | gate+up Linear, GELU 게이팅 | FP32 →FP16 | FP32 누산, 게이팅 FP32 | FP32 |
-| | down Linear + residual | FP32 →FP16 | FP32 누산, residual FP32 | FP32 |
-| Denoise step (action expert 18 block, 50 행, 10회) | actionProj Linear | `x_t` FP32 →FP16 | FP32 누산, bias FP32 | FP32 |
+| Prefill (Gemma 2B 18 block, 666 토큰) | RMSNorm | FP32 | 제곱합, `inversesqrt` FP32 | **FP16** |
+| | q/k/v Linear | FP16 | FP32 누산 | **FP16** |
+| | RoPE (Q, K) | FP16 | 각도와 sin/cos, 회전 FP32 | **FP16** |
+| | attention + KV cache 쓰기 | Q/K/V FP16 | K/V를 FP16 그대로 cache에 append | **FP16** |
+| | o Linear + residual | FP16, residual FP32 | FP32 누산, residual FP32 | FP32 |
+| | gate+up Linear, GELU 게이팅 | FP16 | FP32 누산, 게이팅 FP32 | **FP16** |
+| | down Linear + residual | FP16, residual FP32 | FP32 누산, residual FP32 | FP32 |
+| Denoise step (action expert 18 block, 50 행, 10회) | actionProj Linear | `x_t` FP32 →FP16 | FP32 누산, bias FP32 | **FP16** |
 | | condition (adaRMS scale/shift/gate) | — | step별 FP32 행을 table에서 복사 | FP32 |
-| | adaRMS norm | FP32 | FP32 | FP32 |
-| | q/k/v/o, gate+up, down Linear | FP32 →FP16 | FP32 누산 | FP32 |
-| | attention (prefix cache + 자기 50행) | Q →FP16, prefix K/V는 FP16 cache 그대로, 자기 K/V FP32 →FP16 | 아래 attention 참고 | FP32 |
-| | gated residual (`g·branch + x`) | FP32 | FP32 `fma` | FP32 |
+| | adaRMS norm | FP16 | FP32 | **FP16** |
+| | q/k/v/o, gate+up, down Linear | FP16 | FP32 누산, 게이팅 FP32 | **FP16** |
+| | attention (prefix cache + 자기 50행) | Q FP16, prefix K/V는 FP16 cache, 자기 K/V FP16 | 아래 attention 참고 | **FP16** |
+| | gated residual (`g·branch + x`) | g FP32, branch, x FP16 | FP32 `fma` | **FP16** |
+| | 최종 adaRMS norm | FP16 | FP32 | FP32 |
 | Velocity, Euler | velocityHead Linear (residual = `x_t`, scale = −1/10) | FP32 →FP16 | FP32 누산, split-K reduce에서 `−0.1·(Σ + bias) + x_t`를 FP32로 | FP32 (같은 텐서에 덮어씀) |
 
 **condition table.** condition은 step에만 의존하므로 로드할 때 호스트에서 10 step 전부 미리 계산합니다 ([`lerobot-weights.h:49-127`](../../../models/experimental/pi05/lerobot-weights.h#L49-L127)). t = 1 − k/10과 sinusoid는 double로 계산한 뒤 FP32로 저장하고, time MLP와 adaRMS dense 37개는 FP32(누산 FP32)로 계산합니다. GPU는 step마다 FP32 행을 복사만 합니다.
 
-**KV cache.** 레이어마다 `K_cache`, `V_cache`가 [1, 1018, 256] FP16입니다 ([`attention.h:974-975`](../../../vai/nodes/attention.h#L974-L975)). 1018은 카메라 3 × 256 + prompt 200 + chunk 50입니다. attention 커널이 FP32 K/V를 `f16vec4(v)`로 반올림해 append합니다 ([`attention-fa-cm.comp:183-184`](../../../vai/shaders/attention-fa-cm.comp#L183-L184)). prefill에서 prefix는 자기 K/V의 FP16 사본을 보고, denoise step은 prefix를 FP16 cache에서 직접 읽습니다. 행렬곱에 들어가는 K/V는 모두 FP16입니다.
+**KV cache.** 레이어마다 `K_cache`, `V_cache`가 [1, 1018, 256] FP16입니다 ([`attention.h:974-975`](../../../vai/nodes/attention.h#L974-L975)). 1018은 카메라 3 × 256 + prompt 200 + chunk 50입니다. attention 커널이 K/V를 `f16vec4(v)`로 써서 append합니다 ([`attention-fa-cm.comp:183-184`](../../../vai/shaders/attention-fa-cm.comp#L183-L184)). `branchFp16`로 K/V가 이미 FP16이라 이때 새로 반올림되는 값은 없습니다. prefill에서 prefix는 자기 K/V의 FP16 사본을 보고, denoise step은 prefix를 FP16 cache에서 직접 읽습니다. 행렬곱에 들어가는 K/V는 모두 FP16입니다.
 
-**Linear 커널.** Strix Halo(0x1586)에서는 `linear-cm-amd` 셰이더가 선택됩니다. 입력이 FP32라서 FP16 I/O 전용 경로(`fp16Io`, [`linear.h:2454`](../../../vai/nodes/linear.h#L2454))는 쓰지 않습니다.
+**Linear 커널.** Strix Halo(0x1586)에서는 `linear-cm-amd` 셰이더가 선택됩니다. 입력, 가중치, 출력이 모두 FP16인 Linear(세 타워의 q/k/v, vision fc1, Gemma와 action expert의 gate+up, action expert의 o/down)는 FP16 I/O용 타일(`fp16Io`, [`linear.h:2454`](../../../vai/nodes/linear.h#L2454))을 고를 수 있습니다. residual을 FP32로 더하는 vision, language의 o/fc2/down과 블록 밖 Linear는 FP32 입력이나 출력이 있어 이 경로를 쓰지 않습니다.
 
-- AMD에서는 누산 dtype이 FP32로 고정됩니다: `accDtype = ... (amd ? Dtype::Fp32 : wDtype)` ([`linear.h:2320`](../../../vai/nodes/linear.h#L2320)).
-- 입력 반올림: `readI8`, `readI`가 FP32 입력을 `f16mat2x4` / `float16_t`로 바꿉니다 ([`linear-cm-amd.comp:167-169`](../../../vai/shaders/linear-cm-amd.comp#L167-L169)).
+- AMD에서는 `setAccDtype`으로 따로 정하지 않으면 누산 dtype이 FP32입니다: `accDtype = ... (amd ? Dtype::Fp32 : wDtype)` ([`linear.h:2320`](../../../vai/nodes/linear.h#L2320)). 이 벤치는 FP16 누산을 쓰지 않습니다.
+- 입력 반올림: FP32 입력이면 `readI8`, `readI`가 `f16mat2x4` / `float16_t`로 바꿉니다 ([`linear-cm-amd.comp:167-169`](../../../vai/shaders/linear-cm-amd.comp#L167-L169)).
 - 행렬 타입: A, B는 `coopmat<float16_t>`, accumulator는 `coopmat<float>`입니다 ([`linear-cm-amd.comp:126-128`](../../../vai/shaders/linear-cm-amd.comp#L126-L128)).
-- 출력: FP32 accumulator에서 바로 FP32로 저장하고, bias, residual, GELU, scale도 FP32로 적용합니다. split-K partial도 FP32이고, `linear-reduce`가 FP32로 합칩니다.
+- 출력: FP32 accumulator에 bias, residual, GELU, scale을 FP32로 적용한 뒤 출력 dtype으로 저장합니다. split-K partial은 출력 dtype으로 저장되고 ([`linear.h:2698`](../../../vai/nodes/linear.h#L2698)), `linear-reduce`가 FP32로 읽어 합칩니다.
 - coopmat이 없는 장치의 fallback(`linear-cm`, `linear-tile`)도 FP16 입력에 FP32 누산이라 정밀도 등급은 같습니다.
 
 **Attention 커널** (`attention-fa-cm`, vision·prefix·action 공통)
@@ -443,16 +458,16 @@ MIGraphX에서는 이렇게 처리됩니다.
 
 | 지점 | vAi | MIGraphX |
 |---|---|---|
-| 연산 사이 활성값, residual stream | FP32 | FP16. 블록마다 residual add와 GEMM 출력이 FP16으로 반올림됨 |
-| GEMM 출력과 후처리 | FP32 accumulator → FP32 (bias, residual, GELU 포함) | FP16 출력, FP16 후처리 |
-| norm 출력 | FP32 | FP16 |
-| RoPE 적용 | sin/cos, 곱셈 모두 FP32 (그 뒤 attention에서 FP16) | sin/cos를 FP16으로 반올림한 뒤 FP16으로 곱함 |
+| residual stream | vision, language FP32, action expert FP16 | FP16. 블록마다 residual add가 FP16으로 반올림됨 |
+| 블록 밖 활성값 (patch embedding, post_layernorm, projector, prompt embedding, 최종 norm) | FP32 | FP16 |
+| GEMM 후처리 (bias, residual, GELU) | FP32 accumulator에 FP32로 적용한 뒤 출력 dtype으로 한 번 반올림 | FP16 출력, FP16 후처리 |
+| RoPE 적용 | sin/cos, 곱셈 모두 FP32, 결과만 FP16으로 저장 | sin/cos를 FP16으로 반올림한 뒤 FP16으로 곱함 |
 | timestep | double로 계산 (t = 1, 0.9, …, 0.1 그대로) | FP16으로 반올림 (예: 0.9 → 0.89990, 0.1 → 0.09998) |
 | condition (time MLP, adaRMS dense) | 호스트 FP32 | GPU FP16 GEMM |
 | velocity | FP32 accumulator에서 FP32로 Euler까지 | FP16으로 반올림한 뒤 FP32 Euler |
 | 가중치 FP16 subnormal | 0으로 flush | 유지 |
 
-두 엔진이 같은 부분도 있습니다. GEMM 입력과 attention의 Q, K, V, P는 둘 다 FP16이고, K/V cache도 둘 다 FP16입니다. softmax와 norm 통계는 둘 다 FP32로 계산합니다.
+두 엔진이 같은 부분도 있습니다. GEMM 입력과 attention의 Q, K, V, P는 둘 다 FP16이고, K/V cache도 둘 다 FP16입니다. 블록 안 branch(norm 출력, Q/K/V, attention 출력, FFN hidden)도 둘 다 FP16으로 저장합니다. softmax와 norm 통계는 둘 다 FP32로 계산합니다.
 
 **확인하지 못한 것**
 - MIGraphX MLIR / hipBLASLt GEMM의 내부 누산 dtype
@@ -482,20 +497,22 @@ GEMM 백엔드는 configure할 때 `-DMIGRAPHX_GEMM_PROVIDER`로 정합니다 ([
 |out - ref| <= atol + rtol * |ref|     (모든 값, NaN은 실패)
 ```
 
-> [!WARNING]
-> **현재 코드의 기본값은 `atol 0.2`, `rtol 0.1`** 입니다 ([`bench-utils.h`](../../common/bench-utils.h)의 `VLABenchOptions`. 원래 값 `2e-3 / 1e-3`은 주석 처리됨). 그런데 두 벤치의 `--help`와 [../README.md](../README.md)에는 아직 `0.002 / 0.001`로 적혀 있습니다. 엄격한 기준으로 검사하려면 `--atol 0.002 --rtol 0.001`을 직접 주고, 결과를 기록할 때는 사용한 허용 오차를 함께 적으세요. `max abs error`는 허용 오차와 관계없이 항상 출력되므로 프레임워크 간 정확도 비교에 쓸 수 있습니다.
+기본값은 `atol 0.002`, `rtol 0.001`입니다 ([`bench-utils.h`](../../common/bench-utils.h)의 `VLABenchOptions`). MIGraphX는 이 기준을 넘는 값이 있어(§10) 지연 시간을 출력하지 않으므로, 결과표의 두 벤치는 `run-amd.sh -- --atol 0.2 --rtol 0.1`로 잽니다. 결과를 기록할 때는 사용한 허용 오차를 함께 적으세요. `max abs error`는 허용 오차와 관계없이 항상 출력되므로 프레임워크 간 정확도 비교에 쓸 수 있습니다.
 
 ## 10. 참고 측정값 (2026-11-18)
 
 공식 결과표는 [../README.md#results](../README.md#results)에 있습니다. 아래는 같은 날 측정한 값입니다.
 
-Radeon 8060S (gfx1151), `run-amd.sh`, 클럭 `high`, 단위 ms. vAi 정밀도별 비교 (활성값 FP32는 커밋 `e979c71`, 활성값 FP16은 그 부모 `7438add`):
+Radeon 8060S (gfx1151), 클럭 `high`, 단위 ms. vAi 정밀도별 비교 (`TowerPrecision`은 커밋 `8552ebe`, 활성값 FP32는 `e979c71`, 활성값 FP16은 그 부모 `7438add`):
 
 | vAi 설정 | latency (ms) | max abs error | strict (`--atol 0.002 --rtol 0.001`) |
 |---|---:|---:|---|
-| 가중치 FP16, 활성값 **FP32** (현재) | 182.45 ± 4.95 (3회 중앙값, 범위 179.0 – 183.3) | **0.000981** | pass (0 / 1600) |
-| 가중치 FP16, 활성값 FP16 | 149.08 ± 0.50 (3회 중앙값, 범위 148.5 – 150.5) | 0.00239 | 측정 안 함 |
-| MIGraphX (FP16 번들, MLIR, 폴딩) | 195.01 ± 4.39 (3회 중앙값, 범위 193.8 – 196.5) | 0.00221 – 0.00225 | **FAIL** (2 / 1600) |
+| 가중치 FP16, **`TowerPrecision`** (현재) | 151.73 ± 3.98 (`run-amd.sh` 3회 중앙값, 범위 149.3 – 151.8) | **0.00116** | pass (0 / 1600) |
+| 가중치 FP16, 활성값 FP32 | 182.45 ± 4.95 (`run-amd.sh` 3회 중앙값, 범위 179.0 – 183.3) | 0.000981 | pass (0 / 1600) |
+| 가중치 FP16, 활성값 FP16 | 149.08 ± 0.50 (`run-amd.sh` 3회 중앙값, 범위 148.5 – 150.5) | 0.00239 | 측정 안 함 |
+| MIGraphX (FP16 번들, MLIR, 폴딩) | 195.33 ± 4.17 (`run-amd.sh` 3회 중앙값, 범위 194.5 – 196.3) | 0.00221 (이전 측정 0.00221 – 0.00225) | **FAIL** (1 / 1600, 이전 측정 2 / 1600) |
+
+`TowerPrecision`과 활성값 FP32를 같은 세션에서 vAi 벤치만 3회씩 돌려 비교하면 149.05 – 150.35 ms(0.00116)와 178.24 – 182.41 ms(0.000981)입니다. 정밀도 변경으로 32 ms가 줄고 오차는 18% 늘었지만, 여전히 MIGraphX의 절반 정도입니다.
 
 MIGraphX 런타임, 번들, GEMM 경로별 비교 (LIBERO, 카메라 2, 154 토큰, chunk 50, 10 step, FP16 번들 v5, 단위 ms, mean):
 

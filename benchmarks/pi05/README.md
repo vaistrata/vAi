@@ -144,20 +144,22 @@ Second pass, on both workloads, with `branchFp16` on in all three towers, one ru
 - An FP16 residual in the action expert leaves the latency unchanged and lowers the error on both workloads (`trt` by a third). That it lowers the error at all is more likely its rounding falling closer to the reference's on this observation than a gain in precision, so the setting is kept for costing nothing, not for that.
 - An FP16 residual in the language tower nearly doubles the error for at most 0.2 ms.
 - Precision buys little speed: the fastest setting, 33.02 ms on `trt`, brings vAi's error up to TensorRT Edge-LLM's and is still 11.9 ms slower than it. The gap is in the kernels, not the dtypes.
-- These dtypes apply on every vendor. AMD already accumulates in FP32; `branchFp16` and `residualFp16` there are not yet measured, and the AMD row below predates them.
+- These dtypes apply on every vendor. On AMD, which accumulates in FP32 already, the chosen setting takes 32 ms off vAi and raises its error by 18%, to about half of MIGraphX's ([below](#amd-radeon-8060s-gfx1151)).
 
 #### AMD Radeon 8060S (gfx1151)
 
 | OS | Vulkan driver | Compute stack | GPU clock (core / memory) | vAi |
 |---|---|---|---|---|
-| Ubuntu 24.04.4 LTS | RADV, Mesa 25.2.8 | MIGraphX 2.18.0, ROCm 10.1.0 | 2900 / 1000 MHz (`high`) | e979c71 |
+| Ubuntu 24.04.4 LTS | RADV, Mesa 25.2.8 | MIGraphX 2.18.0, ROCm 10.1.0 | 2900 / 1000 MHz (`high`) | 8552ebe |
 
 | workload | image + text | framework | latency (ms) | min (ms) | max abs error |
 |---|---:|---|---:|---:|---:|
-| `migraphx` | 512 + 154 | vAi | 182.45 ± 4.95 | 178.01 | 0.000981 |
-|  |  | MIGraphX | 195.01 ± 4.39 | 189.54 | 0.00225 |
+| `migraphx` | 512 + 154 | vAi | 151.73 ± 3.98 | 148.82 | 0.00116 |
+|  |  | MIGraphX | 195.33 ± 4.17 | 190.27 | 0.00221 |
 
-- Precision: both store FP16 weights and an FP16 K/V cache, and both feed FP16 operands to their matrix multiplies (attention's P included). vAi keeps every activation FP32 between ops (`oDefaultDtype`) and accumulates its GEMMs in FP32, with norms, softmax, epilogues, RoPE, the condition table and the Euler update in FP32. MIGraphX runs its FP16 bundle, constants folded, through MLIR: activations stay FP16 between ops, and only softmax, norm statistics, RoPE's sin/cos and the Euler update run in FP32. Op by op, for both: [docs/readme.md §9](docs/readme.md#9-정밀도).
-- Accuracy: both passed at the tolerances the benches ran with, `atol 0.2`, `rtol 0.1`. At `--atol 0.002 --rtol 0.001`, vAi passes (0 of 1600 values outside) and MIGraphX does not (2 of 1600), so its latency is printed only at the looser tolerances.
-- Each row is the median, by mean, of three `scripts/run-amd.sh` runs: vAi 179.03 – 183.27 ms, MIGraphX 193.81 – 196.53 ms.
-- The APU shares its power with the CPU, so the clock under load stays below the lock: sclk 2457 – 2790 MHz while vAi ran, 2436 – 2898 MHz while MIGraphX did (its samples include its 84 s graph compile).
+- Result: vAi is 43.6 ms faster than MIGraphX (MIGraphX takes 29% longer), and MIGraphX's max abs error is 1.9 times vAi's.
+- Precision: both store FP16 weights and an FP16 K/V cache, both feed FP16 operands to their matrix multiplies (attention's P included), and both store each block's branch (norms, Q/K/V, attention, the FFN hidden) FP16. vAi runs the `TowerPrecision` [above](#vai-precision-tuning-nvidia): its residual stream stays FP32 in the vision and language towers and goes FP16 in the action expert, and everything outside the blocks (patch embedding, projector, prompt embedding, final norms, velocity head) stays FP32. It accumulates its GEMMs in FP32, AMD's default, so `accF32` changes nothing here, and computes norms, softmax, epilogues, RoPE, the condition table and the Euler update in FP32, rounding only what it stores. MIGraphX runs its FP16 bundle, constants folded, through MLIR: every activation stays FP16 between ops, the residual stream included, and only softmax, norm statistics, RoPE's sin/cos and the Euler update run in FP32. Op by op, for both: [docs/readme.md §9](docs/readme.md#9-정밀도).
+- Accuracy: against `reference.py --cameras 2 --chunk 50 --steps 10`, over 1600 values. vAi passes at the default `atol 0.002`, `rtol 0.001` (0 of 1600 values outside). MIGraphX does not (1 of 1600), so its latency is printed only at `--atol 0.2 --rtol 0.1`, the tolerances both rows ran with, at which both pass.
+- Each row is the median, by mean, of three `scripts/run-amd.sh -- --atol 0.2 --rtol 0.1` runs: vAi 149.33 – 151.83 ms, MIGraphX 194.54 – 196.26 ms. Each one's max abs error is the same in its three runs.
+- `TowerPrecision` on AMD, in the same session, the vAi bench alone at its default tolerances, three runs each: before it, with every activation FP32 as in e979c71, 178.24 – 182.41 ms, error 0.000981; with it, 149.05 – 150.35 ms, error 0.00116.
+- The APU shares its power with the CPU, so the clock under load stays below the lock: sclk 2504 – 2760 MHz while vAi ran, 2449 – 2898 MHz while MIGraphX did (its samples include its graph compile).
