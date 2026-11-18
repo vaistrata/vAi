@@ -310,6 +310,13 @@ elseif(_edgellmVersion)
         ${CMAKE_DL_LIBS}
         Threads::Threads
     )
+    # An Edge-LLM built with its CuTe DSL kernels (ENABLE_CUTE_DSL, the default) leaves
+    # them in their own archive, which loads its modules through the driver API.
+    file(GLOB _edgellmCuteDsl "${TensorRTEdgeLLM_ROOT}/lib/libcutedsl_*.a")
+    if(_edgellmCuteDsl)
+        target_link_libraries(bench-pi05-trt PRIVATE ${_edgellmCuteDsl} CUDA::cuda_driver)
+    endif()
+    unset(_edgellmCuteDsl)
     unset(_edgellmArch)
 else()
     message(STATUS "[vAi-bench] TensorRT Edge-LLM not found, skipping bench-pi05-trt. "

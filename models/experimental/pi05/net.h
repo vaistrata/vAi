@@ -28,11 +28,13 @@ namespace group = production::pi05::group;
 //   branchFp16   the branch between the residual stream and its projections back
 //                (norms, Q/K/V, attention, FFN hidden) writes FP16; the residual stream
 //                itself (the output projections, the gated residuals) stays FP32
+//   residualFp16 the residual stream writes FP16 too (the tower's input included)
 /////////////////////////////////////////////////////////////////////////////////////////
 struct TowerPrecision
 {
     bool accF32 = false;
     bool branchFp16 = false;
+    bool residualFp16 = false;
 };
 
 template <typename Block>
@@ -76,11 +78,25 @@ void setBlockPrecision(Block& b, TowerPrecision p, vai::DtypeKey key)
             b.ffn.gatedMul.setODtype(f16, key);
         }
     }
+    if (p.residualFp16)
+    {
+        const auto f16 = vai::Dtype::Fp16;
+        a.projOut.setODtype(f16, key);
+        if constexpr (classic)
+            b.ffn.fc2.setODtype(f16, key);
+        else
+            b.ffn.out.setODtype(f16, key);
+        if constexpr (requires { b.fma1; })   // the action expert's gated residuals
+        {
+            b.fma1.setODtype(f16, key);
+            b.fma2.setODtype(f16, key);
+        }
+    }
 }
 
-inline constexpr TowerPrecision visionPrecision = { .accF32 = true, .branchFp16 = true };
-inline constexpr TowerPrecision languagePrecision = { .accF32 = false, .branchFp16 = true };
-inline constexpr TowerPrecision actionPrecision = { .accF32 = false, .branchFp16 = true };
+inline constexpr TowerPrecision visionPrecision = { .accF32 = true, .branchFp16 = true, .residualFp16 = false };
+inline constexpr TowerPrecision languagePrecision = { .accF32 = false, .branchFp16 = true, .residualFp16 = false };
+inline constexpr TowerPrecision actionPrecision = { .accF32 = false, .branchFp16 = true, .residualFp16 = true };
 
 
 /////////////////////////////////////////////////////////////////////////////////////////
@@ -140,6 +156,12 @@ struct PrefillNet : public vai::NeuralNet
             setBlockPrecision(b, visionPrecision, dtypeKey());
         for (auto& b : languageEncoder.blocks)
             setBlockPrecision(b, languagePrecision, dtypeKey());
+        if (languagePrecision.residualFp16)
+        {
+            projector.setODtype(vai::Dtype::Fp16, dtypeKey());
+            promptEmbed.setODtype(vai::Dtype::Fp16, dtypeKey());
+            catCamsPrompt.setODtype(vai::Dtype::Fp16, dtypeKey());
+        }
         if (visionPrecision.accF32)
         {
             patchEmbed.project.setAccDtype(vai::Dtype::Fp32, dtypeKey());
@@ -219,6 +241,8 @@ struct DecodeNet : public vai::NeuralNet
         velocityHead.setODtype(vai::Dtype::Fp32, dtypeKey());
         for (auto& b : actionDecoder.blocks)
             setBlockPrecision(b, actionPrecision, dtypeKey());
+        if (actionPrecision.residualFp16)
+            actionProj.setODtype(vai::Dtype::Fp16, dtypeKey());
         if (actionPrecision.accF32)
         {
             actionProj.setAccDtype(vai::Dtype::Fp32, dtypeKey());

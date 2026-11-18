@@ -87,43 +87,64 @@ Each latency cell is milliseconds per prediction, mean ± SD, with the fastest r
 
 | OS | Vulkan driver | Compute stack | GPU clock (core / memory) | vAi |
 |---|---|---|---|---|
-| Ubuntu 24.04.5 LTS | NVIDIA 595.99.02 | CUDA 13.2, vla.cpp v0.4.0 (built for sm_120) | default, not locked (max 3105 / 14001 MHz) | 99128a4 + precision tuning |
+| Ubuntu 24.04.5 LTS | NVIDIA 595.99.02 | CUDA 13.2, TensorRT 10.16.1, TensorRT Edge-LLM 0.11.1 and vla.cpp v0.4.0 (both built for sm_120) | default, not locked (max 3105 / 14001 MHz) | e11ef49 + action residual FP16 |
 
 | workload | image + text | framework | latency (ms) | min (ms) | max abs error |
 |---|---:|---|---:|---:|---:|
-| `vlacpp` | 512 + 154 | vAi | 39.24 ± 0.04 | 39.02 | 0.00124 |
+| `vlacpp` | 512 + 154 | vAi | 39.19 ± 0.03 | 39.14 | 0.00112 |
 |  |  | vla.cpp | 42.19 ± 0.14 | 42.05 | 0.00142 |
-| `trt` | 512 + 17 | vAi | - | - | - |
-|  |  | TensorRT Edge-LLM | - | - | - |
+| `trt` | 512 + 17 | vAi | 33.87 ± 0.06 | 33.74 | 0.000755 |
+|  |  | TensorRT Edge-LLM | 21.10 ± 0.01 | 21.07 | 0.00417 |
 
-- Result: vAi is 2.9 ms (7%) faster than vla.cpp and its max abs error is 13% lower, while it is checked over more values (below).
-- Accuracy: both pass at `atol 0.002`, `rtol 0.001`, against the reference, noise and images of `reference.py --cameras 2 --chunk 50 --steps 10`. vAi is checked over all 1600 values ([50, 32]). vla.cpp returns only its 7 real action dims and zeroes the rest, so it is checked over those 350 values.
+- Result: vAi is 3.0 ms (7%) faster than vla.cpp, with a 21% lower max abs error over more values (below). TensorRT Edge-LLM is 12.8 ms faster than vAi (vAi takes 61% longer), and its max abs error is 5.5 times vAi's.
+- Accuracy, `vlacpp`: both pass at `atol 0.002`, `rtol 0.001`, against the reference, noise and images of `reference.py --cameras 2 --chunk 50 --steps 10`. vAi is checked over all 1600 values ([50, 32]). vla.cpp returns only its 7 real action dims and zeroes the rest, so it is checked over those 350 values.
+- Accuracy, `trt`: against `reference.py --cameras 2 --chunk 10 --steps 10 --policy openpi`, over 320 values. vAi passes at `atol 0.002`, `rtol 0.001`. TensorRT Edge-LLM does not (1 of 320 values outside), so its latency is printed only at `--atol 0.2 --rtol 0.1`, as for MIGraphX below.
 - vla.cpp runs the published [`vrfai/pi05-libero-gguf`](https://huggingface.co/vrfai/pi05-libero-gguf), which carries LIBERO's action quantiles. The bench inverts them outside the timed call, so the actions compared are the model's own.
-- Each vAi row is the median, by mean, of three runs: 39.11 – 39.32 ms, max abs error 0.00124 in all three.
+- TensorRT Edge-LLM runs FP16 engines built on this GPU from its own FP16 ONNX export of the same checkpoint (`trtedge export --dtype float16 --pi05-policy-config pi05_libero`, then `pi05_policy_build`), with its CuTe DSL kernels (`ENABLE_CUTE_DSL=fmha`, the prebuilt sm_120 artifact). TensorRT 10.16.1 is NVIDIA's apt package for CUDA 13.2.
+- Each vAi and TensorRT Edge-LLM row is the median, by mean, of three runs: vAi `vlacpp` 39.14 – 39.58 ms, vAi `trt` 33.74 – 34.82 ms, TensorRT Edge-LLM 21.10 ms in all three. Each one's max abs error is the same in its three runs. The vla.cpp row is one run; its other runs here measured 42.06 – 42.53 ms.
 - vla.cpp's other runtime options change neither number: `mm_prec f32` 42.28 ms, `flash_attn` 42.15 ms, both 42.21 ms, each with error 0.00142. BF16 weights fail the check (0.00225).
 
 ##### vAi precision tuning (NVIDIA)
 
-On NVIDIA a Linear accumulates in its weight's dtype, FP16, unless told otherwise, and it rounds its input to FP16 on the way into the GEMM whatever dtype that input is stored in. Before tuning, vAi stored every activation FP32 (`oDefaultDtype`) and accumulated every GEMM in FP16: 40.74 ± 0.06 ms, error 0.00225, just inside the tolerance.
+On NVIDIA a Linear accumulates in its weight's dtype, FP16, unless told otherwise, and it rounds its input to FP16 on the way into the GEMM whatever dtype that input is stored in. Before tuning, vAi stored every activation FP32 (`oDefaultDtype`) and accumulated every GEMM in FP16: on `vlacpp`, 40.74 ± 0.06 ms, error 0.00225, just inside the tolerance.
 
-The tuning sets two switches per tower, `TowerPrecision` in [net.h](../../models/experimental/pi05/net.h):
+The tuning sets three switches per tower, `TowerPrecision` in [net.h](../../models/experimental/pi05/net.h):
 
-- `branchFp16`: inside each block, the branch off the residual stream (the norms, Q/K/V, RoPE, attention, the FFN hidden and its gating) writes FP16. The GEMMs round these values to FP16 anyway, so storing them FP16 costs little precision and halves their memory traffic. The residual stream (the output projections that fold the residual in, the action expert's gated residuals, the final norm) and the velocity head stay FP32, so rounding does not build up over the layers or the 10 Euler steps.
+- `branchFp16`: inside each block, the branch off the residual stream (the norms, Q/K/V, RoPE, attention, the FFN hidden and its gating) writes FP16. The GEMMs round these values to FP16 anyway, so storing them FP16 costs little precision and halves their memory traffic.
 - `accF32`: the tower's Linears accumulate in FP32.
+- `residualFp16`: the residual stream (the output projections that fold the residual in, the action expert's gated residuals) writes FP16 too. A Linear's folded residual must have its output's dtype, so the tower's input goes FP16 with it: the projector, the prompt embedding and their concat for the language tower, `actionProj` for the action expert. The velocity head, its Euler update and the final norms stay FP32.
 
-Measured with `branchFp16` on in all three towers, one run each (the chosen setting's three runs are above):
+The chosen setting: `branchFp16` in every tower, `accF32` in the vision tower, `residualFp16` in the action expert.
+
+First pass, on `vlacpp`, with `branchFp16` on in all three towers and `residualFp16` off, one run each:
 
 | FP32 accumulation in | latency (ms) | max abs error |
 |---|---:|---:|
 | none | 38.54 ± 0.04 | 0.00187 |
-| **vision** (chosen) | **39.22 ± 0.12** | **0.00124** |
+| **vision** | **39.22 ± 0.12** | **0.00124** |
 | vision + action | 40.79 ± 2.80 | 0.00117 |
 | vision + language | 42.63 ± 0.03 | 0.00152 |
 | all | 43.50 ± 0.84 | 0.00137 |
 
 - FP32 accumulation in the vision tower costs 0.7 ms and removes most of the error. The language tower's would cost 3–4 ms and the action expert's 1.5 ms, for no clear gain.
 - An FP32 K/V cache, tried before `branchFp16`, cost 0.2 ms and left the error unchanged (0.00225), so it stays FP16.
-- These dtypes apply on every vendor. AMD already accumulates in FP32; `branchFp16` there is not yet measured, and the AMD row below predates it.
+
+Second pass, on both workloads, with `branchFp16` on in all three towers, one run each:
+
+| FP32 accumulation in | FP16 residual in | `trt` latency (ms) | `trt` error | `vlacpp` latency (ms) | `vlacpp` error |
+|---|---|---:|---:|---:|---:|
+| vision | none | 33.92 ± 0.07 | 0.00114 | 39.19 ± 0.06 | 0.00124 |
+| none | none | 33.21 ± 0.09 | 0.00384 | 38.56 ± 0.03 | 0.00187 |
+| vision | language | 34.91 ± 3.16 | 0.00249 | 39.09 ± 0.05 | 0.00164 |
+| **vision** | **action** | **35.16 ± 3.22** | **0.000755** | **39.19 ± 0.03** | **0.00112** |
+| vision | language + action | 33.72 ± 0.06 | 0.00201 | 39.30 ± 1.11 | 0.00165 |
+| none | language + action | 33.02 ± 0.02 | 0.00400 | 38.36 ± 0.03 | 0.00188 |
+
+- The two rows with an SD above 3 ms include outliers. Three runs each of the first and the chosen settings: `trt` 33.92 – 35.12 ms against 33.74 – 34.82 ms, `vlacpp` 39.08 – 39.94 ms against 39.14 – 39.58 ms.
+- An FP16 residual in the action expert leaves the latency unchanged and lowers the error on both workloads (`trt` by a third). That it lowers the error at all is more likely its rounding falling closer to the reference's on this observation than a gain in precision, so the setting is kept for costing nothing, not for that.
+- An FP16 residual in the language tower nearly doubles the error for at most 0.2 ms.
+- Precision buys little speed: the fastest setting, 33.02 ms on `trt`, brings vAi's error up to TensorRT Edge-LLM's and is still 11.9 ms slower than it. The gap is in the kernels, not the dtypes.
+- These dtypes apply on every vendor. AMD already accumulates in FP32; `branchFp16` and `residualFp16` there are not yet measured, and the AMD row below predates them.
 
 #### AMD Radeon 8060S (gfx1151)
 
