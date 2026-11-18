@@ -70,6 +70,7 @@ struct ActionTransformerBlock : public vai::NodeGroup
           .hiddenDim = config.base.ffnHiddenDim,
           .outDim = config.base.embedDim,
           .activation = config.base.ffnActivation,
+          .fuseGlu = config.base.ffnFuseGlu,
       })
     , fma2({ .scaleAsInput = true, .shiftAsInput = true })
     {

@@ -43,6 +43,11 @@
  Split-K: workgroup z owns the K span [z * splitSize, min(K, (z + 1) *
  splitSize)), splitSize a multiple of 16, and writes its partials to P[z, M, N]
  on binding 0; linear-reduce.comp folds them and applies bias / epilogue.
+
+ glu (Linear's GLU, no split): W's rows come gate and up interleaved by 16
+ (linear-glu-rows, G = 16), so a lane's columns outF + l and outF + 16 + l
+ are the gate and the up of output outF / 2 + l; O is [M, N / 2]:
+   O[m, outF / 2 + l] = epilogue(C[m, outF + l]) * C[m, outF + 16 + l]
 =============================================================================*/
 #version 450
 #extension GL_GOOGLE_include_directive : require
@@ -53,6 +58,7 @@
 #extension GL_KHR_shader_subgroup_ballot : require
 #extension GL_KHR_shader_subgroup_shuffle : require
 #extension GL_EXT_shader_subgroup_extended_types_float16 : require
+#include "common/activation.h"
 #include "common/spec_constants.h"
 
 layout(local_size_x = 16, local_size_y = 1, local_size_z = 1) in;
@@ -60,6 +66,7 @@ layout(local_size_x = 16, local_size_y = 1, local_size_z = 1) in;
 layout(constant_id = 7)  const uint tileB     = 8;   // rows per subgroup
 layout(constant_id = 10) const uint bandTiles = 1;   // row tiles per band of the N-first order
 layout(constant_id = 11) const uint accType   = 1;   // accumulator dtype (0: fp32, 1: fp16)
+layout(constant_id = 12) const uint glu       = 0;   // 1: O = epilogue(gate) * up (see above)
 
 layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0;  // O (output) dtype
 layout(constant_id = SPEC_ID_TYPE_I) const uint typeI = 0;  // I (input) dtype
@@ -204,6 +211,20 @@ void main()
                 }
             }
         }
+    }
+
+    if (glu != 0u)
+    {
+        const uint H = N / 2u, c = outF / 2u + lane;
+        [[unroll]] for (uint bi = 0; bi < tileB; bi++)
+        {
+            const uint row = outB + bi;
+            const float gate = (accType == 0u) ? acc32[bi * 2u] : float(acc16[bi * 2u]);
+            const float up = (accType == 0u) ? acc32[bi * 2u + 1u] : float(acc16[bi * 2u + 1u]);
+            if (row < M && c < H)
+                writeO(row * H + c, applyEpilogue(gate) * up);
+        }
+        return;
     }
 
     const uint zOff = gl_WorkGroupID.z * M * N;   // partials of split z (0 without splitting)

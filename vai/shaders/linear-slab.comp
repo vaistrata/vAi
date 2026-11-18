@@ -5,6 +5,11 @@
      O[j, n] = s * epilogue( sum_k I[j, k] * W[n, k] + B[j, n] ) + R[j, n]    residualOrder 0
      O[j, n] = s * epilogue( sum_k I[j, k] * W[n, k] + B[j, n] + R[j, n] )    residualOrder 1
 
+ glu (Linear's GLU; wgN == 2, no bias / residual / scale): W's rows come gate
+ and up in adjacent pairs (linear-glu-rows, G = 1), so a workgroup's two
+ outputs are the gate and the up of output n0 / 2; O is [M, N / 2]:
+   O[j, n0 / 2] = epilogue(C[j, n0]) * C[j, n0 + 1]
+
  A workgroup produces the M x wgN outputs at N positions [n0, n0 + wgN): its
  wgSize threads split K, so each ends up with a partial of every output.
  subgroupAdd sums those per subgroup; a workgroup of several subgroups
@@ -45,6 +50,7 @@ layout(constant_id = 6) const uint hasResidual = 0;    // 1: residual[M, N]
 layout(constant_id = 7) const uint residualElems = 0;  // 0: the residual covers O; else it repeats
 layout(constant_id = 8) const uint residualOrder = 0;  // 0: after the epilogue, 1: before it
 layout(constant_id = 9) const uint typeB = 0;          // bias dtype
+layout(constant_id = 10) const uint glu = 0;           // 1: O = epilogue(gate) * up (see above)
 
 layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0;  // O (output) dtype
 layout(constant_id = SPEC_ID_TYPE_I) const uint typeI = 0;  // I (input) dtype
@@ -230,6 +236,12 @@ void computeOutputs(const uint n0, const uint nCount)
 
     // Store: thread 0 adds the bias, applies the epilogue and folds the residual in.
     if (tid != 0) return;
+    if (glu != 0u)
+    {
+        [[unroll]] for (uint j = 0; j < M; j++)
+            writeO(j * (N / 2u) + n0 / 2u, applyEpilogue(sums[j][0]) * sums[j][wgN - 1u]);   // wgN == 2 here
+        return;
+    }
     [[unroll]] for (uint j = 0; j < M; j++)
     {
         [[unroll]] for (uint n = 0; n < nCount; n++)

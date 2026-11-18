@@ -37,6 +37,7 @@ struct TransformerConfig {
     float normEps = 1e-5f;                    // every norm, QK included
     bool withQkNorm = false;                  // per-head RMS norm on Q and K, before RoPE
     std::optional<vai::RopeConfig> ropeCfg;   // absent: no position encoding
+    bool ffnFuseGlu = false;                  // gated FFN: the GLU inside its first projection (GatedFeedForward::fuseGlu)
 };
 
 
@@ -119,6 +120,7 @@ struct TransformerBlock : public vai::NodeGroup
                 .outDim = base.embedDim,
                 .activation = base.ffnActivation,
                 .acceptResidual = true,
+                .fuseGlu = base.ffnFuseGlu,
             };
     }
 

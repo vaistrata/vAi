@@ -39,6 +39,12 @@
  splitSize)) and writes its partials to P[z, M, N] on binding 0;
  linear-reduce.comp folds the partials and applies bias / epilogue.
 
+ glu (Linear's GLU, no split): W's rows come gate and up in adjacent pairs
+ (linear-glu-rows, G = 1). Every tile takes the staged store, where a lane
+ at an even column n of the staged tile reads n and n + 1, the gate and the
+ up of output n / 2; O is [M, N / 2]:
+   O[m, n / 2] = epilogue(C[m, n]) * C[m, n + 1]
+
  AMD options (host-gated, Linear's AMD section): rowMajor != 0 visits the
  tiles M-first, rowMajor being the M tile count, so consecutive workgroups
  share a W tile. prefetch replaces the k loop with the Strix Point loop: raw
@@ -55,6 +61,7 @@
 #extension GL_KHR_cooperative_matrix : require
 #extension GL_KHR_memory_scope_semantics : require
 #extension GL_KHR_shader_subgroup_basic : require
+#include "common/activation.h"
 #include "common/spec_constants.h"
 
 layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;   // = wgSize (same SpecId)
@@ -71,6 +78,7 @@ layout(constant_id = 8)  const uint tN       = 16;   // coopmat tile along N (= 
 layout(constant_id = 9)  const uint tK       = 16;   // coopmat tile along K (= device coopmat K)
 layout(constant_id = 11) const uint accType  = 0;    // accumulator dtype (0: fp32, 1: fp16)
 layout(constant_id = 12) const uint robustBufferAccess  = 0;    // robust buffer access (0: disabled, 1: enabled)
+layout(constant_id = 13) const uint glu      = 0;    // 1: O = epilogue(gate) * up (see the header)
 
 layout(constant_id = 14) const uint rowMajor = 0;    // 0: N-first tile order; else M tile count for M-first order
 layout(constant_id = 15) const uint prefetch = 0;    // 1: the prefetch loop (see the header)
@@ -373,7 +381,7 @@ void main()
             const uint m = m0 + b * tM;
             const bool inBounds = n + tN <= N && m + tM <= M;
 
-            if (oAligned && inBounds)
+            if (oAligned && inBounds && glu == 0u)
             {
                 // Whole tile in bounds, aligned: store the accumulator
                 // straight to O (column-major, stride N), converted to the
@@ -406,7 +414,17 @@ void main()
 
                 controlBarrier(gl_ScopeSubgroup, gl_ScopeSubgroup, gl_StorageSemanticsShared, gl_SemanticsAcquireRelease);
 
-                if (inBounds)
+                if (glu != 0u)
+                {
+                    // Lanes at even columns take the pair; the odd ones have nothing to store.
+                    if (storeR % 2u == 0u)
+                        [[unroll]] for (uint c = 0; c < tM; c += storeStride)
+                            if (m + c + storeC < M && n + storeR < N)
+                                writeO((m + c + storeC) * (N / 2u) + (n + storeR) / 2u,
+                                       applyEpilogue(cmStage[stageBase + (c + storeC) * tN + storeR])
+                                       * cmStage[stageBase + (c + storeC) * tN + storeR + 1u]);
+                }
+                else if (inBounds)
                 {
                     [[unroll]] for (uint c = 0; c < tM; c += storeStride)
                         writeO(zOff + (m + c + storeC) * N + n + storeR,
