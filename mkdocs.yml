@@ -1,5 +1,7 @@
 site_name: vAi                                  # 탭 제목 · 좌상단 로고 옆 이름
-site_description: 그래프 DSL 기반 Vulkan 추론 엔진   # <meta description> — 검색엔진·SNS 미리보기
+# <meta description> — 검색엔진·SNS 미리보기. 기본 로케일(en)의 문장이고,
+# 한국어 문장은 i18n 의 languages[locale: ko].site_description 에 있다.
+site_description: Vulkan inference engine built on a graph DSL
 repo_url: https://github.com/vaistrata/vAi      # 우상단 저장소 링크
 repo_name: vAi                                  # 그 링크에 보일 텍스트
 edit_uri: edit/master/docs/                     # "이 페이지 편집" 버튼이 향할 경로
@@ -33,34 +35,34 @@ theme:
 
 # 좌측 메뉴의 순서와 이름. 언어는 여기서 가르지 않는다 — 두 언어가 각자
 # 자기 nav 를 최상위로 가지고, 전환은 헤더 우측의 언어 선택기가 한다
-# (아래 plugins 의 i18n). 이 nav 는 기본 로케일(ko)의 것이고, 영어 nav 는
-# i18n 의 languages[locale: en].nav 에 있다.
+# (아래 plugins 의 i18n). 이 nav 는 기본 로케일(en)의 것이고, 한국어 nav 는
+# i18n 의 languages[locale: ko].nav 에 있다.
 #
 # 두 언어는 파일이 1:1로 대응한다. 한쪽에 장을 추가하면 다른 쪽도 같이 고칠 것.
 nav:
-  - 개요: ko/index.md
-  - 빠른 실행: ko/02-quickstart.md
-  - vAi 사용법:
-      - ko/03-usage/README.md                   # 이름 없이 두면 섹션 제목을 눌렀을 때 열릴 페이지가 된다
-      - 노드(Node): ko/03-usage/node.md
-      - 노드그룹(NodeGroup): ko/03-usage/node-group.md
-      - 신경망(NeuralNet): ko/03-usage/neural-net.md
-      - 텐서(Tensor): ko/03-usage/tensor.md
-      - 실행 파이프라인 요약: ko/03-usage/execution-pipeline.md
-      - 프로파일링: ko/03-usage/profiling.md
-  - 제공 모델:
-      - ko/04-models/README.md
-      - YOLOX: ko/04-models/yolox.md
-      - GPT-2: ko/04-models/gpt2.md
-      - Llama 3: ko/04-models/llama3.md
-      - Gemma 3: ko/04-models/gemma3.md
-  - 제공 노드들: ko/06-nodes.md
-  - 기여하기:
-      - ko/contributing/README.md               # 기여 절차와 자동 검사
-      - 커스텀 모델 작성: ko/contributing/models.md
-      - 커스텀 노드와 커널 작성: ko/contributing/nodes.md
-      - 커스텀 그룹 작성: ko/contributing/groups.md
-  - Vulkan 기본 개념: ko/09-vulkan-objects.md
+  - Overview: en/index.md
+  - Quickstart: en/02-quickstart.md
+  - Using vAi:
+      - en/03-usage/README.md                   # 이름 없이 두면 섹션 제목을 눌렀을 때 열릴 페이지가 된다
+      - Node: en/03-usage/node.md
+      - NodeGroup: en/03-usage/node-group.md
+      - NeuralNet: en/03-usage/neural-net.md
+      - Tensor: en/03-usage/tensor.md
+      - Execution pipeline summary: en/03-usage/execution-pipeline.md
+      - Profiling: en/03-usage/profiling.md
+  - Supported models:
+      - en/04-models/README.md
+      - YOLOX: en/04-models/yolox.md
+      - GPT-2: en/04-models/gpt2.md
+      - Llama 3: en/04-models/llama3.md
+      - Gemma 3: en/04-models/gemma3.md
+  - Built-in nodes: en/06-nodes.md
+  - Contributing:
+      - en/contributing/README.md               # 기여 절차와 자동 검사
+      - Writing custom models: en/contributing/models.md
+      - Writing custom nodes and kernels: en/contributing/nodes.md
+      - Writing custom groups: en/contributing/groups.md
+  - Vulkan basic concepts: en/09-vulkan-objects.md
 
 # docs/ 아래 파일은 nav 에 없어도 페이지가 만들어지고 검색에도 걸린다.
 # 문서는 전부 공개하고, 숨길 것만 적는다 (.gitignore 문법).
@@ -105,44 +107,47 @@ plugins:
   # 로케일마다 색인을 다시 만들면서 그 언어에 맞는 lang 을 끼워 넣는다.
   - search
 
-  # 언어별로 사이트를 한 번씩 빌드한다. docs/ko 는 사이트 루트(/), docs/en 은
-  # /en/ 아래로 들어가고, 헤더 우측에 두 언어를 오가는 선택기가 생긴다.
+  # 언어별로 사이트를 한 번씩 빌드한다. docs/en 은 사이트 루트(/), docs/ko 는
+  # /ko/ 아래로 들어가고, 헤더 우측에 두 언어를 오가는 선택기가 생긴다.
   # 폴더 이름이 곧 로케일 코드라서 kor/eng 가 아니라 ko/en 이어야 한다.
   #
-  # 기본 로케일을 영어로 바꾸려면 default: true 를 en 으로 옮기고 nav 두 벌의
-  # 위치를 맞바꾼다 (루트 nav 가 기본 로케일의 것이다).
+  # 기본 로케일을 바꾸려면 default: true 를 옮기고 nav 와 site_description 두 벌의
+  # 위치를 맞바꾼다 (루트의 것이 기본 로케일의 것이다). 바꾸면 주소도 바뀐다 —
+  # 기본 로케일은 / 에, 나머지는 /<로케일>/ 에 놓이므로 /ko/ 와 /en/ 이 자리를
+  # 바꾼다. 이 사이트로 거는 외부 링크도 같이 고칠 것.
   - i18n:
       docs_structure: folder
       languages:
-        - locale: ko
-          name: 한국어
-          default: true
         - locale: en
           name: English
+          default: true
+        - locale: ko
+          name: 한국어
+          site_description: 그래프 DSL 기반 Vulkan 추론 엔진
           nav:
-            - Overview: en/index.md
-            - Quickstart: en/02-quickstart.md
-            - Using vAi:
-                - en/03-usage/README.md
-                - Node: en/03-usage/node.md
-                - NodeGroup: en/03-usage/node-group.md
-                - NeuralNet: en/03-usage/neural-net.md
-                - Tensor: en/03-usage/tensor.md
-                - Execution pipeline summary: en/03-usage/execution-pipeline.md
-                - Profiling: en/03-usage/profiling.md
-            - Supported models:
-                - en/04-models/README.md
-                - YOLOX: en/04-models/yolox.md
-                - GPT-2: en/04-models/gpt2.md
-                - Llama 3: en/04-models/llama3.md
-                - Gemma 3: en/04-models/gemma3.md
-            - Built-in nodes: en/06-nodes.md
-            - Contributing:
-                - en/contributing/README.md
-                - Writing custom models: en/contributing/models.md
-                - Writing custom nodes and kernels: en/contributing/nodes.md
-                - Writing custom groups: en/contributing/groups.md
-            - Vulkan basic concepts: en/09-vulkan-objects.md
+            - 개요: ko/index.md
+            - 빠른 실행: ko/02-quickstart.md
+            - vAi 사용법:
+                - ko/03-usage/README.md
+                - 노드(Node): ko/03-usage/node.md
+                - 노드그룹(NodeGroup): ko/03-usage/node-group.md
+                - 신경망(NeuralNet): ko/03-usage/neural-net.md
+                - 텐서(Tensor): ko/03-usage/tensor.md
+                - 실행 파이프라인 요약: ko/03-usage/execution-pipeline.md
+                - 프로파일링: ko/03-usage/profiling.md
+            - 제공 모델:
+                - ko/04-models/README.md
+                - YOLOX: ko/04-models/yolox.md
+                - GPT-2: ko/04-models/gpt2.md
+                - Llama 3: ko/04-models/llama3.md
+                - Gemma 3: ko/04-models/gemma3.md
+            - 제공 노드들: ko/06-nodes.md
+            - 기여하기:
+                - ko/contributing/README.md
+                - 커스텀 모델 작성: ko/contributing/models.md
+                - 커스텀 노드와 커널 작성: ko/contributing/nodes.md
+                - 커스텀 그룹 작성: ko/contributing/groups.md
+            - Vulkan 기본 개념: ko/09-vulkan-objects.md
 
 # 빌드마다 6장을 헤더 스탬프에서 다시 만든다.
 hooks:
