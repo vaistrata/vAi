@@ -172,6 +172,19 @@ The `vAi` column names the commit the results hold for. They were measured with 
 
 Each row is the median of three `scripts/run-amd.sh -- --atol 0.2 --rtol 0.1` runs.
 
+#### AMD Strix Point (Radeon 890M, gfx1150)
+
+| OS | Vulkan driver | Compute stack | GPU clock (core / memory) | vAi |
+|---|---|---|---|---|
+| Ubuntu 26.04.1 LTS | RADV, Mesa 26.0.8 | MIGraphX 2.18.0, ROCm 10.1.0 | 2900 / 2800 MHz (`high`) | `f2ce0ed` |
+
+| Comparison | Image + text tokens | Framework | Latency (ms) | Min (ms) | Max abs error |
+|---|---:|---|---:|---:|---:|
+| `migraphx` | 512 + 154 | **vAi** | **739.85 ± 4.43** | 732.20 | 0.0119 |
+| | | MIGraphX | 896.73 ± 11.17 | 888.84 | 0.0119 |
+
+Each row is one `scripts/run-amd.sh -- --atol 0.2 --rtol 0.1` run. The checkpoint is [`lerobot/pi05_libero_finetuned_v044`](https://huggingface.co/lerobot/pi05_libero_finetuned_v044), the LIBERO fine-tune of the same architecture, read with the pre- and postprocessor configuration of `lerobot/pi05_libero_base`; its maximum absolute errors hold for that checkpoint, not for the rows above.
+
 ### Precision configuration
 
 The frameworks use FP16 model weights but differ in intermediate activation storage, accumulation, and residual precision. vAi's are set node by node in each net's constructor in [net.h](../../models/experimental/pi05/net.h).
