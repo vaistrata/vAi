@@ -183,12 +183,18 @@ inline std::vector<float> readReference(const std::string& path, size_t count)
 
 
 // numpy.allclose: |out - ref| <= atol + rtol * |ref| for every value. Prints one line either way.
-inline bool checkReference(const float* out, const std::vector<float>& ref, double atol, double rtol)
+// With rows of dim values, only the first checkedDims of each row are compared (0: all).
+inline bool checkReference(
+    const float* out, const std::vector<float>& ref, double atol, double rtol, size_t dim = 0, size_t checkedDims = 0)
 {
     double maxAbs = 0.0;
     size_t mismatches = 0;
+    size_t checked = 0;
     for (size_t i = 0; i < ref.size(); ++i)
     {
+        if (dim && checkedDims && i % dim >= checkedDims)
+            continue;
+        ++checked;
         const double diff = std::fabs(double(out[i]) - double(ref[i]));
         if (!(diff <= atol + rtol * std::fabs(double(ref[i]))))   // NaN fails too
             ++mismatches;
@@ -200,7 +206,7 @@ inline bool checkReference(const float* out, const std::vector<float>& ref, doub
         mismatches ? "FAIL" : "pass",
         maxAbs,
         mismatches,
-        ref.size(),
+        checked,
         atol,
         rtol);
     fflush(stdout);
@@ -309,13 +315,12 @@ struct VLABenchOptions
 {
     int nWarm = 3;
     int nReps = 20;
-    // double atol = 2e-3;
-    // double rtol = 1e-3;
-    double atol = 2e-1;
-    double rtol = 1e-1;
+    double atol = 2e-3;
+    double rtol = 1e-3;
     bool showActions = false;
     std::string referencePath;   // checked when the file is there; the bench runs unverified without it
     unsigned denoiseSteps = 0;   // the workload's, shown in the table header
+    unsigned checkedDims = 0;    // leading action dims compared with the reference (0: all)
 };
 
 
@@ -337,10 +342,12 @@ bool checkVLAReference(
         return true;
     }
     printf("reference: %s\n", options.referencePath.c_str());
+    if (options.checkedDims && options.checkedDims < dim)
+        printf("compared: the first %u of %u action dims\n", options.checkedDims, dim);
     std::vector<double> once;
     if (!measureLatency(0, 1, predict, once))
         return false;
-    if (!checkReference(actions(), reference, options.atol, options.rtol))
+    if (!checkReference(actions(), reference, options.atol, options.rtol, dim, options.checkedDims))
     {
         fprintf(stderr, "error: reference mismatch; latency results suppressed\n");
         return false;

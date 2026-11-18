@@ -45,8 +45,8 @@ curl -fL -o data/ckpts/pi05/lerobot/<size>/policy_preprocessor.json https://hugg
 curl -fL -o data/ckpts/pi05/lerobot/<size>/policy_postprocessor.json https://huggingface.co/<repository>/resolve/main/policy_postprocessor.json
 ```
 
-> [!WARNING]
-> The checkpoint ships no dataset statistics, which the vla.cpp converter needs (`--dataset-stats <stats.json>`: `mean`, `std`, `q01` and `q99` of width 32 for `observation.state` and `action`). vla.cpp applies them to the actions it returns, so pass neutral ones: `q01` of -1 and `q99` of 1 leave the actions as the model gives them, as the accuracy check needs.
+> [!NOTE]
+> The checkpoint ships no dataset statistics, which the vla.cpp converter needs (`--dataset-stats <stats.json>`: `mean`, `std`, `q01` and `q99` of width 32 for `observation.state` and `action`). vla.cpp applies them to the actions it returns and zeroes the dims past the real action width. The vla.cpp bench reads them back from the GGUF and inverts them outside the timed call, then compares only the real dims with the reference: a GGUF converted with any statistics, such as the published [`vrfai/pi05-libero-gguf`](https://huggingface.co/vrfai/pi05-libero-gguf) with LIBERO's, checks against the model's own actions.
 
 ## Building and running
 
@@ -70,7 +70,7 @@ build/bin/bench-pi05-migraphx
 
 Options:
 
-- vAi bench: `--workload <name>`, the workload of the framework compared with: `migraphx` (default), `trt` or `vlacpp`. The comparison benches always run their own. vAi runs FP16 weights and K/V cache with FP32 activations.
+- vAi bench: `--workload <name>`, the workload of the framework compared with: `migraphx` (default), `trt` or `vlacpp`. The comparison benches always run their own. vAi runs FP16 weights and K/V cache; each block keeps its residual stream FP32 and writes its branch (norms, Q/K/V, attention, FFN hidden) FP16, and the vision tower accumulates its GEMMs in FP32 (`TowerPrecision` in [net.h](../../models/experimental/pi05/net.h)).
 - `--showActions`: print the first five actions after the table
 - `--atol N`, `--rtol N`: tolerances against the workload's reference (default: `0.002`, `0.001`)
 - vla.cpp bench: `--model <path>` (or `VLA_MODEL_PATH`), another GGUF; `--config <path>` (or `VLA_CONFIG_PATH`), another runtime config than [`vla.cpp/runtime.json`](vla.cpp/runtime.json), which sets FP16 weights
@@ -83,18 +83,47 @@ Each latency cell is milliseconds per prediction, mean ± SD, with the fastest r
 
 ### pi0.5 LIBERO
 
-#### {NVIDIA GPU name}
+#### NVIDIA GeForce RTX 5090
 
 | OS | Vulkan driver | Compute stack | GPU clock (core / memory) | vAi |
 |---|---|---|---|---|
-| {OS} | {driver} | CUDA {version}, TensorRT {version} | {core} / {memory} | {commit} |
+| Ubuntu 24.04.5 LTS | NVIDIA 595.99.02 | CUDA 13.2, vla.cpp v0.4.0 (built for sm_120) | default, not locked (max 3105 / 14001 MHz) | 99128a4 + precision tuning |
 
 | workload | image + text | framework | latency (ms) | min (ms) | max abs error |
 |---|---:|---|---:|---:|---:|
-| `vlacpp` | 512 + 154 | vAi | - | - | - |
-|  |  | vla.cpp | - | - | - |
+| `vlacpp` | 512 + 154 | vAi | 39.24 ± 0.04 | 39.02 | 0.00124 |
+|  |  | vla.cpp | 42.19 ± 0.14 | 42.05 | 0.00142 |
 | `trt` | 512 + 17 | vAi | - | - | - |
 |  |  | TensorRT Edge-LLM | - | - | - |
+
+- Result: vAi is 2.9 ms (7%) faster than vla.cpp and its max abs error is 13% lower, while it is checked over more values (below).
+- Accuracy: both pass at `atol 0.002`, `rtol 0.001`, against the reference, noise and images of `reference.py --cameras 2 --chunk 50 --steps 10`. vAi is checked over all 1600 values ([50, 32]). vla.cpp returns only its 7 real action dims and zeroes the rest, so it is checked over those 350 values.
+- vla.cpp runs the published [`vrfai/pi05-libero-gguf`](https://huggingface.co/vrfai/pi05-libero-gguf), which carries LIBERO's action quantiles. The bench inverts them outside the timed call, so the actions compared are the model's own.
+- Each vAi row is the median, by mean, of three runs: 39.11 – 39.32 ms, max abs error 0.00124 in all three.
+- vla.cpp's other runtime options change neither number: `mm_prec f32` 42.28 ms, `flash_attn` 42.15 ms, both 42.21 ms, each with error 0.00142. BF16 weights fail the check (0.00225).
+
+##### vAi precision tuning (NVIDIA)
+
+On NVIDIA a Linear accumulates in its weight's dtype, FP16, unless told otherwise, and it rounds its input to FP16 on the way into the GEMM whatever dtype that input is stored in. Before tuning, vAi stored every activation FP32 (`oDefaultDtype`) and accumulated every GEMM in FP16: 40.74 ± 0.06 ms, error 0.00225, just inside the tolerance.
+
+The tuning sets two switches per tower, `TowerPrecision` in [net.h](../../models/experimental/pi05/net.h):
+
+- `branchFp16`: inside each block, the branch off the residual stream (the norms, Q/K/V, RoPE, attention, the FFN hidden and its gating) writes FP16. The GEMMs round these values to FP16 anyway, so storing them FP16 costs little precision and halves their memory traffic. The residual stream (the output projections that fold the residual in, the action expert's gated residuals, the final norm) and the velocity head stay FP32, so rounding does not build up over the layers or the 10 Euler steps.
+- `accF32`: the tower's Linears accumulate in FP32.
+
+Measured with `branchFp16` on in all three towers, one run each (the chosen setting's three runs are above):
+
+| FP32 accumulation in | latency (ms) | max abs error |
+|---|---:|---:|
+| none | 38.54 ± 0.04 | 0.00187 |
+| **vision** (chosen) | **39.22 ± 0.12** | **0.00124** |
+| vision + action | 40.79 ± 2.80 | 0.00117 |
+| vision + language | 42.63 ± 0.03 | 0.00152 |
+| all | 43.50 ± 0.84 | 0.00137 |
+
+- FP32 accumulation in the vision tower costs 0.7 ms and removes most of the error. The language tower's would cost 3–4 ms and the action expert's 1.5 ms, for no clear gain.
+- An FP32 K/V cache, tried before `branchFp16`, cost 0.2 ms and left the error unchanged (0.00225), so it stays FP16.
+- These dtypes apply on every vendor. AMD already accumulates in FP32; `branchFp16` there is not yet measured, and the AMD row below predates it.
 
 #### AMD Radeon 8060S (gfx1151)
 

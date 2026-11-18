@@ -23,6 +23,67 @@ namespace group = production::pi05::group;
 
 
 /////////////////////////////////////////////////////////////////////////////////////////
+// Precision - per tower, the dtypes a block's nodes run at
+//   accF32       the projections accumulate in FP32 (NVIDIA's default is the weight's FP16)
+//   branchFp16   the branch between the residual stream and its projections back
+//                (norms, Q/K/V, attention, FFN hidden) writes FP16; the residual stream
+//                itself (the output projections, the gated residuals) stays FP32
+/////////////////////////////////////////////////////////////////////////////////////////
+struct TowerPrecision
+{
+    bool accF32 = false;
+    bool branchFp16 = false;
+};
+
+template <typename Block>
+void setBlockPrecision(Block& b, TowerPrecision p, vai::DtypeKey key)
+{
+    auto& a = b.mhAttn;
+    constexpr bool classic = requires { b.ffn.fc1; };   // SigLIP's FFN, else Gemma's gated one
+    if (p.accF32)
+    {
+        for (vai::node::Linear* l : { &a.projQ, &a.projK, &a.projV, &a.projOut })
+            l->setAccDtype(vai::Dtype::Fp32, key);
+        if constexpr (classic)
+        {
+            b.ffn.fc1.setAccDtype(vai::Dtype::Fp32, key);
+            b.ffn.fc2.setAccDtype(vai::Dtype::Fp32, key);
+        }
+        else
+        {
+            b.ffn.gateValue.setAccDtype(vai::Dtype::Fp32, key);
+            b.ffn.out.setAccDtype(vai::Dtype::Fp32, key);
+        }
+    }
+    if (p.branchFp16)
+    {
+        const auto f16 = vai::Dtype::Fp16;
+        b.norm1.setODtype(f16, key);
+        b.norm2.setODtype(f16, key);
+        for (vai::Node* n : { (vai::Node*)&a.projQ, (vai::Node*)&a.projK, (vai::Node*)&a.projV,
+                              (vai::Node*)&a.perQ, (vai::Node*)&a.perK, (vai::Node*)&a.perV, (vai::Node*)&a.attn })
+            n->setODtype(f16, key);
+        if (a.ropeQ)
+        {
+            a.ropeQ->setODtype(f16, key);
+            a.ropeK->setODtype(f16, key);
+        }
+        if constexpr (classic)
+            b.ffn.fc1.setODtype(f16, key);
+        else
+        {
+            b.ffn.gateValue.setODtype(f16, key);
+            b.ffn.gatedMul.setODtype(f16, key);
+        }
+    }
+}
+
+inline constexpr TowerPrecision visionPrecision = { .accF32 = true, .branchFp16 = true };
+inline constexpr TowerPrecision languagePrecision = { .accF32 = false, .branchFp16 = true };
+inline constexpr TowerPrecision actionPrecision = { .accF32 = false, .branchFp16 = true };
+
+
+/////////////////////////////////////////////////////////////////////////////////////////
 // PrefillNet - the cameras and the prompt into the KV cache
 /////////////////////////////////////////////////////////////////////////////////////////
 struct PrefillNet : public vai::NeuralNet
@@ -74,6 +135,16 @@ struct PrefillNet : public vai::NeuralNet
         languageEncoder.setGateOpen(false);
         kvCacheCounter = vai::createKvCacheCounter(device());
         languageEncoder.setKvCacheCounter(kvCacheCounter);
+
+        for (auto& b : visionEncoder.blocks)
+            setBlockPrecision(b, visionPrecision, dtypeKey());
+        for (auto& b : languageEncoder.blocks)
+            setBlockPrecision(b, languagePrecision, dtypeKey());
+        if (visionPrecision.accF32)
+        {
+            patchEmbed.project.setAccDtype(vai::Dtype::Fp32, dtypeKey());
+            projector.setAccDtype(vai::Dtype::Fp32, dtypeKey());
+        }
     }
 
     uint32_t prefixLength_ = 0;
@@ -146,6 +217,13 @@ struct DecodeNet : public vai::NeuralNet
         }
 
         velocityHead.setODtype(vai::Dtype::Fp32, dtypeKey());
+        for (auto& b : actionDecoder.blocks)
+            setBlockPrecision(b, actionPrecision, dtypeKey());
+        if (actionPrecision.accF32)
+        {
+            actionProj.setAccDtype(vai::Dtype::Fp32, dtypeKey());
+            velocityHead.setAccDtype(vai::Dtype::Fp32, dtypeKey());
+        }
     }
 
     // Input: action [actionChunk, actionDim], initialized with noise.

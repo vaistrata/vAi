@@ -64,10 +64,12 @@ target_link_libraries(bench-pi05-vai PRIVATE
 # so the release is read from the converter setup-vlacpp.sh keeps next to the install.
 find_path(vla_INCLUDE_DIR NAMES vla.h HINTS "${vla_ROOT}" ENV vla_ROOT PATH_SUFFIXES include)
 find_library(vla_LIBRARY NAMES vla HINTS "${vla_ROOT}" ENV vla_ROOT PATH_SUFFIXES lib lib64)
-mark_as_advanced(vla_INCLUDE_DIR vla_LIBRARY)
+# The bench reads the GGUF's action statistics with the gguf API in ggml-base, which libvla links.
+find_library(vla_GGML_BASE_LIBRARY NAMES ggml-base HINTS "${vla_ROOT}" ENV vla_ROOT PATH_SUFFIXES lib lib64 NO_DEFAULT_PATH)
+mark_as_advanced(vla_INCLUDE_DIR vla_LIBRARY vla_GGML_BASE_LIBRARY)
 
 set(_vlaVersion "")
-if(vla_INCLUDE_DIR AND vla_LIBRARY)
+if(vla_INCLUDE_DIR AND vla_LIBRARY AND vla_GGML_BASE_LIBRARY)
     get_filename_component(_vlaPrefix "${vla_INCLUDE_DIR}" DIRECTORY)
     set(_vlaVersion "of unknown release")
     if(EXISTS "${_vlaPrefix}/convert/pyproject.toml")
@@ -108,6 +110,7 @@ elseif(_vlaVersion)
         VLACPP_RUNTIME_CONFIG="${CMAKE_CURRENT_SOURCE_DIR}/vla.cpp/runtime.json")
     target_link_libraries(bench-pi05-vlacpp PRIVATE
         vla::vla
+        ${vla_GGML_BASE_LIBRARY}
         CUDA::cudart
         Threads::Threads
     )
