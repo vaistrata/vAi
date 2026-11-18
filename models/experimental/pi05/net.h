@@ -23,80 +23,13 @@ namespace group = production::pi05::group;
 
 
 /////////////////////////////////////////////////////////////////////////////////////////
-// Precision - per tower, the dtypes a block's nodes run at
-//   accF32       the projections accumulate in FP32 (NVIDIA's default is the weight's FP16)
-//   branchFp16   the branch between the residual stream and its projections back
-//                (norms, Q/K/V, attention, FFN hidden) writes FP16; the residual stream
-//                itself (the output projections, the gated residuals) stays FP32
-//   residualFp16 the residual stream writes FP16 too (the tower's input included)
+// Precision - each net's constructor sets its towers' dtypes node by node.
+//   Unset nodes keep the net's defaults: FP16 weights, FP32 outputs, and the
+//   projections accumulating in FP32 on AMD, else in the weight's FP16.
+//   branch   between the residual stream and its projections back
+//            (norms, Q/K/V, attention, FFN hidden)
+//   residual the stream itself (the output projections, the gated residuals)
 /////////////////////////////////////////////////////////////////////////////////////////
-struct TowerPrecision
-{
-    bool accF32 = false;
-    bool branchFp16 = false;
-    bool residualFp16 = false;
-};
-
-template <typename Block>
-void setBlockPrecision(Block& b, TowerPrecision p, vai::DtypeKey key)
-{
-    auto& a = b.mhAttn;
-    constexpr bool classic = requires { b.ffn.fc1; };   // SigLIP's FFN, else Gemma's gated one
-    if (p.accF32)
-    {
-        for (vai::node::Linear* l : { &a.projQ, &a.projK, &a.projV, &a.projOut })
-            l->setAccDtype(vai::Dtype::Fp32, key);
-        if constexpr (classic)
-        {
-            b.ffn.fc1.setAccDtype(vai::Dtype::Fp32, key);
-            b.ffn.fc2.setAccDtype(vai::Dtype::Fp32, key);
-        }
-        else
-        {
-            b.ffn.gateValue.setAccDtype(vai::Dtype::Fp32, key);
-            b.ffn.out.setAccDtype(vai::Dtype::Fp32, key);
-        }
-    }
-    if (p.branchFp16)
-    {
-        const auto f16 = vai::Dtype::Fp16;
-        b.norm1.setODtype(f16, key);
-        b.norm2.setODtype(f16, key);
-        for (vai::Node* n : { (vai::Node*)&a.projQ, (vai::Node*)&a.projK, (vai::Node*)&a.projV,
-                              (vai::Node*)&a.perQ, (vai::Node*)&a.perK, (vai::Node*)&a.perV, (vai::Node*)&a.attn })
-            n->setODtype(f16, key);
-        if (a.ropeQ)
-        {
-            a.ropeQ->setODtype(f16, key);
-            a.ropeK->setODtype(f16, key);
-        }
-        if constexpr (classic)
-            b.ffn.fc1.setODtype(f16, key);
-        else
-        {
-            b.ffn.gateValue.setODtype(f16, key);
-            b.ffn.gatedMul.setODtype(f16, key);
-        }
-    }
-    if (p.residualFp16)
-    {
-        const auto f16 = vai::Dtype::Fp16;
-        a.projOut.setODtype(f16, key);
-        if constexpr (classic)
-            b.ffn.fc2.setODtype(f16, key);
-        else
-            b.ffn.out.setODtype(f16, key);
-        if constexpr (requires { b.fma1; })   // the action expert's gated residuals
-        {
-            b.fma1.setODtype(f16, key);
-            b.fma2.setODtype(f16, key);
-        }
-    }
-}
-
-inline constexpr TowerPrecision visionPrecision = { .accF32 = true, .branchFp16 = true, .residualFp16 = false };
-inline constexpr TowerPrecision languagePrecision = { .accF32 = false, .branchFp16 = true, .residualFp16 = false };
-inline constexpr TowerPrecision actionPrecision = { .accF32 = false, .branchFp16 = true, .residualFp16 = true };
 
 
 /////////////////////////////////////////////////////////////////////////////////////////
@@ -152,20 +85,56 @@ struct PrefillNet : public vai::NeuralNet
         kvCacheCounter = vai::createKvCacheCounter(device());
         languageEncoder.setKvCacheCounter(kvCacheCounter);
 
+        const auto f16 = vai::Dtype::Fp16, f32 = vai::Dtype::Fp32;
+        const auto key = dtypeKey();
+
+        // Vision: accumulate FP32, branch FP16, residual FP32 (default)
         for (auto& b : visionEncoder.blocks)
-            setBlockPrecision(b, visionPrecision, dtypeKey());
-        for (auto& b : languageEncoder.blocks)
-            setBlockPrecision(b, languagePrecision, dtypeKey());
-        if (languagePrecision.residualFp16)
         {
-            projector.setODtype(vai::Dtype::Fp16, dtypeKey());
-            promptEmbed.setODtype(vai::Dtype::Fp16, dtypeKey());
-            catCamsPrompt.setODtype(vai::Dtype::Fp16, dtypeKey());
+            auto& a = b.mhAttn;
+            // accumulate
+            a.projQ.setAccDtype(f32, key);
+            a.projK.setAccDtype(f32, key);
+            a.projV.setAccDtype(f32, key);
+            a.projOut.setAccDtype(f32, key);
+            b.ffn.fc1.setAccDtype(f32, key);
+            b.ffn.fc2.setAccDtype(f32, key);
+            // branch
+            b.norm1.setODtype(f16, key);
+            b.norm2.setODtype(f16, key);
+            a.projQ.setODtype(f16, key);
+            a.projK.setODtype(f16, key);
+            a.projV.setODtype(f16, key);
+            a.perQ.setODtype(f16, key);
+            a.perK.setODtype(f16, key);
+            a.perV.setODtype(f16, key);
+            a.attn.setODtype(f16, key);
+            b.ffn.fc1.setODtype(f16, key);
         }
-        if (visionPrecision.accF32)
+        patchEmbed.project.setAccDtype(f32, key);
+        projector.setAccDtype(f32, key);
+
+        // Language: accumulate default, branch FP16, residual FP32 (default, its input included)
+        for (auto& b : languageEncoder.blocks)
         {
-            patchEmbed.project.setAccDtype(vai::Dtype::Fp32, dtypeKey());
-            projector.setAccDtype(vai::Dtype::Fp32, dtypeKey());
+            auto& a = b.mhAttn;
+            // branch
+            b.norm1.setODtype(f16, key);
+            b.norm2.setODtype(f16, key);
+            a.projQ.setODtype(f16, key);
+            a.projK.setODtype(f16, key);
+            a.projV.setODtype(f16, key);
+            a.perQ.setODtype(f16, key);
+            a.perK.setODtype(f16, key);
+            a.perV.setODtype(f16, key);
+            if (a.ropeQ)
+            {
+                a.ropeQ->setODtype(f16, key);
+                a.ropeK->setODtype(f16, key);
+            }
+            a.attn.setODtype(f16, key);
+            b.ffn.gateValue.setODtype(f16, key);
+            b.ffn.gatedMul.setODtype(f16, key);
         }
     }
 
@@ -238,16 +207,38 @@ struct DecodeNet : public vai::NeuralNet
             decAttn["V_cache"] = encAttn["V_cache"];
         }
 
-        velocityHead.setODtype(vai::Dtype::Fp32, dtypeKey());
+        const auto f16 = vai::Dtype::Fp16, f32 = vai::Dtype::Fp32;
+        const auto key = dtypeKey();
+
+        // Action expert: accumulate default, branch FP16, residual FP16 (its input included)
         for (auto& b : actionDecoder.blocks)
-            setBlockPrecision(b, actionPrecision, dtypeKey());
-        if (actionPrecision.residualFp16)
-            actionProj.setODtype(vai::Dtype::Fp16, dtypeKey());
-        if (actionPrecision.accF32)
         {
-            actionProj.setAccDtype(vai::Dtype::Fp32, dtypeKey());
-            velocityHead.setAccDtype(vai::Dtype::Fp32, dtypeKey());
+            auto& a = b.mhAttn;
+            // branch
+            b.norm1.setODtype(f16, key);
+            b.norm2.setODtype(f16, key);
+            a.projQ.setODtype(f16, key);
+            a.projK.setODtype(f16, key);
+            a.projV.setODtype(f16, key);
+            a.perQ.setODtype(f16, key);
+            a.perK.setODtype(f16, key);
+            a.perV.setODtype(f16, key);
+            if (a.ropeQ)
+            {
+                a.ropeQ->setODtype(f16, key);
+                a.ropeK->setODtype(f16, key);
+            }
+            a.attn.setODtype(f16, key);
+            b.ffn.gateValue.setODtype(f16, key);
+            b.ffn.gatedMul.setODtype(f16, key);
+            // residual
+            a.projOut.setODtype(f16, key);
+            b.ffn.out.setODtype(f16, key);
+            b.fma1.setODtype(f16, key);
+            b.fma2.setODtype(f16, key);
         }
+        actionProj.setODtype(f16, key);     // the tower's input, on its residual stream
+        velocityHead.setODtype(f32, key);   // the model's output
     }
 
     // Input: action [actionChunk, actionDim], initialized with noise.

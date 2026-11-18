@@ -70,7 +70,7 @@ build/bin/bench-pi05-migraphx
 
 Options:
 
-- vAi bench: `--workload <name>`, the workload of the framework compared with: `migraphx` (default), `trt` or `vlacpp`. The comparison benches always run their own. vAi runs FP16 weights and K/V cache; each block keeps its residual stream FP32 and writes its branch (norms, Q/K/V, attention, FFN hidden) FP16, and the vision tower accumulates its GEMMs in FP32 (`TowerPrecision` in [net.h](../../models/experimental/pi05/net.h)).
+- vAi bench: `--workload <name>`, the workload of the framework compared with: `migraphx` (default), `trt` or `vlacpp`. The comparison benches always run their own. vAi runs FP16 weights and K/V cache; each block keeps its residual stream FP32 and writes its branch (norms, Q/K/V, attention, FFN hidden) FP16, and the vision tower accumulates its GEMMs in FP32 (set node by node in each net's constructor in [net.h](../../models/experimental/pi05/net.h)).
 - `--showActions`: print the first five actions after the table
 - `--atol N`, `--rtol N`: tolerances against the workload's reference (default: `0.002`, `0.001`)
 - vla.cpp bench: `--model <path>` (or `VLA_MODEL_PATH`), another GGUF; `--config <path>` (or `VLA_CONFIG_PATH`), another runtime config than [`vla.cpp/runtime.json`](vla.cpp/runtime.json), which sets FP16 weights
@@ -108,15 +108,15 @@ Each latency cell is milliseconds per prediction, mean ± SD, with the fastest r
 
 On NVIDIA a Linear accumulates in its weight's dtype, FP16, unless told otherwise, and it rounds its input to FP16 on the way into the GEMM whatever dtype that input is stored in. Before tuning, vAi stored every activation FP32 (`oDefaultDtype`) and accumulated every GEMM in FP16: on `vlacpp`, 40.74 ± 0.06 ms, error 0.00225, just inside the tolerance.
 
-The tuning sets three switches per tower, `TowerPrecision` in [net.h](../../models/experimental/pi05/net.h):
+The tuning varies three settings per tower; each net's constructor in [net.h](../../models/experimental/pi05/net.h) sets the chosen ones node by node:
 
-- `branchFp16`: inside each block, the branch off the residual stream (the norms, Q/K/V, RoPE, attention, the FFN hidden and its gating) writes FP16. The GEMMs round these values to FP16 anyway, so storing them FP16 costs little precision and halves their memory traffic.
-- `accF32`: the tower's Linears accumulate in FP32.
-- `residualFp16`: the residual stream (the output projections that fold the residual in, the action expert's gated residuals) writes FP16 too. A Linear's folded residual must have its output's dtype, so the tower's input goes FP16 with it: the projector, the prompt embedding and their concat for the language tower, `actionProj` for the action expert. The velocity head, its Euler update and the final norms stay FP32.
+- FP16 branch: inside each block, the branch off the residual stream (the norms, Q/K/V, RoPE, attention, the FFN hidden and its gating) writes FP16. The GEMMs round these values to FP16 anyway, so storing them FP16 costs little precision and halves their memory traffic.
+- FP32 accumulation: the tower's Linears accumulate in FP32.
+- FP16 residual: the residual stream (the output projections that fold the residual in, the action expert's gated residuals) writes FP16 too. A Linear's folded residual must have its output's dtype, so the tower's input goes FP16 with it: the projector, the prompt embedding and their concat for the language tower, `actionProj` for the action expert. The velocity head, its Euler update and the final norms stay FP32.
 
-The chosen setting: `branchFp16` in every tower, `accF32` in the vision tower, `residualFp16` in the action expert.
+The chosen setting: FP16 branch in every tower, FP32 accumulation in the vision tower, FP16 residual in the action expert.
 
-First pass, on `vlacpp`, with `branchFp16` on in all three towers and `residualFp16` off, one run each:
+First pass, on `vlacpp`, with the FP16 branch on in all three towers and the FP16 residual off, one run each:
 
 | FP32 accumulation in | latency (ms) | max abs error |
 |---|---:|---:|
@@ -127,9 +127,9 @@ First pass, on `vlacpp`, with `branchFp16` on in all three towers and `residualF
 | all | 43.50 ± 0.84 | 0.00137 |
 
 - FP32 accumulation in the vision tower costs 0.7 ms and removes most of the error. The language tower's would cost 3–4 ms and the action expert's 1.5 ms, for no clear gain.
-- An FP32 K/V cache, tried before `branchFp16`, cost 0.2 ms and left the error unchanged (0.00225), so it stays FP16.
+- An FP32 K/V cache, tried before the FP16 branch, cost 0.2 ms and left the error unchanged (0.00225), so it stays FP16.
 
-Second pass, on both workloads, with `branchFp16` on in all three towers, one run each:
+Second pass, on both workloads, with the FP16 branch on in all three towers, one run each:
 
 | FP32 accumulation in | FP16 residual in | `trt` latency (ms) | `trt` error | `vlacpp` latency (ms) | `vlacpp` error |
 |---|---|---:|---:|---:|---:|
@@ -158,8 +158,8 @@ Second pass, on both workloads, with `branchFp16` on in all three towers, one ru
 |  |  | MIGraphX | 195.33 ± 4.17 | 190.27 | 0.00221 |
 
 - Result: vAi is 43.6 ms faster than MIGraphX (MIGraphX takes 29% longer), and MIGraphX's max abs error is 1.9 times vAi's.
-- Precision: both store FP16 weights and an FP16 K/V cache, both feed FP16 operands to their matrix multiplies (attention's P included), and both store each block's branch (norms, Q/K/V, attention, the FFN hidden) FP16. vAi runs the `TowerPrecision` [above](#vai-precision-tuning-nvidia): its residual stream stays FP32 in the vision and language towers and goes FP16 in the action expert, and everything outside the blocks (patch embedding, projector, prompt embedding, final norms, velocity head) stays FP32. It accumulates its GEMMs in FP32, AMD's default, so `accF32` changes nothing here, and computes norms, softmax, epilogues, RoPE, the condition table and the Euler update in FP32, rounding only what it stores. MIGraphX runs its FP16 bundle, constants folded, through MLIR: every activation stays FP16 between ops, the residual stream included, and only softmax, norm statistics, RoPE's sin/cos and the Euler update run in FP32. Op by op, for both: [docs/readme.md §9](docs/readme.md#9-정밀도).
+- Precision: both store FP16 weights and an FP16 K/V cache, both feed FP16 operands to their matrix multiplies (attention's P included), and both store each block's branch (norms, Q/K/V, attention, the FFN hidden) FP16. vAi runs the per-tower precision [above](#vai-precision-tuning-nvidia): its residual stream stays FP32 in the vision and language towers and goes FP16 in the action expert, and everything outside the blocks (patch embedding, projector, prompt embedding, final norms, velocity head) stays FP32. It accumulates its GEMMs in FP32, AMD's default, so the vision tower's FP32 accumulation changes nothing here, and computes norms, softmax, epilogues, RoPE, the condition table and the Euler update in FP32, rounding only what it stores. MIGraphX runs its FP16 bundle, constants folded, through MLIR: every activation stays FP16 between ops, the residual stream included, and only softmax, norm statistics, RoPE's sin/cos and the Euler update run in FP32. Op by op, for both: [docs/readme.md §9](docs/readme.md#9-정밀도).
 - Accuracy: against `reference.py --cameras 2 --chunk 50 --steps 10`, over 1600 values. vAi passes at the default `atol 0.002`, `rtol 0.001` (0 of 1600 values outside). MIGraphX does not (1 of 1600), so its latency is printed only at `--atol 0.2 --rtol 0.1`, the tolerances both rows ran with, at which both pass.
 - Each row is the median, by mean, of three `scripts/run-amd.sh -- --atol 0.2 --rtol 0.1` runs: vAi 149.33 – 151.83 ms, MIGraphX 194.54 – 196.26 ms. Each one's max abs error is the same in its three runs.
-- `TowerPrecision` on AMD, in the same session, the vAi bench alone at its default tolerances, three runs each: before it, with every activation FP32 as in e979c71, 178.24 – 182.41 ms, error 0.000981; with it, 149.05 – 150.35 ms, error 0.00116.
+- The per-tower precision on AMD, in the same session, the vAi bench alone at its default tolerances, three runs each: before it, with every activation FP32 as in e979c71, 178.24 – 182.41 ms, error 0.000981; with it, 149.05 – 150.35 ms, error 0.00116.
 - The APU shares its power with the CPU, so the clock under load stays below the lock: sclk 2504 – 2760 MHz while vAi ran, 2449 – 2898 MHz while MIGraphX did (its samples include its graph compile).
