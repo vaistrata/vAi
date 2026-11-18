@@ -21,7 +21,7 @@
 | [Identity](#identity) | Pass-through node (no computation) | None |
 | [IndexCopy](#indexcopy) | write source slices at listed indices, as torch.index_copy | `index-copy.comp` |
 | [LayerNorm](#layernorm) | layer normalization over the feature axis, single kernel | `layer-norm.comp` |
-| [Linear](#linear) | O = I · Wᵀ, split between two output decompositions | `linear-pack-intel.comp`, `linear-slab.comp`, `linear-tile-intel.comp`, `linear-cm-nv.comp`, `linear-cm.comp`, `linear-tile.comp`, `linear-reduce.comp` |
+| [Linear](#linear) | O = I · Wᵀ, split between two output decompositions | `linear-pack-intel.comp`, `linear-preshuffle.comp`, `linear-slab.comp`, `linear-tile-intel.comp`, `linear-cm-amd.comp`, `linear-cm-nv.comp`, `linear-cm.comp`, `linear-tile.comp`, `linear-reduce.comp` |
 | [Mul](#mul) | Element-wise multiplication | `mul.comp` |
 | [NearestUpsample](#nearestupsample) | Replicates CHW pixels by an integer scale factor. | `upsample.comp` |
 | [Permute](#permute) | Permutes the axes of a tensor of any rank. | `permute.comp` |
@@ -767,6 +767,11 @@ frame, chosen per device in selectLinearTile(): scalar
 (linear-tile, each thread accumulates its own outputs) and
 cooperative-matrix (linear-cm, subgroup MMA tiles; NVIDIA's Fill tiles
 run linear-cm-nv, which masks the K tail per k-block).
+- AMD on RADV : linear-cm-amd for the
+tuned shapes, as a wave32 lane schedule (amdLinearLaneTile) or, on Strix,
+a cooperative schedule with its own load orders (amdLinearTile),
+reading W packed once on the GPU (linear-preshuffle, packWeightAmd).
+Other shapes keep linear-cm, on those chips also M-first or prefetching.
 - Intel (useIntelTile; every M, slab included): linear-tile-intel, a port of
 OpenVINO's fully_connected_gpu_bf_tiled, reading W packed once on the GPU
 (packWeightIntel); its tile choice is intelTileParams(), its split
@@ -779,8 +784,8 @@ change selects a different tile, the pipeline is re-requested from the pool.
 Split-K (splitSize option; 0 selects the vendor's rule per shape)
 accumulates partials P[splitCount, M, N] (oDtype) in a temporary buffer
 and folds them in a second pass (linear-reduce); bias / epilogue / the
-residual live in that reduce pass, so requesting them without splitting still
-runs the reduce as a plain epilogue pass (splitCount = 1).
+residual live in that reduce pass, unless linear-cm-amd fuses them into an
+unsplit tile.
 
 O = s · epilogue(I · Wᵀ + bias) + R      residualOrder AfterEpilogue
 O = s · epilogue(I · Wᵀ + bias + R)      residualOrder BeforeEpilogue
@@ -795,8 +800,10 @@ weight loader filled it.
 **Kernels**
 
 - `vai/shaders/linear-pack-intel.comp`
+- `vai/shaders/linear-preshuffle.comp`
 - `vai/shaders/linear-slab.comp`
 - `vai/shaders/linear-tile-intel.comp`
+- `vai/shaders/linear-cm-amd.comp`
 - `vai/shaders/linear-cm-nv.comp`
 - `vai/shaders/linear-cm.comp`
 - `vai/shaders/linear-tile.comp`
