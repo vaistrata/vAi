@@ -1,163 +1,176 @@
-site_name: vAi                                  # 탭 제목 · 좌상단 로고 옆 이름
-site_description: 그래프 DSL 기반 Vulkan 추론 엔진   # <meta description> — 검색엔진·SNS 미리보기
-repo_url: https://github.com/vaistrata/vAi      # 우상단 저장소 링크
-repo_name: vAi                                  # 그 링크에 보일 텍스트
-edit_uri: edit/master/docs/                     # "이 페이지 편집" 버튼이 향할 경로
+site_name: vAi                                  # Tab title and the name next to the top-left logo
+# <meta description>, shown by search engines and link previews. This is the
+# text of the default locale (en). The Korean text is
+# languages[locale: ko].site_description under the i18n plugin.
+site_description: Vulkan inference engine built on a graph DSL
+repo_url: https://github.com/vaistrata/vAi      # Repository link at the top right
+repo_name: vAi                                  # Text shown for that link
+edit_uri: edit/master/docs/                     # Path the "edit this page" button points to
 
 theme:
   name: material
-  # UI 문구 언어는 i18n 플러그인이 로케일마다 바꿔 끼운다 (여기서 고정하지 않는다).
+  # The i18n plugin sets the UI language per locale, so it is not fixed here.
   features:
-    # navigation.instant 은 켜지 않는다 — 켜면 헤더의 언어 선택기가 "지금 보는
-    # 페이지의 다른 언어판" 이 아니라 그 언어의 첫 페이지로만 갈 수 있다
-    # (i18n 플러그인이 빌드 때 경고로 알려준다). 문맥 유지가 더 중요하다.
-    - navigation.tracking                       # 스크롤에 맞춰 주소창 앵커 갱신
-    - navigation.top                            # "맨 위로" 버튼
-    - navigation.indexes                        # 섹션 제목 자체에 페이지를 붙일 수 있게 (nav 참조)
-    - content.code.copy                         # 코드블록 복사 버튼
-    # content.action.edit 은 아직 켜지 않는다 — 페이지마다 GitHub 편집 화면으로
-    # 가는 연필 버튼이 붙는다. 외부 기여를 받을 준비가 되면 켤 것.
-    - search.suggest                            # 검색어 자동완성
-  # 팔레트는 한 벌뿐이다 — website/DESIGN.md 는 다크 캔버스 전용이고
-  # 라이트 팔레트를 "Known Gap" 으로 남겨 두었다(브랜드 잉크색 ember 가
-  # 흰 바탕에서 2.9:1). 없는 팔레트를 여기서 발명하지 않으므로 토글도 없다.
-  # custom 은 색을 테마에서 고르지 않고 extra.css 가 정한다는 뜻이다.
+    # navigation.instant stays off. With it on, the language selector in the
+    # header can only go to the first page of the other language, not to the
+    # other-language version of the page being read (the i18n plugin warns
+    # about this at build time). Keeping the page matters more.
+    - navigation.tracking                       # Updates the anchor in the address bar while scrolling
+    - navigation.top                            # "Back to top" button
+    - navigation.indexes                        # Lets a section title have a page of its own (see nav)
+    - content.code.copy                         # Copy button on code blocks
+    # content.action.edit stays off for now. It adds a pencil button to every
+    # page that opens the GitHub edit screen. Turn it on when the project is
+    # ready to take outside contributions.
+    - search.suggest                            # Search suggestions
+  # There is one palette only. website/DESIGN.md covers the dark canvas alone
+  # and leaves the light palette as a "Known Gap" (the brand ink color, ember,
+  # is 2.9:1 on white). No palette is invented here, so there is no toggle.
+  # custom means extra.css sets the colors, not the theme.
   palette:
     scheme: slate
     primary: custom
     accent: custom
 
-  # 테마가 Google Fonts 에서 Roboto 를 받아오지 않게 끈다.
-  # 서체는 extra.css 가 저장소 안의 Archivo 로 지정한다.
+  # Stops the theme from loading Roboto from Google Fonts.
+  # extra.css sets the typeface to the Archivo files in this repository.
   font: false
 
-# 좌측 메뉴의 순서와 이름. 언어는 여기서 가르지 않는다 — 두 언어가 각자
-# 자기 nav 를 최상위로 가지고, 전환은 헤더 우측의 언어 선택기가 한다
-# (아래 plugins 의 i18n). 이 nav 는 기본 로케일(ko)의 것이고, 영어 nav 는
-# i18n 의 languages[locale: en].nav 에 있다.
+# Order and names of the left menu. Languages are not split here: each language
+# has its own nav at the top level, and the language selector at the right of
+# the header switches between them (the i18n plugin below). This nav belongs to
+# the default locale (en). The Korean nav is languages[locale: ko].nav under
+# the i18n plugin.
 #
-# 두 언어는 파일이 1:1로 대응한다. 한쪽에 장을 추가하면 다른 쪽도 같이 고칠 것.
+# The two languages have the same files, one to one. When a chapter is added to
+# one, change the other as well.
 nav:
-  - 개요: ko/index.md
-  - 빠른 실행: ko/02-quickstart.md
-  - vAi 사용법:
-      - ko/03-usage/README.md                   # 이름 없이 두면 섹션 제목을 눌렀을 때 열릴 페이지가 된다
-      - 노드(Node): ko/03-usage/node.md
-      - 노드그룹(NodeGroup): ko/03-usage/node-group.md
-      - 신경망(NeuralNet): ko/03-usage/neural-net.md
-      - 텐서(Tensor): ko/03-usage/tensor.md
-      - 실행 파이프라인 요약: ko/03-usage/execution-pipeline.md
-      - 프로파일링: ko/03-usage/profiling.md
-  - 제공 모델:
-      - ko/04-models/README.md
-      - YOLOX: ko/04-models/yolox.md
-      - GPT-2: ko/04-models/gpt2.md
-      - Llama 3: ko/04-models/llama3.md
-      - Gemma 3: ko/04-models/gemma3.md
-  - 제공 노드들: ko/06-nodes.md
-  - 기여하기:
-      - ko/contributing/README.md               # 기여 절차와 자동 검사
-      - 커스텀 모델 작성: ko/contributing/models.md
-      - 커스텀 노드와 커널 작성: ko/contributing/nodes.md
-      - 커스텀 그룹 작성: ko/contributing/groups.md
-  - Vulkan 기본 개념: ko/09-vulkan-objects.md
+  - Overview: en/index.md
+  - Quickstart: en/02-quickstart.md
+  - Using vAi:
+      - en/03-usage/README.md                   # An entry without a name is the page that opens when the section title is clicked
+      - Node: en/03-usage/node.md
+      - NodeGroup: en/03-usage/node-group.md
+      - NeuralNet: en/03-usage/neural-net.md
+      - Tensor: en/03-usage/tensor.md
+      - Execution pipeline summary: en/03-usage/execution-pipeline.md
+      - Profiling: en/03-usage/profiling.md
+  - Supported models:
+      - en/04-models/README.md
+      - YOLOX: en/04-models/yolox.md
+      - GPT-2: en/04-models/gpt2.md
+      - Llama 3: en/04-models/llama3.md
+      - Gemma 3: en/04-models/gemma3.md
+  - Built-in nodes: en/06-nodes.md
+  - Contributing:
+      - en/contributing/README.md               # Contribution workflow and automated checks
+      - Writing custom models: en/contributing/models.md
+      - Writing custom nodes and kernels: en/contributing/nodes.md
+      - Writing custom groups: en/contributing/groups.md
+  - Vulkan basic concepts: en/09-vulkan-objects.md
 
-# docs/ 아래 파일은 nav 에 없어도 페이지가 만들어지고 검색에도 걸린다.
-# 문서는 전부 공개하고, 숨길 것만 적는다 (.gitignore 문법).
-# internals 는 내부 문서, tools 와 requirements.txt 는 빌드 기계 장치다.
+# A file under docs/ gets a page and is searchable even when it is not in nav.
+# Everything is published, and only what is hidden is listed (.gitignore syntax).
+# internals holds internal documents; tools and requirements.txt are build machinery.
 exclude_docs: |
   /internals/
   /tools/
   /requirements.txt
 
-# 테마 위에 얹는 스타일. 문서 소스는 건드리지 않는다.
+# Styles laid over the theme. The document sources are not touched.
 extra_css:
   - assets/extra.css
 
 markdown_extensions:
-  - admonition                                  # !!! note 강조 박스
-  - attr_list                                   # 요소에 {: .class } 로 속성 부여
-  - md_in_html                                  # HTML 태그 안의 마크다운도 처리
-  - tables                                      # 표
+  - admonition                                  # !!! note call-out boxes
+  - attr_list                                   # Attributes on elements with {: .class }
+  - md_in_html                                  # Processes Markdown inside HTML tags too
+  - tables                                      # Tables
 
-  # 기본 slugify 는 유니코드를 버려서 한글 헤딩이 _1, _2 가 된다.
-  # GitHub 은 한글 앵커를 그대로 만들므로 양쪽을 맞추려면 이 slugify 가 필요하다.
+  # The default slugify drops Unicode, so Korean headings become _1, _2.
+  # GitHub keeps Korean anchors as they are, and this slugify makes the site match.
   - toc:
-      permalink: true                           # 제목 옆 ¶ 링크
+      permalink: true                           # ¶ link next to each heading
       slugify: !!python/object/apply:pymdownx.slugs.slugify
         kwds:
           case: lower
 
-  - pymdownx.details                            # ??? 로 접히는 블록
-  - pymdownx.superfences:                       # 코드블록 중첩 허용
+  - pymdownx.details                            # Collapsible blocks with ???
+  - pymdownx.superfences:                       # Allows nested code blocks
       custom_fences:
-        # ```mermaid 를 코드가 아니라 다이어그램으로 렌더
+        # Renders ```mermaid as a diagram, not as code
         - name: mermaid
           class: mermaid
           format: !!python/name:pymdownx.superfences.fence_code_format
   - pymdownx.highlight:
-      anchor_linenums: true                     # 줄 번호마다 링크 가능한 앵커
-  - pymdownx.inlinehilite                       # 인라인 코드에도 문법 강조
-  - pymdownx.snippets                           # --8<-- 로 다른 파일 조각 삽입
+      anchor_linenums: true                     # A linkable anchor on each line number
+  - pymdownx.inlinehilite                       # Syntax highlighting for inline code too
+  - pymdownx.snippets                           # Inserts pieces of other files with --8<--
 
 plugins:
-  # 전문 검색 (결과물에 색인이 함께 생성됨). lang 은 적지 않는다 — i18n 이
-  # 로케일마다 색인을 다시 만들면서 그 언어에 맞는 lang 을 끼워 넣는다.
+  # Full-text search (the index is built into the output). lang is not set:
+  # the i18n plugin rebuilds the index per locale and fills in the matching lang.
   - search
 
-  # 언어별로 사이트를 한 번씩 빌드한다. docs/ko 는 사이트 루트(/), docs/en 은
-  # /en/ 아래로 들어가고, 헤더 우측에 두 언어를 오가는 선택기가 생긴다.
-  # 폴더 이름이 곧 로케일 코드라서 kor/eng 가 아니라 ko/en 이어야 한다.
+  # Builds the site once per language. docs/en goes to the site root (/) and
+  # docs/ko under /ko/, and a selector for the two languages appears at the
+  # right of the header. The folder name is the locale code, so it has to be
+  # ko/en, not kor/eng.
   #
-  # 기본 로케일을 영어로 바꾸려면 default: true 를 en 으로 옮기고 nav 두 벌의
-  # 위치를 맞바꾼다 (루트 nav 가 기본 로케일의 것이다).
+  # To change the default locale, move default: true and swap the two navs and
+  # the two site_description values (the top-level ones belong to the default
+  # locale). The addresses move with it: the default locale sits at / and the
+  # others at /<locale>/, so /ko/ and /en/ trade places. Update the links that
+  # point to this site from outside as well.
   - i18n:
       docs_structure: folder
       languages:
-        - locale: ko
-          name: 한국어
-          default: true
         - locale: en
           name: English
+          default: true
+        - locale: ko
+          name: 한국어
+          site_description: 그래프 DSL 기반 Vulkan 추론 엔진
           nav:
-            - Overview: en/index.md
-            - Quickstart: en/02-quickstart.md
-            - Using vAi:
-                - en/03-usage/README.md
-                - Node: en/03-usage/node.md
-                - NodeGroup: en/03-usage/node-group.md
-                - NeuralNet: en/03-usage/neural-net.md
-                - Tensor: en/03-usage/tensor.md
-                - Execution pipeline summary: en/03-usage/execution-pipeline.md
-                - Profiling: en/03-usage/profiling.md
-            - Supported models:
-                - en/04-models/README.md
-                - YOLOX: en/04-models/yolox.md
-                - GPT-2: en/04-models/gpt2.md
-                - Llama 3: en/04-models/llama3.md
-                - Gemma 3: en/04-models/gemma3.md
-            - Built-in nodes: en/06-nodes.md
-            - Contributing:
-                - en/contributing/README.md
-                - Writing custom models: en/contributing/models.md
-                - Writing custom nodes and kernels: en/contributing/nodes.md
-                - Writing custom groups: en/contributing/groups.md
-            - Vulkan basic concepts: en/09-vulkan-objects.md
+            - 개요: ko/index.md
+            - 빠른 실행: ko/02-quickstart.md
+            - vAi 사용법:
+                - ko/03-usage/README.md
+                - 노드(Node): ko/03-usage/node.md
+                - 노드그룹(NodeGroup): ko/03-usage/node-group.md
+                - 신경망(NeuralNet): ko/03-usage/neural-net.md
+                - 텐서(Tensor): ko/03-usage/tensor.md
+                - 실행 파이프라인 요약: ko/03-usage/execution-pipeline.md
+                - 프로파일링: ko/03-usage/profiling.md
+            - 제공 모델:
+                - ko/04-models/README.md
+                - YOLOX: ko/04-models/yolox.md
+                - GPT-2: ko/04-models/gpt2.md
+                - Llama 3: ko/04-models/llama3.md
+                - Gemma 3: ko/04-models/gemma3.md
+            - 제공 노드들: ko/06-nodes.md
+            - 기여하기:
+                - ko/contributing/README.md
+                - 커스텀 모델 작성: ko/contributing/models.md
+                - 커스텀 노드와 커널 작성: ko/contributing/nodes.md
+                - 커스텀 그룹 작성: ko/contributing/groups.md
+            - Vulkan 기본 개념: ko/09-vulkan-objects.md
 
-# 빌드마다 6장을 헤더 스탬프에서 다시 만든다.
+# Regenerates chapter 6 from the header stamps on every build.
 hooks:
   - docs/tools/mkdocs_hook.py
 
-# hook 이 돌려면 빌드가 일어나야 한다. serve 가 노드 헤더 변경도 감지하도록.
-# docs/ 와 mkdocs.yml 은 기본 감시 대상이라 적지 않는다.
+# The hook runs only when a build happens, so serve watches the node headers
+# too. docs/ and mkdocs.yml are watched by default and are not listed.
 watch:
   - vai/nodes
 
-# 문서는 GitHub 에서 읽는 것이 1차, 사이트가 2차다. ../vai, ../models 로 나가는
-# 링크는 GitHub 에서는 정상이지만 사이트에는 대상이 없어 not_found 가 뜬다.
-# repo_url 이 확정되면 절대 URL 로 바꾸고 이 예외를 없앨 것.
+# The documents are read on GitHub first and on the site second. Links that go
+# out to ../vai and ../models work on GitHub, but the site has no target for
+# them and reports not_found. Once repo_url is settled, change them to absolute
+# URLs and remove this exception.
 validation:
   links:
     not_found: ignore
   nav:
-    omitted_files: ignore                       # nav 에 없는 문서가 있어도 경고하지 않음
+    omitted_files: ignore                       # No warning when a document is not in nav
