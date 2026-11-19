@@ -72,7 +72,9 @@ class Tensor
 {
 public:
     Tensor(std::vector<size_t> shape, migraphx_shape_datatype_t type)
-        : shape_(std::move(shape)), type_(type), buffer_(migraphx::shape(type, shape_).bytes())
+    : shape_(std::move(shape))
+    , type_(type)
+    , buffer_(migraphx::shape(type, shape_).bytes())
     {
     }
 
@@ -253,14 +255,14 @@ struct Pi05Config
     int32_t actionDim = 0;
     int32_t numLayers = 0;
     int32_t prefixLength = 0;
-    int32_t numPromptTokens = 0; // the exported prompt length; prompts must match it exactly
+    int32_t numPromptTokens = 0;   // the exported prompt length; prompts must match it exactly
     int32_t numDenoiseSteps = 0;   // the steps the bundle was exported and referenced with
 };
 
 
 struct ActionChunk
 {
-    std::vector<float> normalizedActions; // [actionHorizon, actionDim]
+    std::vector<float> normalizedActions;   // [actionHorizon, actionDim]
 };
 
 
@@ -410,8 +412,8 @@ private:
     {
         const size_t tokenCount = size_t(config_.numPromptTokens);
         const size_t prefixLength = size_t(config_.prefixLength);
-        actionSpec_ = migraphx::shape(
-            migraphx_shape_float_type, { 1, size_t(config_.actionHorizon), size_t(config_.actionDim) });
+        actionSpec_ =
+            migraphx::shape(migraphx_shape_float_type, { 1, size_t(config_.actionHorizon), size_t(config_.actionDim) });
         imageSpec_ = migraphx::shape(
             migraphx_shape_float_type,
             { 1,

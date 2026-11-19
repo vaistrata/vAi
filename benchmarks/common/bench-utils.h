@@ -127,7 +127,7 @@ inline constexpr double spreadLimit = 0.10;
 
 // Runs fn nWarm times untimed, then nReps times timed, into latencyMs (milliseconds per call).
 // fn returns void, or bool where false stops the measurement and makes this return false.
-template<typename Fn>
+template <typename Fn>
 bool measureLatency(int nWarm, int nReps, Fn&& fn, std::vector<double>& latencyMs)
 {
     auto call = [&] {
@@ -166,8 +166,12 @@ inline std::vector<float> readReference(const std::string& path, size_t count)
         return {};
     if (size_t(file.tellg()) != count * sizeof(float))
     {
-        fprintf(stderr, "error: %s holds %lld bytes, expected %zu\n", path.c_str(), (long long)file.tellg(),
-                count * sizeof(float));
+        fprintf(
+            stderr,
+            "error: %s holds %lld bytes, expected %zu\n",
+            path.c_str(),
+            (long long)file.tellg(),
+            count * sizeof(float));
         exit(1);
     }
     std::vector<float> values(count);
@@ -290,8 +294,7 @@ inline void printVLARow(const char* framework, int nImage, int nText, const std:
     printf(" %12s  %-18s  %9.2f ± %-6.2f  %9.2f\n", prompt, framework, s.mean, s.sd, minMs);
     if (s.sd > spreadLimit * s.mean)
         printf(
-            "          warning: SD is %.0f%% of the mean; a sample ran slow, rerun this row\n",
-            100.0 * s.sd / s.mean);
+            "          warning: SD is %.0f%% of the mean; a sample ran slow, rerun this row\n", 100.0 * s.sd / s.mean);
     fflush(stdout);
 }
 
@@ -330,8 +333,9 @@ struct VLABenchOptions
 
 // One untimed prediction checked against options.referencePath. True when it matches or
 // when there is no reference to check.
-template<typename Predict, typename Actions>
-bool checkVLAReference(const VLABenchOptions& options, unsigned horizon, unsigned dim, Predict&& predict, Actions&& actions)
+template <typename Predict, typename Actions>
+bool checkVLAReference(
+    const VLABenchOptions& options, unsigned horizon, unsigned dim, Predict&& predict, Actions&& actions)
 {
     const std::vector<float> reference = readReference(options.referencePath, size_t(horizon) * dim);
     if (reference.empty())
@@ -344,11 +348,11 @@ bool checkVLAReference(const VLABenchOptions& options, unsigned horizon, unsigne
     printf("reference: %s\n", options.referencePath.c_str());
     if (options.checkedDims && options.checkedDims < dim)
         printf("compared: the first %u of %u action dims\n", options.checkedDims, dim);
-    
+
     std::vector<double> once;
     if (!measureLatency(0, 1, predict, once))
         return false;
-    
+
     if (!checkReference(actions(), reference, options.atol, options.rtol, dim, options.checkedDims))
     {
         fprintf(stderr, "error: reference mismatch; latency results suppressed\n");
@@ -381,20 +385,21 @@ bool runVLARow(
 // A bench of one prompt: the reference check, the table of one row and optionally the
 // actions. Returns the process exit code.
 template <typename Predict, typename Actions>
-int runVLABench(const char* framework, int nImage, int nText, const VLABenchOptions& options,
-    unsigned horizon, unsigned dim, Predict&& predict, Actions&& actions)
+int runVLABench(
+    const char* framework, int nImage, int nText, const VLABenchOptions& options, unsigned horizon, unsigned dim,
+    Predict&& predict, Actions&& actions)
 {
     if (!checkVLAReference(options, horizon, dim, predict, actions))
         return 1;
 
     printVLAHeader(options.nWarm, options.nReps, options.denoiseSteps, horizon);
-    
+
     if (!runVLARow(framework, nImage, nText, options, horizon, dim, predict, actions))
         return 1;
-    
+
     if (options.showActions)
         printActionChunk(actions(), horizon, dim);
-    
+
     return 0;
 }
 

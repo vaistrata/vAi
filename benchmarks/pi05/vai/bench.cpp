@@ -98,7 +98,7 @@ int main(int argc, char** argv)
     for (auto checkpoint : modelConfigs)
         if (!strcmp(checkpoint().variant, config.dataset))
             modelConfig = checkpoint;
-    
+
     if (!modelConfig)
     {
         fprintf(stderr, "error: vAi has no pi0.5 checkpoint for the dataset '%s'\n", config.dataset);
@@ -164,7 +164,7 @@ int main(int argc, char** argv)
     common::printVlaConfig(config, inputs);
     options.referencePath = config.referencePath().string();
     options.denoiseSteps = config.denoiseSteps;
-    
+
     return runVLABench(
         "vAi",
         int(config.imageTokens()),

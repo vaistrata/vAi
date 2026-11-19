@@ -60,7 +60,7 @@ struct ModelConfig
         };
     }
 
-    static constexpr ModelConfig _LIBERO()
+    static constexpr ModelConfig _LIBERO()   // NOLINT(bugprone-reserved-identifier,readability-identifier-naming)
     {
         return {
             .variant = "libero",

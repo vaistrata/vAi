@@ -232,14 +232,15 @@ int main(int argc, char** argv)
 
     // Each prediction includes H2D pixels, inference and the host action chunk.
     // Edge-LLM uploads host tokens and resets the configured initial noise internally.
-    auto predict = [&]() -> bool
-    {
-        if (!checkCuda(cudaMemcpyAsync(
-            inImages.rawPointer(),
-            halfPixels.data(),
-            halfPixels.size() * sizeof(__half),
-            cudaMemcpyHostToDevice,
-            stream.handle), "cudaMemcpyAsync(pixels)"))
+    auto predict = [&]() -> bool {
+        if (!checkCuda(
+                cudaMemcpyAsync(
+                    inImages.rawPointer(),
+                    halfPixels.data(),
+                    halfPixels.size() * sizeof(__half),
+                    cudaMemcpyHostToDevice,
+                    stream.handle),
+                "cudaMemcpyAsync(pixels)"))
             return false;
 
         auto chunk = policy->inferTensors(inImages, inputs.tokens, 1);
@@ -261,7 +262,7 @@ int main(int argc, char** argv)
     options.referencePath = config.referencePath().string();
     options.denoiseSteps = config.denoiseSteps;
     auto actions = [&] { return (const float*)nextAction.data(); };
-    
+
     return runVLABench(
         "TensorRT Edge-LLM",
         int(config.imageTokens()),

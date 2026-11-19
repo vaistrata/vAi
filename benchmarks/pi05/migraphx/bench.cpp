@@ -158,9 +158,7 @@ int main(int argc, char** argv)
         if (!std::filesystem::is_regular_file(bundle / file, status))
         {
             fprintf(
-                stderr,
-                "error: %s is missing; see benchmarks/SETUP.md, MIGraphX\n",
-                (bundle / file).string().c_str());
+                stderr, "error: %s is missing; see benchmarks/SETUP.md, MIGraphX\n", (bundle / file).string().c_str());
             return 1;
         }
     }
@@ -201,8 +199,7 @@ int main(int argc, char** argv)
     // The bundle keeps the shapes it was exported with.
     if (modelCfg.numDenoiseSteps != int32_t(config.denoiseSteps) ||
         modelCfg.actionHorizon != int32_t(config.actionChunk) ||
-        modelCfg.actionDim != int32_t(pi05::Pi05Model::actionDim) ||
-        modelCfg.numViews != int32_t(config.cameras))
+        modelCfg.actionDim != int32_t(pi05::Pi05Model::actionDim) || modelCfg.numViews != int32_t(config.cameras))
     {
         fprintf(
             stderr,
@@ -248,16 +245,15 @@ int main(int argc, char** argv)
 
     // Each prediction includes H2D pixels, inference and the host action chunk.
     // The runtime uploads host tokens and the configured initial noise internally.
-    auto predict = [&]() -> bool
-    {
+    auto predict = [&]() -> bool {
         if (!checkHip(
-            hipMemcpyAsync(
-                inImages.rawPointer(),
-                inputs.pixels.data(),
-                inputs.pixels.size() * sizeof(float),
-                hipMemcpyHostToDevice,
-                stream.handle),
-            "hipMemcpyAsync(pixels)"))
+                hipMemcpyAsync(
+                    inImages.rawPointer(),
+                    inputs.pixels.data(),
+                    inputs.pixels.size() * sizeof(float),
+                    hipMemcpyHostToDevice,
+                    stream.handle),
+                "hipMemcpyAsync(pixels)"))
             return false;
 
         auto chunk = policy->inferTensors(inImages, inputs.tokens, 1);

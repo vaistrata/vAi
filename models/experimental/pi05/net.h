@@ -128,10 +128,9 @@ struct PrefillNet : public vai::NeuralNet
             a.perK.setODtype(f16, key);
             a.perV.setODtype(f16, key);
             if (a.ropeQ)
-            {
                 a.ropeQ->setODtype(f16, key);
+            if (a.ropeK)
                 a.ropeK->setODtype(f16, key);
-            }
             a.attn.setODtype(f16, key);
             b.ffn.gateValue.setODtype(f16, key);
             b.ffn.gatedMul.setODtype(f16, key);
@@ -224,10 +223,9 @@ struct DecodeNet : public vai::NeuralNet
             a.perK.setODtype(f16, key);
             a.perV.setODtype(f16, key);
             if (a.ropeQ)
-            {
                 a.ropeQ->setODtype(f16, key);
+            if (a.ropeK)
                 a.ropeK->setODtype(f16, key);
-            }
             a.attn.setODtype(f16, key);
             b.ffn.gateValue.setODtype(f16, key);
             b.ffn.gatedMul.setODtype(f16, key);

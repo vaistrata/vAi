@@ -78,8 +78,9 @@ bool readActionStats(const char* path, const vla_config& config, ActionStats& st
         return false;
     }
     const int64_t modeKey = gguf_find_key(ctx.get(), "pi05.norm_mode");
-    stats.quantiles = modeKey >= 0 && gguf_get_kv_type(ctx.get(), modeKey) == GGUF_TYPE_STRING &&
-                      !strcmp(gguf_get_val_str(ctx.get(), modeKey), "quantiles");
+    stats.quantiles =
+        modeKey >= 0 && gguf_get_kv_type(ctx.get(), modeKey) == GGUF_TYPE_STRING &&
+        !strcmp(gguf_get_val_str(ctx.get(), modeKey), "quantiles");
     const size_t n = size_t(config.real_action_dim);
     stats.q01.assign(n, -1.0f);
     stats.q99.assign(n, 1.0f);
@@ -218,8 +219,8 @@ int main(int argc, char** argv)
         return 1;
     }
     if (config.max_state_dim != int64_t(common::Pi05Model::actionDim) ||
-        config.max_action_dim != int64_t(common::Pi05Model::actionDim) ||
-        config.n_suffix != int64_t(vla.actionChunk) || config.num_steps != int32_t(vla.denoiseSteps))
+        config.max_action_dim != int64_t(common::Pi05Model::actionDim) || config.n_suffix != int64_t(vla.actionChunk) ||
+        config.num_steps != int32_t(vla.denoiseSteps))
     {
         fprintf(
             stderr,
@@ -272,8 +273,7 @@ int main(int argc, char** argv)
     std::unique_ptr<float, decltype(&vla_free_actions)> nextAction(nullptr, &vla_free_actions);
 
     // One synchronous public call includes input upload and host action readback.
-    auto predict = [&]() -> bool
-    {
+    auto predict = [&]() -> bool {
         float* actions = nullptr;
         int64_t numValues = 0;
         const int32_t status = vla_predict(model.get(), &input, &actions, &numValues);
@@ -320,14 +320,13 @@ int main(int argc, char** argv)
     options.denoiseSteps = vla.denoiseSteps;
     std::vector<float> modelActions(vla.actionCount());
 
-    auto actions = [&]
-    {
+    auto actions = [&] {
         if (!denormalized)
             return (const float*)nextAction.get();
 
         std::memcpy(modelActions.data(), nextAction.get(), modelActions.size() * sizeof(float));
         stats.normalize(modelActions.data(), vla.actionChunk, common::Pi05Model::actionDim);
-        
+
         return (const float*)modelActions.data();
     };
 
