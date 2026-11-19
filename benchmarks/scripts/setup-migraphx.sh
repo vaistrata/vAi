@@ -57,6 +57,10 @@ declare -A ROCM_SHA256=(
     [gfx1151]=50deb993035bc2f6a5aba5e3de8d476d8c512a2eec2cbfd5aa569d71e0b8b337
 )
 
+if [ "$(uname -s)" != Linux ] || [ "$(uname -m)" != x86_64 ]; then
+    echo "MIGraphX's packages are for Linux x86_64 only" >&2
+    exit 1
+fi
 [ -n "${HOME:-}" ] || { echo "HOME is not set: the install lives under \$HOME/.cache; set it and re-run" >&2; exit 2; }
 if [ "$(id -u)" -eq 0 ]; then
     echo "warning: running as root, so this installs into root's cache ($HOME), not yours" >&2
@@ -88,6 +92,9 @@ Options:
 USAGE
 }
 
+#------------------------------------------------------------------------------
+# Options
+#------------------------------------------------------------------------------
 while [ $# -gt 0 ]; do
     case "$1" in
         --arch)      ARCH="${2:?--arch needs a name, e.g. gfx1151}"; shift 2 ;;
@@ -105,6 +112,9 @@ link_install() {
     rm -f "$REG_DIR"/vai-*
 }
 
+#------------------------------------------------------------------------------
+# Uninstall
+#------------------------------------------------------------------------------
 if [ $UNINSTALL -eq 1 ]; then
     if [ "$(readlink "$LINK" 2>/dev/null || true)" = "$PREFIX" ]; then
         rm -f "$LINK"
@@ -115,8 +125,12 @@ if [ $UNINSTALL -eq 1 ]; then
     exit 0
 fi
 
+#------------------------------------------------------------------------------
+# GPU architecture: --arch, else the first GPU's
+#
 # The first GPU's LLVM target, from the amdgpu driver's topology: gfx_target_version
 # 110501 is gfx1151 (major, then minor and stepping in hex).
+#------------------------------------------------------------------------------
 detectArch() {
     local node version
     for node in /sys/class/kfd/kfd/topology/nodes/*/properties; do
@@ -133,22 +147,23 @@ PIN="$VERSION-$REVISION rocm-$ROCM_VERSION $ARCH"
 
 #------------------------------------------------------------------------------
 # Already installed?
+#
+# Reinstalls unless the release, its ROCm and the GPU all match the stamp.
 #------------------------------------------------------------------------------
-if [ $FORCE -eq 0 ] && [ -f "$CONFIG" ] && [ "$(cat "$STAMP" 2>/dev/null)" = "$PIN" ]; then
-    link_install    # restore the link if it was removed by hand
-    echo "MIGraphX $VERSION with ROCm $ROCM_VERSION ($ARCH) is already installed at $PREFIX"
-    echo "linked from $LINK (re-run with --force to reinstall it)"
-    exit 0
+if [ -f "$CONFIG" ]; then
+    installedPin="$(cat "$STAMP" 2>/dev/null || true)"
+    if [ $FORCE -eq 0 ] && [ "$installedPin" = "$PIN" ]; then
+        link_install    # restore the link if it was removed by hand
+        echo "MIGraphX $VERSION with ROCm $ROCM_VERSION ($ARCH) is already installed at $PREFIX"
+        echo "linked from $LINK (re-run with --force to reinstall it)"
+        exit 0
+    fi
+    echo "replacing the MIGraphX install at $PREFIX (${installedPin:-unknown})"
 fi
 
 #------------------------------------------------------------------------------
 # Prerequisites, checked before anything is downloaded
 #------------------------------------------------------------------------------
-if [ "$(uname -s)" != Linux ] || [ "$(uname -m)" != x86_64 ]; then
-    echo "MIGraphX's packages are for Linux x86_64 only" >&2
-    exit 1
-fi
-
 missing=""
 for tool in curl dpkg-deb tar sha256sum; do
     command -v "$tool" >/dev/null 2>&1 || missing="$missing $tool"
@@ -163,10 +178,6 @@ if [ ! -f "$DOWNLOAD/$ROCM_TARBALL" ] \
    && [ "$(curl -sIo /dev/null -w '%{http_code}' "$ROCM_REPO/$ROCM_TARBALL")" != 200 ]; then
     echo "AMD publishes no ROCm $ROCM_VERSION tarball for $ARCH ($ROCM_REPO/$ROCM_TARBALL)" >&2
     exit 1
-fi
-
-if [ -f "$CONFIG" ]; then
-    echo "replacing the MIGraphX install at $PREFIX"
 fi
 
 echo "=============================================================="
@@ -254,7 +265,7 @@ tar -xzf "$DOWNLOAD/$ROCM_TARBALL" -C "$rocm" --wildcards "${ROCM_MEMBERS[@]}"
     || { echo "$ROCM_TARBALL lacks the expected runtime libraries" >&2; exit 1; }
 
 #------------------------------------------------------------------------------
-# Swap the prefix in
+# Install: swap the prefix in
 #
 # The old install is removed only once everything is unpacked; signals are held
 # off meanwhile so a Ctrl-C cannot leave a half-installed prefix.
@@ -264,6 +275,10 @@ trap '' INT TERM
 rm -rf "$PREFIX"
 mv "$staging/$PKG_ROOT" "$PREFIX"
 printf '%s\n' "$PIN" > "$STAMP"
+
+#------------------------------------------------------------------------------
+# Link for the bench's CMake, which sets migraphx_DIR from it
+#------------------------------------------------------------------------------
 link_install
 trap - INT TERM
 
@@ -273,5 +288,10 @@ trap - INT TERM
 echo
 echo "installed MIGraphX $VERSION with the ROCm $ROCM_VERSION runtime for $ARCH ($(du -sh "$PREFIX" | cut -f1)) at:"
 echo "  $PREFIX"
-echo "linked from $LINK"
+echo "linked for the bench's CMake at $LINK"
 echo "downloads kept in $DOWNLOAD ($(du -sh "$DOWNLOAD" | cut -f1)); --uninstall removes them"
+echo
+echo "Next:"
+echo "  ./benchmarks/pi05/scripts/export-migraphx.sh    # the ONNX bundle"
+echo "  cmake -B build -DCMAKE_BUILD_TYPE=Release -DVAI_BUILD_BENCH=ON"
+echo "  cmake --build build --target bench-pi05-migraphx"

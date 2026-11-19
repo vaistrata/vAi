@@ -180,9 +180,12 @@ Each section below gives the framework's official way to make its model files fi
 
 [setup-vlacpp.sh](scripts/setup-vlacpp.sh) installs vla.cpp `v0.4.0` on its CUDA backend as shared libraries and links it at `~/.cache/vai/vla.cpp`, where CMake reads `vla_ROOT`. It keeps the clone, and the llama.cpp fetched into its `_deps/`, in `~/.cache/vai/vla.cpp-v0.4.0-src`; only the build trees go after the install.
 
+It builds for one CUDA architecture, the SM without its dot (86 RTX 30, 89 RTX 40, 90 H100, 120 RTX 50), as vla.cpp's README passes it in `CMAKE_CUDA_ARCHITECTURES`. The script asks for it, offering the one `nvidia-smi` reports for GPU `GPU_INDEX` (default 0); `--cuda-arch` or `CUDA_ARCH` answers it up front, and without a terminal the GPU's own is taken. A later run with another architecture rebuilds.
+
 ```bash
-./benchmarks/scripts/setup-vlacpp.sh                # clone + CUDA build + install + link, ~20 min
-./benchmarks/scripts/setup-vlacpp.sh --keep-build   # keep the build trees too, for a faster rebuild
+./benchmarks/scripts/setup-vlacpp.sh                  # asks for the architecture; clone + CUDA build + install + link, ~20 min
+./benchmarks/scripts/setup-vlacpp.sh --cuda-arch 89   # without asking
+./benchmarks/scripts/setup-vlacpp.sh --keep-build     # keep the build trees too, for a faster rebuild
 ./benchmarks/scripts/setup-vlacpp.sh --uninstall
 ```
 
@@ -233,11 +236,12 @@ sudo apt-get install libnvinfer-dev=$V libnvinfer-headers-dev=$V libnvinfer-safe
     libnvonnxparsers-dev=$V libnvonnxparsers10=$V
 ```
 
-[setup-trt-edge-llm.sh](scripts/setup-trt-edge-llm.sh) installs TensorRT Edge-LLM `v0.11.1`: its C++ libraries, the experimental pi0.5 runtime and the policy tools (`pi05_policy_build`), with its CuTe DSL kernels for the SM of GPU `GPU_INDEX` (default 0; `CUDA_ARCH` names another). It links the install at `~/.cache/vai/TensorRT-Edge-LLM`, where CMake reads `TensorRTEdgeLLM_ROOT`, and keeps the clone with its submodules in `~/.cache/vai/TensorRT-Edge-LLM-v0.11.1-src`, from which the export below installs its exporter.
+[setup-trt-edge-llm.sh](scripts/setup-trt-edge-llm.sh) installs TensorRT Edge-LLM `v0.11.1`: its C++ libraries, the experimental pi0.5 runtime and the policy tools (`pi05_policy_build`), with its CuTe DSL kernels for the SM of GPU `GPU_INDEX` (default 0; `--cuda-arch` or `CUDA_ARCH` names another, and a later run with another SM rebuilds). It links the install at `~/.cache/vai/TensorRT-Edge-LLM`, where CMake reads `TensorRTEdgeLLM_ROOT`, and keeps the clone with its submodules in `~/.cache/vai/TensorRT-Edge-LLM-v0.11.1-src`, from which the export below installs its exporter.
 
 ```bash
-./benchmarks/scripts/setup-trt-edge-llm.sh                # clone + CuTe DSL kernels + build + install + link
-./benchmarks/scripts/setup-trt-edge-llm.sh --keep-build   # keep the build tree too, for a faster rebuild
+./benchmarks/scripts/setup-trt-edge-llm.sh                  # clone + CuTe DSL kernels + build + install + link
+./benchmarks/scripts/setup-trt-edge-llm.sh --cuda-arch 120  # another SM than GPU 0's
+./benchmarks/scripts/setup-trt-edge-llm.sh --keep-build     # keep the build tree too, for a faster rebuild
 ./benchmarks/scripts/setup-trt-edge-llm.sh --uninstall
 ```
 

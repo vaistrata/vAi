@@ -14,11 +14,13 @@ Runs pi0.5 under vAi and comparison frameworks on the same GPU and compares end-
 
 ## Model preparation
 
-Begin once the pi0.5 checkpoint is available:
+Download the pi0.5 checkpoint repository listed in [lerobot-weights.h](../../models/production/pi05/lerobot-weights.h) into the checkpoint directory:
 
-`data/ckpts/pi05/lerobot/<size>/model.safetensors`
+```bash
+hf download <repository> --local-dir data/ckpts/pi05/lerobot/<size>
+```
 
-The checkpoint comes from the repository listed in [lerobot-weights.h](../../models/production/pi05/lerobot-weights.h).
+The benchmarks and converters read `model.safetensors` and `config.json`. Generating the PyTorch FP32 reference with [reference.py](scripts/reference.py) (see [Configurations](#configurations)) loads the checkpoint through LeRobot, which reads the rest of the repository as well, so download it in full.
 
 The vAi benchmark also needs:
 
@@ -28,10 +30,8 @@ The vAi benchmark also needs:
 The tokenizer is distributed separately through `google/paligemma-3b-pt-224`. Accept the repository license and download it with a Hugging Face token.
 
 ```bash
-curl -fL --create-dirs \
-  -H "Authorization: Bearer $HF_TOKEN" \
-  -o data/tokenizers/paligemma/tokenizer.json \
-  https://huggingface.co/google/paligemma-3b-pt-224/resolve/main/tokenizer.json
+hf download google/paligemma-3b-pt-224 tokenizer.json \
+  --local-dir data/tokenizers/paligemma
 ```
 
 ### Comparison frameworks
@@ -63,19 +63,6 @@ The comparison benchmarks read converted files under:
 - `export-migraphx.sh` creates the Python environment [`migraphx/export-onnx.py`](migraphx/export-onnx.py) checks for (lerobot 0.6.0, transformers 5.5.4, torch 2.8.0 for the CPU, onnx 1.19.0) in `~/.cache/vai/venv-pi05-export` once, then runs the export on the CPU. It needs a C++23 compiler (g++ 14 or clang++ 18) for the input helper; arguments after `--` go to `export-onnx.py`, such as `--no-constant-folding`.
 - `export-trt.sh` installs Edge-LLM's exporter (`trtedge`) from the source `setup-trt-edge-llm.sh` keeps into `~/.cache/vai/venv-trt-export` once, exports FP16 ONNX as openpi's `pi05_libero`, adds its normalization statistics, and builds the engines on this GPU.
 - Neither overwrites existing model files: remove them to export again.
-
-The converters require additional configuration files from the checkpoint's repository:
-
-```bash
-curl -fL -o data/ckpts/pi05/lerobot/<size>/config.json \
-  https://huggingface.co/<repository>/resolve/main/config.json
-
-curl -fL -o data/ckpts/pi05/lerobot/<size>/policy_preprocessor.json \
-  https://huggingface.co/<repository>/resolve/main/policy_preprocessor.json
-
-curl -fL -o data/ckpts/pi05/lerobot/<size>/policy_postprocessor.json \
-  https://huggingface.co/<repository>/resolve/main/policy_postprocessor.json
-```
 
 ### Configurations
 

@@ -3,7 +3,8 @@
   Checkpoint   Each policy reads every *.safetensors file in
                data/ckpts/pi05/lerobot/<ModelConfig::variant>/, taken from the matching
                LeRobot port on HuggingFace:
-                 3B  lerobot/pi05_base
+                 3B      lerobot/pi05_base
+                 libero  lerobot/pi05_libero_base
 =============================================================================*/
 
 #ifndef PRODUCTION_PI05_LEROBOT_WEIGHTS_H

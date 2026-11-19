@@ -14,8 +14,9 @@
 # a TensorRT C++ SDK built for that CUDA, with its plugins and ONNX parser
 # (TRT_PACKAGE_DIR for an extracted SDK, default /usr), and network access for
 # the sources and the CuTe DSL packages. Builds the CuTe DSL kernels for the SM
-# of GPU GPU_INDEX (default 0), or CUDA_ARCH, and records it in .cuda-arch for
-# the bench's device link; upstream builds its other kernels for a fixed list.
+# of GPU GPU_INDEX (default 0), or --cuda-arch / CUDA_ARCH, and records it in
+# .cuda-arch for the bench's device link; a later run rebuilds for another SM.
+# Upstream builds its other kernels for a fixed list.
 #
 # What it downloads stays in ${XDG_CACHE_HOME:-~/.cache}/vai/TensorRT-Edge-LLM-<tag>-src
 # for later runs: the clone with its submodules and the Python environment that
@@ -23,7 +24,8 @@
 # the build tree is removed after the install.
 #
 #   ./benchmarks/scripts/setup-trt-edge-llm.sh
-#   ./benchmarks/scripts/setup-trt-edge-llm.sh --uninstall     # remove the install, downloads + link
+#   ./benchmarks/scripts/setup-trt-edge-llm.sh --cuda-arch 120   # another SM than GPU 0's
+#   ./benchmarks/scripts/setup-trt-edge-llm.sh --uninstall       # remove the install, downloads + link
 #==============================================================================
 set -euo pipefail
 
@@ -43,7 +45,9 @@ PREFIX="$CACHE_DIR/vai/TensorRT-Edge-LLM-$TAG"
 SRC="$PREFIX-src"
 LINK="$CACHE_DIR/vai/TensorRT-Edge-LLM"
 STAGE="$PREFIX-stage"
+
 JOBS="$(nproc 2>/dev/null || echo 4)"
+CUDA_ARCH="${CUDA_ARCH:-}"
 KEEP_BUILD=0
 FORCE=0
 UNINSTALL=0
@@ -53,6 +57,7 @@ usage() {
     cat <<USAGE
 
 Options:
+  --cuda-arch N  the SM to build the CuTe DSL kernels for, e.g. 120 (default: GPU GPU_INDEX's)
   --jobs N, -j N parallel build jobs (default: $JOBS)
   --keep-build   keep the build tree too, for a faster rebuild
   --force        rebuild even if this tag is already installed (the downloads are reused)
@@ -61,8 +66,12 @@ Options:
 USAGE
 }
 
+#------------------------------------------------------------------------------
+# Options
+#------------------------------------------------------------------------------
 while [ $# -gt 0 ]; do
     case "$1" in
+        --cuda-arch) CUDA_ARCH="${2:?--cuda-arch needs an SM, e.g. 120}"; shift 2 ;;
         --jobs|-j)   JOBS="${2:?--jobs needs a number}"; shift 2 ;;
         --keep-build) KEEP_BUILD=1; shift ;;
         --force)     FORCE=1; shift ;;
@@ -73,6 +82,9 @@ while [ $# -gt 0 ]; do
 done
 [[ "$JOBS" =~ ^[1-9][0-9]*$ ]] || { echo "--jobs needs a positive integer, got '$JOBS'" >&2; exit 2; }
 
+#------------------------------------------------------------------------------
+# Uninstall
+#------------------------------------------------------------------------------
 if [ $UNINSTALL -eq 1 ]; then
     if [ "$(readlink "$LINK" 2>/dev/null || true)" = "$PREFIX" ]; then
         rm -f "$LINK"
@@ -92,6 +104,17 @@ if [ $UNINSTALL -eq 1 ]; then
     exit 0
 fi
 
+#------------------------------------------------------------------------------
+# CUDA architecture: --cuda-arch / CUDA_ARCH, else GPU GPU_INDEX's
+#------------------------------------------------------------------------------
+if [ -z "$CUDA_ARCH" ]; then
+    command -v nvidia-smi >/dev/null 2>&1 || { echo "pass --cuda-arch (e.g. 120) or provide nvidia-smi" >&2; exit 1; }
+    CUDA_ARCH="$({ nvidia-smi -i "${GPU_INDEX:-0}" --query-gpu=compute_cap --format=csv,noheader || true; } \
+        | head -1 | tr -d '[:space:].')"
+    [ -n "$CUDA_ARCH" ] || { echo "nvidia-smi reports no GPU ${GPU_INDEX:-0}: pass --cuda-arch, e.g. --cuda-arch 120" >&2; exit 1; }
+fi
+[[ "$CUDA_ARCH" =~ ^[0-9]+$ ]] || { echo "the CUDA architecture must be a numeric SM (e.g. 120), got '$CUDA_ARCH'" >&2; exit 2; }
+
 # Preserve a checkout or other existing directory occupying the public link.
 link_install() {
     if [ -e "$LINK" ] && [ ! -L "$LINK" ]; then
@@ -103,12 +126,20 @@ link_install() {
     ln -sfnT "$PREFIX" "$LINK"
 }
 
-# Already installed? The prefix is named after the tag.
-if [ $FORCE -eq 0 ] && [ -f "$PREFIX/.installed" ]; then
-    link_install
-    echo "TensorRT Edge-LLM $TAG is already installed at $PREFIX ($(cat "$PREFIX/.installed"))"
-    echo "(re-run with --force to rebuild it)"
-    exit 0
+#------------------------------------------------------------------------------
+# Already installed?
+#
+# The prefix is named after the tag; it is rebuilt unless built for the same SM.
+#------------------------------------------------------------------------------
+if [ -f "$PREFIX/.installed" ]; then
+    installedArch="$(cat "$PREFIX/.cuda-arch" 2>/dev/null || true)"
+    if [ $FORCE -eq 0 ] && [ "$installedArch" = "$CUDA_ARCH" ]; then
+        link_install    # restore the link if it was removed by hand
+        echo "TensorRT Edge-LLM $TAG (SM $CUDA_ARCH) is already installed at $PREFIX ($(cat "$PREFIX/.installed"))"
+        echo "(re-run with --force to rebuild it)"
+        exit 0
+    fi
+    echo "replacing TensorRT Edge-LLM $TAG (SM ${installedArch:-unknown}) at $PREFIX"
 fi
 
 #------------------------------------------------------------------------------
@@ -132,11 +163,6 @@ TRT_PACKAGE_DIR="$(realpath -e "${TRT_PACKAGE_DIR:-/usr}")"
 [ -n "$(find "$TRT_PACKAGE_DIR/include" -name NvInfer.h -print -quit)" ] || {
     echo "TensorRT headers missing: set TRT_PACKAGE_DIR to the TensorRT C++ SDK" >&2; exit 1;
 }
-if [ -z "${CUDA_ARCH:-}" ]; then
-    command -v nvidia-smi >/dev/null 2>&1 || { echo "set CUDA_ARCH (e.g. 120) or provide nvidia-smi" >&2; exit 1; }
-    CUDA_ARCH="$(nvidia-smi -i "${GPU_INDEX:-0}" --query-gpu=compute_cap --format=csv,noheader | tr -d '[:space:].')"
-fi
-[[ "$CUDA_ARCH" =~ ^[0-9]+$ ]] || { echo "CUDA_ARCH must be a numeric SM (e.g. 120)" >&2; exit 2; }
 GENERATOR=()
 command -v ninja >/dev/null 2>&1 && GENERATOR=(-G Ninja)
 
@@ -157,13 +183,13 @@ echo " TensorRT SDK: $TRT_PACKAGE_DIR"
 echo "=============================================================="
 
 #------------------------------------------------------------------------------
-# Source
+# Source, with its submodules
 #------------------------------------------------------------------------------
 mkdir -p "$CACHE_DIR/vai"
 if [ -d "$SRC/.git" ] && git -C "$SRC" rev-parse -q --verify "refs/tags/$TAG^{commit}" >/dev/null; then
-    echo "[1/4] reusing the $TAG clone in $SRC"
+    echo "[1/3] reusing the $TAG clone in $SRC"
 else
-    echo "[1/4] fetching $TAG..."
+    echo "[1/3] fetching $TAG..."
 fi
 if [ -d "$SRC/.git" ]; then
     [ "$(git -C "$SRC" remote get-url origin)" = "https://github.com/NVIDIA/TensorRT-Edge-LLM.git" ] || {
@@ -195,9 +221,10 @@ echo "      $TAG commit: $COMMIT"
 git -C "$SRC" submodule update --init --recursive --depth 1
 
 #------------------------------------------------------------------------------
-# CuTe DSL artifacts (isolated build-only Python environment)
+# Build: the CuTe DSL kernels, in an isolated build-only Python environment,
+# then the libraries and policy tools
 #------------------------------------------------------------------------------
-echo "[2/4] preparing CuTe DSL kernels..."
+echo "[2/3] building the CuTe DSL kernels, then the libraries..."
 python3 -m venv "$SRC/.venv"
 PYTHON="$SRC/.venv/bin/python"
 if [ "$CUDA_MAJOR" = 13 ]; then CUPY=cupy-cuda13x==13.6.0; else CUPY=cupy-cuda12x==12.3.0; fi
@@ -209,10 +236,6 @@ run_logged "$SRC/python.log" "$PYTHON" -m pip install 'nvidia-cutlass-dsl[cu'"$C
         --cuda-version "$CUDA_MAJOR" -j "$JOBS"
 )
 
-#------------------------------------------------------------------------------
-# Build + install (upstream does not provide a complete SDK install target)
-#------------------------------------------------------------------------------
-echo "[3/4] building..."
 run_logged "$SRC/configure.log" cmake -S "$SRC" -B "$SRC/build" "${GENERATOR[@]}" \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_CUDA_COMPILER="$NVCC" \
@@ -224,7 +247,13 @@ run_logged "$SRC/configure.log" cmake -S "$SRC" -B "$SRC/build" "${GENERATOR[@]}
 run_logged "$SRC/build.log" cmake --build "$SRC/build" -j "$JOBS" --target \
     NvInfer_edgellm_plugin pi05_policy_build pi05_policy_inference
 
-echo "[4/4] installing..."
+#------------------------------------------------------------------------------
+# Install (upstream does not provide a complete SDK install target)
+#
+# Staged first; the old prefix is replaced only once the SDK is complete, with
+# signals held off so a Ctrl-C cannot leave a half-installed prefix.
+#------------------------------------------------------------------------------
+echo "[3/3] installing..."
 rm -rf "$STAGE"
 mkdir -p "$STAGE/include/tensorrt_edgellm" "$STAGE/lib" "$STAGE/bin"
 # Keep core and pi0.5 headers in the locations searched by the bench CMake.
@@ -247,23 +276,33 @@ done
 cp "$SRC/LICENSE" "$STAGE/"
 printf '%s\n' "$CUDA_ARCH" > "$STAGE/.cuda-arch"
 printf '%s\n' "$COMMIT" > "$STAGE/.installed"
-# Replace the old prefix only after the complete SDK has been staged.
 trap '' INT TERM
 rm -rf "$PREFIX"
 mv "$STAGE" "$PREFIX"
+
+#------------------------------------------------------------------------------
+# Link for the bench's CMake
+#------------------------------------------------------------------------------
 link_install
 trap - INT TERM
+
 # The downloads stay; the build tree goes unless --keep-build.
 if [ $KEEP_BUILD -eq 0 ]; then
     rm -rf "$SRC/build"
+else
+    echo "      build tree kept in $SRC/build"
 fi
 
 #------------------------------------------------------------------------------
 # Done
 #------------------------------------------------------------------------------
 echo
-echo "installed TensorRT Edge-LLM $TAG ($COMMIT, $(du -sh "$PREFIX" | cut -f1)) at:"
+echo "installed TensorRT Edge-LLM $TAG for SM $CUDA_ARCH ($COMMIT, $(du -sh "$PREFIX" | cut -f1)) at:"
 echo "  $PREFIX"
-echo "linked from $LINK"
+echo "linked for the bench's CMake at $LINK"
 echo "downloads kept in $SRC ($(du -sh "$SRC" | cut -f1)); --uninstall removes them"
-echo "bench CMake: -DTensorRTEdgeLLM_ROOT=$LINK -DTENSORRT_ROOT=$TRT_PACKAGE_DIR"
+echo
+echo "Next:"
+echo "  ./benchmarks/pi05/scripts/export-trt.sh    # the engines, on this GPU"
+echo "  cmake -B build -DCMAKE_BUILD_TYPE=Release -DVAI_BUILD_BENCH=ON -DTENSORRT_ROOT=$TRT_PACKAGE_DIR"
+echo "  cmake --build build --target bench-pi05-trt"

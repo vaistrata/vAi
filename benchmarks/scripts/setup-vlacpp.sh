@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
 #==============================================================================
 # Installs the vla.cpp the pi0.5 benches compare against: pinned tag, CUDA
-# backend, shared libraries. vla.cpp has no Vulkan backend for pi0.5.
+# backend, shared libraries, built for one CUDA architecture. vla.cpp has no
+# Vulkan backend for pi0.5.
+#
+# Asks for the CUDA architecture to build for (the SM without its dot: 86
+# Ampere, 89 Ada, 90 Hopper, 120 Blackwell), offering the one nvidia-smi reports
+# for GPU GPU_INDEX (default 0); --cuda-arch or CUDA_ARCH answers it up front.
+# It is recorded in <prefix>/.cuda-arch, and a later run rebuilds for another.
 #
 # Installs to ${XDG_CACHE_HOME:-~/.cache}/vai/vla.cpp-<tag> and links it at
 # ${XDG_CACHE_HOME:-~/.cache}/vai/vla.cpp, where the bench's CMake looks for it:
@@ -17,8 +23,9 @@
 # Needs Linux, git, cmake 3.22+, a C++17 compiler, CUDA 12 or 13 (nvcc;
 # CUDA_HOME if it is not on PATH) and, on the first run, network access.
 #
-#   ./benchmarks/scripts/setup-vlacpp.sh                 # ~20 min
-#   ./benchmarks/scripts/setup-vlacpp.sh --uninstall     # remove the install, downloads + link
+#   ./benchmarks/scripts/setup-vlacpp.sh                  # asks for the architecture, ~20 min
+#   ./benchmarks/scripts/setup-vlacpp.sh --cuda-arch 89   # without asking
+#   ./benchmarks/scripts/setup-vlacpp.sh --uninstall      # remove the install, downloads + link
 #==============================================================================
 set -euo pipefail
 
@@ -37,10 +44,12 @@ PREFIX="$CACHE_DIR/vai/vla.cpp-$TAG"
 SRC="$PREFIX-src"
 LINK="$CACHE_DIR/vai/vla.cpp"
 CONVERT="$PREFIX/convert"
+ARCH_FILE="$PREFIX/.cuda-arch"
 # Where FetchContent keeps llama.cpp: next to the source, so it outlives the build tree.
 DEPS="$SRC/_deps"
 
 JOBS="$(nproc 2>/dev/null || echo 4)"
+CUDA_ARCH="${CUDA_ARCH:-}"
 KEEP_BUILD=0
 FORCE=0
 UNINSTALL=0
@@ -50,6 +59,7 @@ usage() {
     cat <<USAGE
 
 Options:
+  --cuda-arch N  the CUDA architecture to build for, e.g. 89 (default: asked)
   --jobs N, -j N parallel build jobs (default: $JOBS)
   --keep-build   keep the build trees too, for a faster rebuild
   --force        reinstall even if this tag is already installed (the downloads are reused)
@@ -58,8 +68,12 @@ Options:
 USAGE
 }
 
+#------------------------------------------------------------------------------
+# Options
+#------------------------------------------------------------------------------
 while [ $# -gt 0 ]; do
     case "$1" in
+        --cuda-arch) CUDA_ARCH="${2:?--cuda-arch needs an architecture, e.g. 89}"; shift 2 ;;
         --jobs|-j)   JOBS="${2:?--jobs needs a number}"; shift 2 ;;
         --keep-build) KEEP_BUILD=1; shift ;;
         --force)     FORCE=1;      shift ;;
@@ -70,12 +84,41 @@ while [ $# -gt 0 ]; do
 done
 [[ "$JOBS" =~ ^[1-9][0-9]*$ ]] || { echo "--jobs needs a positive integer, got '$JOBS'" >&2; exit 2; }
 
+#------------------------------------------------------------------------------
+# Uninstall
+#------------------------------------------------------------------------------
 if [ $UNINSTALL -eq 1 ]; then
     [ "$(readlink "$LINK" 2>/dev/null || true)" = "$PREFIX" ] && rm -f "$LINK"
     rm -rf "$PREFIX" "$SRC"
     echo "removed $PREFIX and $SRC"
     exit 0
 fi
+
+#------------------------------------------------------------------------------
+# CUDA architecture
+#
+# Asked when a terminal is attached, offering the GPU's own; without one, the
+# GPU's own is taken.
+#------------------------------------------------------------------------------
+detectArch() {
+    command -v nvidia-smi >/dev/null 2>&1 || return 0
+    { nvidia-smi -i "${GPU_INDEX:-0}" --query-gpu=compute_cap --format=csv,noheader 2>/dev/null || true; } \
+        | head -1 | tr -d '[:space:].'
+}
+
+if [ -z "$CUDA_ARCH" ]; then
+    detected="$(detectArch)"
+    if [ -t 0 ]; then
+        echo "CUDA architecture to build for, the SM without its dot:"
+        echo "  75 Turing | 80 A100 | 86 RTX 30 | 89 RTX 40 | 90 H100 | 120 RTX 50"
+        read -r -p "CUDA architecture${detected:+ [$detected, GPU ${GPU_INDEX:-0}]}: " CUDA_ARCH
+        CUDA_ARCH="${CUDA_ARCH:-$detected}"
+    else
+        CUDA_ARCH="$detected"
+    fi
+fi
+[ -n "$CUDA_ARCH" ] || { echo "no CUDA architecture: pass one with --cuda-arch, e.g. --cuda-arch 89" >&2; exit 2; }
+[[ "$CUDA_ARCH" =~ ^[0-9]+[af]?$ ]] || { echo "the CUDA architecture is a numeric SM such as 89 or 120a, got '$CUDA_ARCH'" >&2; exit 2; }
 
 # The pi0.5 converter and the modules it imports; its pyproject.toml carries the
 # release the bench's CMake reads.
@@ -88,13 +131,18 @@ keep_converter() {
 
 #------------------------------------------------------------------------------
 # Already installed?
+#
+# Rebuilds unless the install is complete and built for the same architecture.
 #------------------------------------------------------------------------------
-if [ $FORCE -eq 0 ] && [ -f "$PREFIX/lib/libvla.so" ] && [ -f "$PREFIX/include/vla.h" ] \
-   && [ -f "$CONVERT/pyproject.toml" ]; then
-    ln -sfn "$PREFIX" "$LINK"
-    echo "vla.cpp $TAG is already installed at $PREFIX"
-    echo "(re-run with --force to rebuild it)"
-    exit 0
+installedArch="$(cat "$ARCH_FILE" 2>/dev/null || true)"
+if [ -f "$PREFIX/lib/libvla.so" ] && [ -f "$PREFIX/include/vla.h" ] && [ -f "$CONVERT/pyproject.toml" ]; then
+    if [ $FORCE -eq 0 ] && [ "$installedArch" = "$CUDA_ARCH" ]; then
+        ln -sfn "$PREFIX" "$LINK"    # restore the link if it was removed by hand
+        echo "vla.cpp $TAG (SM $CUDA_ARCH) is already installed at $PREFIX"
+        echo "(re-run with --force to rebuild it)"
+        exit 0
+    fi
+    echo "replacing vla.cpp $TAG (SM ${installedArch:-unknown}) at $PREFIX"
 fi
 
 #------------------------------------------------------------------------------
@@ -112,7 +160,7 @@ command -v ninja >/dev/null 2>&1 && GENERATOR=(-G Ninja)
 
 echo "=============================================================="
 echo " vla.cpp $TAG -> $PREFIX"
-echo " CUDA ($NVCC) | $JOBS jobs"
+echo " CUDA ($NVCC) | SM $CUDA_ARCH | $JOBS jobs"
 echo "=============================================================="
 
 #------------------------------------------------------------------------------
@@ -138,8 +186,10 @@ else
 fi
 
 #------------------------------------------------------------------------------
-# Build + install
+# Build
 #
+# CMAKE_CUDA_ARCHITECTURES: the one architecture asked for, as vla.cpp's README
+# builds it, instead of ggml's list of every supported one.
 # VLA_BUILD_SERVER=OFF: the servers need protobuf and libzmq; the benches do not.
 # VLA_SPM=OFF: SentencePiece needs protobuf; the benches pass token ids.
 # FETCHCONTENT_BASE_DIR keeps the llama.cpp clone, and the stamps of its patch, in
@@ -151,6 +201,7 @@ cmake -S "$SRC" -B "$SRC/build" "${GENERATOR[@]}" \
     -DBUILD_SHARED_LIBS=ON \
     -DGGML_CUDA=ON \
     -DCMAKE_CUDA_COMPILER="$NVCC" \
+    -DCMAKE_CUDA_ARCHITECTURES="$CUDA_ARCH" \
     -DVLA_BUILD_SERVER=OFF \
     -DVLA_BUILD_TESTS=OFF \
     -DVLA_SPM=OFF \
@@ -169,8 +220,12 @@ cmake --build "$SRC/build" -j "$JOBS" > "$SRC/build.log" 2>&1 || {
     exit 1
 }
 
+#------------------------------------------------------------------------------
+# Install
+#
 # The old install is removed only after a successful build; signals are held
 # off meanwhile so a Ctrl-C cannot leave a half-installed prefix.
+#------------------------------------------------------------------------------
 echo "[3/3] installing..."
 trap '' INT TERM
 rm -rf "$PREFIX"
@@ -189,25 +244,36 @@ for lib in libvla.so libvla_core.so libllama.so libggml.so libggml-base.so libgg
     [ -n "$found" ] && cp -L "$found" "$PREFIX/lib/"
 done
 [ -f "$PREFIX/include/vla.h" ] || cp "$SRC/include/vla.h" "$PREFIX/include/"
-keep_converter
+printf '%s\n' "$CUDA_ARCH" > "$ARCH_FILE"
 trap - INT TERM
 
 for lib in libvla.so libvla_core.so libllama.so; do
     [ -e "$PREFIX/lib/$lib" ] || { echo "install finished but $PREFIX/lib/$lib is missing" >&2; exit 1; }
 done
+
+#------------------------------------------------------------------------------
+# Keep the GGUF converter, and link for the bench's CMake
+#------------------------------------------------------------------------------
+keep_converter
 ln -sfn "$PREFIX" "$LINK"
 
 # The downloads stay; the build trees go unless --keep-build.
 if [ $KEEP_BUILD -eq 0 ]; then
     rm -rf "$SRC/build" "$DEPS"/*-build
+else
+    echo "      build trees kept in $SRC"
 fi
 
 #------------------------------------------------------------------------------
 # Done
 #------------------------------------------------------------------------------
 echo
-echo "installed vla.cpp $TAG ($(du -sh "$PREFIX" | cut -f1)) at:"
+echo "installed vla.cpp $TAG for SM $CUDA_ARCH ($(du -sh "$PREFIX" | cut -f1)) at:"
 echo "  $PREFIX"
-echo "linked from $LINK"
-echo "GGUF converter at $CONVERT"
+echo "linked for the bench's CMake at $LINK"
+echo "GGUF converter at $CONVERT (see benchmarks/SETUP.md, vla.cpp)"
 echo "downloads kept in $SRC ($(du -sh "$SRC" | cut -f1)); --uninstall removes them"
+echo
+echo "Next:"
+echo "  cmake -B build -DCMAKE_BUILD_TYPE=Release -DVAI_BUILD_BENCH=ON"
+echo "  cmake --build build --target bench-pi05-vlacpp"
