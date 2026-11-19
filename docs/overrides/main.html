@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+
+{#-
+  Cloudflare Web Analytics for docs.vaistrata.com. The snippet is the one
+  Cloudflare issued for this site. Its token is sent in every page, so it is
+  not a secret.
+-#}
+{% block scripts %}
+  {{ super() }}
+  <!-- Cloudflare Web Analytics --><script type='module' src='https://static.cloudflareinsights.com/beacon.min.js' data-cf-beacon='{"token": "6747fc367cc24f04b99c8cfc9a23dc27"}'></script><!-- End Cloudflare Web Analytics -->
+{% endblock %}

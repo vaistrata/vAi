@@ -9,6 +9,9 @@ edit_uri: edit/master/docs/                     # Path the "edit this page" butt
 
 theme:
   name: material
+  # Templates laid over the theme. main.html adds the Cloudflare Web Analytics
+  # beacon to every page.
+  custom_dir: docs/overrides
   # The i18n plugin sets the UI language per locale, so it is not fixed here.
   features:
     # navigation.instant stays off. With it on, the language selector in the
@@ -71,9 +74,11 @@ nav:
 
 # A file under docs/ gets a page and is searchable even when it is not in nav.
 # Everything is published, and only what is hidden is listed (.gitignore syntax).
-# internals holds internal documents; tools and requirements.txt are build machinery.
+# internals holds internal documents; overrides, tools and requirements.txt are
+# build machinery.
 exclude_docs: |
   /internals/
+  /overrides/
   /tools/
   /requirements.txt
 
