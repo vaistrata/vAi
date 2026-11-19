@@ -49,3 +49,4 @@ loadWeights<"openai">(net);
 |---|---|
 | [GPT-2](gpt2.md) | 124M, 355M, 774M, 1.5B |
 | [Llama 3](llama3.md) | 3.2-1B, 3.2-3B |
+| [Gemma 3](gemma3.md) | 270M, 1B, 4B, 12B (4B, 12B는 이미지 입력 가능) |
