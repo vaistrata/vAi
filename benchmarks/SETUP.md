@@ -5,9 +5,9 @@ What the benches compare, and how, is in [README.md](README.md). The vAi benches
 | Benches | Framework | Installation | Model conversion |
 |---|---|---|---|
 | [LLM](#llm-benchmarks) | [llama.cpp](#llamacpp) | [setup-llamacpp.sh](#installation) | [GGUF](#model-conversion) |
-| [VLA](#vla-benchmarks) | [vla.cpp](#vlacpp) | [setup-vlacpp.sh](#vlacpp-installation) | [GGUF](#vlacpp-model-conversion) |
-| [VLA](#vla-benchmarks) | [TensorRT Edge-LLM](#tensorrt-edge-llm) | [setup-trt-edge-llm.sh](#tensorrt-edge-llm-installation) | [TensorRT engines](#tensorrt-edge-llm-model-conversion) |
-| [VLA](#vla-benchmarks) | [MIGraphX](#migraphx) | [setup-migraphx.sh](#migraphx-installation) | [FP16 ONNX bundle](#migraphx-model-conversion) |
+| [VLA](#vla-benchmarks) | [vla.cpp](#vlacpp) | [setup-vlacpp.sh](#installation-1) | [GGUF](#model-conversion-1) |
+| [VLA](#vla-benchmarks) | [TensorRT Edge-LLM](#tensorrt-edge-llm) | [setup-trt-edge-llm.sh](#installation-2) | [TensorRT engines](#model-conversion-2) |
+| [VLA](#vla-benchmarks) | [MIGraphX](#migraphx) | [setup-migraphx.sh](#installation-3) | [FP16 ONNX bundle](#model-conversion-3) |
 
 Each framework's setup script installs a pinned release into a user cache outside the repo (`~/.cache/vai/`), where CMake finds it with no extra flags. It installs nothing system-wide: install the **Prerequisites** in the framework's section first. `--uninstall` removes what it installed, and `--help` lists its paths and options. To use your own build of the pinned release instead, point the variable in the `Found by (CMake)` column of the README's Requirements at it.
 
@@ -162,15 +162,9 @@ mkdir -p data/benchmarks/<model>/<size>   # Windows: New-Item -ItemType Director
 
 ## VLA benchmarks
 
-The VLA comparison frameworks run on Linux only, and so do their setup scripts. Each script only builds or unpacks its framework, under `${XDG_CACHE_HOME:-~/.cache}/vai/`, and links the install there, where CMake finds it; what it downloads stays next to the install, so a later run reuses it without the network. The model files come from the model's own export scripts, in `<model>/scripts/`, once the framework is installed.
-
-Each section below gives the framework's official way to make its model files first, then the script in this repo that runs those steps for the bench. The examples use the checkpoint in pi0.5's 3B folder, `data/ckpts/pi05/lerobot/3B/`, the LIBERO fine-tune `lerobot/pi05_libero_base`; the model's README lists the files it needs ([pi0.5](pi05/README.md#model-preparation)).
-
 ### vla.cpp
 
-[vla.cpp](https://github.com/VinRobotics/vla.cpp) runs the pi0.5 benches on CUDA: it has no Vulkan backend for pi0.5.
-
-#### vla.cpp installation
+#### Installation
 
 **Prerequisites**
 
@@ -178,9 +172,11 @@ Each section below gives the framework's official way to make its model files fi
 - CUDA 12 or 13 (`nvcc`; `CUDA_HOME` where it is not on `PATH`)
 - Network access on the first run: vla.cpp fetches its llama.cpp when it configures
 
-[setup-vlacpp.sh](scripts/setup-vlacpp.sh) installs vla.cpp `v0.4.0` on its CUDA backend as shared libraries and links it at `~/.cache/vai/vla.cpp`, where CMake reads `vla_ROOT`. It keeps the clone, and the llama.cpp fetched into its `_deps/`, in `~/.cache/vai/vla.cpp-v0.4.0-src`; only the build trees go after the install.
+[setup-vlacpp.sh](scripts/setup-vlacpp.sh) installs vla.cpp `v0.4.0` as shared libraries on its CUDA backend (it has no Vulkan backend for pi0.5) and links it at `~/.cache/vai/vla.cpp`, where CMake reads `vla_ROOT`. It keeps the clone, and the llama.cpp fetched into its `_deps/`, in `~/.cache/vai/vla.cpp-v0.4.0-src`; only the build trees go after the install.
 
 It builds for one CUDA architecture, the SM without its dot (86 RTX 30, 89 RTX 40, 90 H100, 120 RTX 50), as vla.cpp's README passes it in `CMAKE_CUDA_ARCHITECTURES`. The script asks for it, offering the one `nvidia-smi` reports for GPU `GPU_INDEX` (default 0); `--cuda-arch` or `CUDA_ARCH` answers it up front, and without a terminal the GPU's own is taken. A later run with another architecture rebuilds.
+
+**Linux**
 
 ```bash
 ./benchmarks/scripts/setup-vlacpp.sh                  # asks for the architecture; clone + CUDA build + install + link, ~20 min
@@ -189,22 +185,30 @@ It builds for one CUDA architecture, the SM without its dot (86 RTX 30, 89 RTX 4
 ./benchmarks/scripts/setup-vlacpp.sh --uninstall
 ```
 
-#### vla.cpp model conversion
+**Windows**: not supported; the VLA comparison benches run on Linux only.
 
-**Used by the bench**: the LIBERO GGUF vla.cpp's README lists on Hugging Face, [vrfai/pi05-libero-gguf](https://huggingface.co/vrfai/pi05-libero-gguf) (`pi05-libero.gguf`, converted from `lerobot/pi05_libero_base`), downloaded to `data/benchmarks/pi05/3B/model.gguf`. The bench loads it in FP16 through its own runtime config, `pi05/vla.cpp/runtime.json`.
+#### Model conversion
+
+The bench reads `data/benchmarks/pi05/<size>/model.gguf` and loads it in FP16 through its own runtime config, `pi05/vla.cpp/runtime.json`. The results use the LIBERO GGUF vla.cpp's README lists, [vrfai/pi05-libero-gguf](https://huggingface.co/vrfai/pi05-libero-gguf) (`pi05-libero.gguf`, converted from `lerobot/pi05_libero_base`), downloaded as it is:
 
 ```bash
 curl -fL --create-dirs -o data/benchmarks/pi05/3B/model.gguf \
   https://huggingface.co/vrfai/pi05-libero-gguf/resolve/main/pi05-libero.gguf
 ```
 
-**Official conversion**, for another checkpoint ([docs/MODELS.md](https://github.com/VinRobotics/vla.cpp/blob/v0.4.0/docs/MODELS.md)): the converters ship in the source's `scripts/`, one per architecture, and run in a virtual environment with the source's `convert` extra. A pi0.5 checkpoint carries no normalizer statistics, so `convert_pi05_to_gguf.py` takes them from the dataset's `meta/stats.json`: a local file with `--dataset-stats`, or one downloaded from a Hugging Face dataset with `--dataset-repo`.
+Another checkpoint is converted with vla.cpp's official `convert_pi05_to_gguf.py` ([docs/MODELS.md](https://github.com/VinRobotics/vla.cpp/blob/v0.4.0/docs/MODELS.md)), in the `scripts/` of the source the installation above keeps.
+
+**1. Setup**: a virtual environment with the source's `convert` extra, once.
 
 ```bash
 SRC="${XDG_CACHE_HOME:-$HOME/.cache}/vai/vla.cpp-v0.4.0-src"   # the source setup-vlacpp.sh keeps
 python3 -m venv .venv-vlacpp-convert
 .venv-vlacpp-convert/bin/python -m pip install -e "$SRC[convert]"
+```
 
+**2. Convert**: once the checkpoint folder holds the files the model's README lists ([pi0.5](pi05/README.md#model-preparation)). A pi0.5 checkpoint carries no normalizer statistics, so the converter takes them from the dataset's `meta/stats.json`: a local file with `--dataset-stats`, or one downloaded from a Hugging Face dataset with `--dataset-repo`.
+
+```bash
 mkdir -p data/benchmarks/pi05/3B
 .venv-vlacpp-convert/bin/python $SRC/scripts/convert_pi05_to_gguf.py \
     --ckpt data/ckpts/pi05/lerobot/3B \
@@ -212,13 +216,9 @@ mkdir -p data/benchmarks/pi05/3B
     --dataset-repo lerobot/libero
 ```
 
-**In this repo**: no script; the bench takes the downloaded file above.
-
 ### TensorRT Edge-LLM
 
-[TensorRT Edge-LLM](https://github.com/NVIDIA/TensorRT-Edge-LLM) runs the pi0.5 benches through its experimental pi0.5 runtime, on engines built on the GPU that runs them.
-
-#### TensorRT Edge-LLM installation
+#### Installation
 
 **Prerequisites**
 
@@ -236,7 +236,9 @@ sudo apt-get install libnvinfer-dev=$V libnvinfer-headers-dev=$V libnvinfer-safe
     libnvonnxparsers-dev=$V libnvonnxparsers10=$V
 ```
 
-[setup-trt-edge-llm.sh](scripts/setup-trt-edge-llm.sh) installs TensorRT Edge-LLM `v0.11.1`: its C++ libraries, the experimental pi0.5 runtime and the policy tools (`pi05_policy_build`), with its CuTe DSL kernels for the SM of GPU `GPU_INDEX` (default 0; `--cuda-arch` or `CUDA_ARCH` names another, and a later run with another SM rebuilds). It links the install at `~/.cache/vai/TensorRT-Edge-LLM`, where CMake reads `TensorRTEdgeLLM_ROOT`, and keeps the clone with its submodules in `~/.cache/vai/TensorRT-Edge-LLM-v0.11.1-src`, from which the export below installs its exporter.
+[setup-trt-edge-llm.sh](scripts/setup-trt-edge-llm.sh) installs TensorRT Edge-LLM `v0.11.1`: its C++ libraries, the experimental pi0.5 runtime the bench runs and the policy tools (`pi05_policy_build`), with its CuTe DSL kernels for the SM of GPU `GPU_INDEX` (default 0; `--cuda-arch` or `CUDA_ARCH` names another, and a later run with another SM rebuilds). It links the install at `~/.cache/vai/TensorRT-Edge-LLM`, where CMake reads `TensorRTEdgeLLM_ROOT`, and keeps the clone with its submodules in `~/.cache/vai/TensorRT-Edge-LLM-v0.11.1-src`, from which the model conversion below installs its exporter.
+
+**Linux**
 
 ```bash
 ./benchmarks/scripts/setup-trt-edge-llm.sh                  # clone + CuTe DSL kernels + build + install + link
@@ -245,16 +247,24 @@ sudo apt-get install libnvinfer-dev=$V libnvinfer-headers-dev=$V libnvinfer-safe
 ./benchmarks/scripts/setup-trt-edge-llm.sh --uninstall
 ```
 
-#### TensorRT Edge-LLM model conversion
+**Windows**: not supported; the VLA comparison benches run on Linux only.
 
-**Official** ([installation](https://github.com/NVIDIA/TensorRT-Edge-LLM/blob/v0.11.1/docs/source/user_guide/getting_started/installation.md) · [pi0.5](https://github.com/NVIDIA/TensorRT-Edge-LLM/blob/v0.11.1/docs/source/user_guide/examples/vla/pi05.md)): the exporter is the source's Python package with its `export` extra, and runs on the CPU without the native build. It exports the checkpoint to FP16 ONNX as an openpi policy configuration (`pi05_libero` for the LIBERO checkpoint); the configuration's normalization statistics go in the export's `assets/`, and `pi05_policy_build` builds the engines from it on this GPU.
+#### Model conversion
+
+Each checkpoint is built into engines in `data/benchmarks/pi05/<size>/engines/`, on the GPU that runs them, with Edge-LLM's official exporter and builder ([installation](https://github.com/NVIDIA/TensorRT-Edge-LLM/blob/v0.11.1/docs/source/user_guide/getting_started/installation.md) · [pi0.5](https://github.com/NVIDIA/TensorRT-Edge-LLM/blob/v0.11.1/docs/source/user_guide/examples/vla/pi05.md)). The exporter writes the checkpoint as FP16 ONNX for an openpi policy configuration, `pi05_libero` for `lerobot/pi05_libero_base`; the configuration's normalization statistics go in the export's `assets/`, and `pi05_policy_build` builds the engines from it.
+
+**1. Setup**: the exporter, the source's Python package with its `export` extra, in a virtual environment, once. It runs on the CPU, without the native build.
 
 ```bash
 SRC="${XDG_CACHE_HOME:-$HOME/.cache}/vai/TensorRT-Edge-LLM-v0.11.1-src"   # the source setup-trt-edge-llm.sh keeps
-EDGELLM="${XDG_CACHE_HOME:-$HOME/.cache}/vai/TensorRT-Edge-LLM"            # the install it links
 python3 -m venv .venv-trt-export
 .venv-trt-export/bin/python -m pip install -e "$SRC[export]"
+```
 
+**2. Convert**: once the checkpoint folder holds the files the model's README lists ([pi0.5](pi05/README.md#model-preparation)).
+
+```bash
+EDGELLM="${XDG_CACHE_HOME:-$HOME/.cache}/vai/TensorRT-Edge-LLM"   # the install setup-trt-edge-llm.sh links
 ONNX_DIR=data/benchmarks/pi05/3B/trt-onnx
 PYTHONNOUSERSITE=1 .venv-trt-export/bin/trtedge export data/ckpts/pi05/lerobot/3B "$ONNX_DIR" \
     --dtype float16 --pi05-policy-config pi05_libero
@@ -264,7 +274,7 @@ EDGELLM_PLUGIN_PATH="$EDGELLM/lib/libNvInfer_edgellm_plugin.so" LD_LIBRARY_PATH=
     "$EDGELLM/bin/pi05_policy_build" --onnx-dir "$ONNX_DIR" --engine-dir data/benchmarks/pi05/3B/engines
 ```
 
-**In this repo**: [pi05/scripts/export-trt.sh](pi05/scripts/export-trt.sh) runs these steps. It installs the exporter into `~/.cache/vai/venv-trt-export` once, reuses a finished export, and never overwrites an engine folder: remove the folder to build again.
+[pi05/scripts/export-trt.sh](pi05/scripts/export-trt.sh) runs both steps. It installs the exporter into `~/.cache/vai/venv-trt-export` once, reuses a finished export, and never overwrites an engine folder: remove the folder to build again. `--policy` names the openpi configuration for the checkpoint in the folder.
 
 ```bash
 ./benchmarks/pi05/scripts/export-trt.sh                       # --policy pi05_libero: lerobot/pi05_libero_base
@@ -273,9 +283,7 @@ EDGELLM_PLUGIN_PATH="$EDGELLM/lib/libNvInfer_edgellm_plugin.so" LD_LIBRARY_PATH=
 
 ### MIGraphX
 
-[MIGraphX](https://github.com/ROCm/AMDMIGraphX) runs the pi0.5 benches on AMD GPUs, on ONNX graphs it compiles when the bench starts.
-
-#### MIGraphX installation
+#### Installation
 
 **Prerequisites**
 
@@ -285,20 +293,28 @@ EDGELLM_PLUGIN_PATH="$EDGELLM/lib/libNvInfer_edgellm_plugin.so" LD_LIBRARY_PATH=
 
 [setup-migraphx.sh](scripts/setup-migraphx.sh) installs MIGraphX `2.18.0` from AMD's prebuilt files, with no build: its Ubuntu 24.04 packages and, from the ROCm `10.1.0` tarball of the GPU (`--arch`, default the first one), only the runtime MIGraphX loads. It unpacks them without apt or root, links the install at `~/.cache/vai/migraphx`, where CMake reads `migraphx_DIR` ahead of the MIGraphX a system ROCm carries, and keeps the downloads, about 2 GB, in `~/.cache/vai/migraphx-2.18.0-download`. The bench then runs on ROCm 10.1 whichever ROCm the system has.
 
+**Linux**
+
 ```bash
 ./benchmarks/scripts/setup-migraphx.sh                  # download + verify + unpack + link
 ./benchmarks/scripts/setup-migraphx.sh --arch gfx1151   # name the GPU
 ./benchmarks/scripts/setup-migraphx.sh --uninstall
 ```
 
-#### MIGraphX model conversion
+**Windows**: not supported; the VLA comparison benches run on Linux only.
 
-**Official** ([MIGraphX](https://github.com/ROCm/AMDMIGraphX) · [ONNX export in PyTorch](https://docs.pytorch.org/docs/stable/onnx.html)): MIGraphX has no model-specific exporter; it parses an ONNX graph and compiles it for the GPU. A PyTorch model reaches it through `torch.onnx.export`.
+#### Model conversion
+
+Each checkpoint is exported to an FP16 ONNX bundle in `data/benchmarks/pi05/<size>/`: prefill and one denoise step as two static graphs, which the bench compiles on its GPU when it starts. MIGraphX has no model-specific exporter ([MIGraphX](https://github.com/ROCm/AMDMIGraphX) · [ONNX export in PyTorch](https://docs.pytorch.org/docs/stable/onnx.html)): it parses an ONNX graph, and a PyTorch model reaches it through `torch.onnx.export`.
 
 > [!NOTE]
-> Neither MIGraphX nor LeRobot provides a pi0.5 implementation or export for MIGraphX. The ONNX export and the MIGraphX runtime the bench uses are this repo's own: the export below, and the prefill-then-steps loop in `pi05/migraphx/net.h`. The MIGraphX results measure that implementation, not an official one.
+> Neither MIGraphX nor LeRobot provides a pi0.5 implementation or export for MIGraphX. The ONNX export and the MIGraphX runtime the bench uses are this repo's own: [pi05/migraphx/export-onnx.py](pi05/migraphx/export-onnx.py), and the prefill-then-steps loop in `pi05/migraphx/net.h`. The MIGraphX results measure that implementation, not an official one.
 
-**In this repo**: [pi05/migraphx/export-onnx.py](pi05/migraphx/export-onnx.py), written for this bench, exports LeRobot's pi0.5 policy as two static graphs, prefill and one denoise step, checks the split against LeRobot's own `sample_actions` in FP32, and writes them in FP16. [pi05/scripts/export-migraphx.sh](pi05/scripts/export-migraphx.sh) runs it: it creates the Python environment the export checks for (lerobot 0.6.0, transformers 5.5.4, torch 2.8.0 for the CPU, onnx 1.19.0) in `~/.cache/vai/venv-pi05-export` once, finds a C++23 compiler for its input helper (g++ 14 or Clang 18; `CXX` names another), and never overwrites a bundle: remove its files to export again.
+`export-onnx.py` exports LeRobot's pi0.5 policy, checks the split against LeRobot's own `sample_actions` in FP32, and writes the graphs in FP16. [pi05/scripts/export-migraphx.sh](pi05/scripts/export-migraphx.sh) runs it in two steps.
+
+**1. Setup**: the Python environment the export checks for (lerobot 0.6.0, transformers 5.5.4, torch 2.8.0 for the CPU, onnx 1.19.0), created in `~/.cache/vai/venv-pi05-export` on the script's first run. The script also finds a C++23 compiler for the export's input helper (g++ 14 or Clang 18; `CXX` names another).
+
+**2. Convert**: once the checkpoint folder holds the files the model's README lists ([pi0.5](pi05/README.md#model-preparation)). The script never overwrites a bundle: remove its files to export again.
 
 ```bash
 ./benchmarks/pi05/scripts/export-migraphx.sh                            # constants folded, for the default MLIR GEMM path
