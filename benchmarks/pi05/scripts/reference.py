@@ -29,7 +29,7 @@ from lerobot.policies.pi05 import PI05Policy
 from lerobot.utils.constants import OBS_LANGUAGE_ATTENTION_MASK, OBS_LANGUAGE_TOKENS, OBS_STATE
 
 DATA = Path(__file__).resolve().parents[3] / "data"
-CKPT = DATA / "ckpts/pi05/lerobot/3B"   # the benches' checkpoint: lerobot/pi05_libero_base
+CKPT = DATA / "ckpts/pi05/lerobot/3B"  # the benches' checkpoint: lerobot/pi05_libero_base
 OUT_DIR = DATA / "benchmarks/pi05/3B"
 
 CAMERAS = ["cam_high", "cam_left_wrist", "cam_right_wrist"]
