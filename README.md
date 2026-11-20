@@ -1,3 +1,34 @@
+<p align="center">
+  <a href="https://vaistrata.com">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="docs/assets/logo/vai-logo-dark.svg">
+      <img src="docs/assets/logo/vai-logo-light.svg" alt="vAi" width="268">
+    </picture>
+  </a>
+</p>
+
+<p align="center">
+  <strong>A cross-platform AI inference engine on Vulkan</strong>
+</p>
+
+<p align="center">
+  <a href="https://github.com/vaistrata/vAi/actions/workflows/ci.yml"><img src="https://github.com/vaistrata/vAi/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://docs.vaistrata.com"><img src="https://img.shields.io/github/actions/workflow/status/vaistrata/vAi/docs.yml?branch=master&label=wiki" alt="Documentation"></a>
+  <img src="https://img.shields.io/badge/release-coming_soon-lightgrey" alt="Release: coming soon">
+  <a href="docker/README.md"><img src="https://img.shields.io/badge/Docker-coming_soon-lightgrey?logo=docker&logoColor=white" alt="Docker image: coming soon"></a>
+  <a href="python/README.md"><img src="https://img.shields.io/badge/Python-experimental-orange?logo=python&logoColor=white" alt="Python: experimental"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache_2.0-blue" alt="License: Apache 2.0"></a>
+</p>
+
+<p align="center">
+  <a href="https://docs.vaistrata.com">Documentation</a> |
+  <a href="https://docs.vaistrata.com/02-quickstart/">Quick Start</a> |
+  <a href="https://docs.vaistrata.com/04-models/">Models</a> |
+  <a href="python/README.md">Python</a> |
+  <a href="benchmarks/README.md">Benchmarks</a> |
+  <a href="https://vaistrata.com">Website</a>
+</p>
+
 # vAi
 
 **A cross-platform AI inference engine on Vulkan.** It runs a range of models, including vision, language and multimodal models, in one C++ runtime. Model structure and weight mappings are defined in code, with support for adding operators and GPU kernels.
