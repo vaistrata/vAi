@@ -1452,10 +1452,10 @@ inline void Attention::run(eva::CommandBuffer cmdBuff)
 
     if (xe3_)
     {
-        const uint32_t Dh = config_.headDim, Dh16 = xe3Dh16_, Hq = config_.numQHeads;
+        const uint32_t Dh = config_.headDim, dh16 = xe3Dh16_, Hq = config_.numQHeads;
         const uint32_t groups = B * Hkv, groupRows = groupSize_ * Tq_;
         const uint32_t ldv = xe3WeightPitch(Dh);
-        const bool padQ = Dh16 != Dh;
+        const bool padQ = dh16 != Dh;
         auto Kp = padQ ? (*this)["xe3Kt"].buffer() : eva::Buffer();
         auto Vp = (*this)["xe3V"].buffer();
         auto S = (*this)["xe3S"].buffer();
@@ -1466,13 +1466,13 @@ inline void Attention::run(eva::CommandBuffer cmdBuff)
 
         // The keys of this dispatch, laid out for both products, and the append.
         const uint32_t prepConsts[] = {
-            Dh / 4u, Dh16 / 4u, Tkv, config_.kvCacheSize, xe3KeyRows_, ldv / 4u, groupRows
+            Dh / 4u, dh16 / 4u, Tkv, config_.kvCacheSize, xe3KeyRows_, ldv / 4u, groupRows
         };
         descSetXe3Prep_.write({ Kp, Vp, K, V, K_cache, V_cache, counter, Qp, Q });
         cmdBuff.bindPipeline(pipeXe3Prep_)
             .bindDescSets({ descSetXe3Prep_ })
             .setPushConstants(0, sizeof(prepConsts), prepConsts)
-            .dispatch(CEIL_DIV(Dh16 / 4u, 16u), std::max(xe3KeyRows_, padQ ? groupRows : 0u), groups)
+            .dispatch(CEIL_DIV(dh16 / 4u, 16u), std::max(xe3KeyRows_, padQ ? groupRows : 0u), groups)
             .barrier(computeToCompute);
 
         descSetXe3Softmax_.write({ P, S, counter, causalMask, L });
@@ -1483,7 +1483,7 @@ inline void Attention::run(eva::CommandBuffer cmdBuff)
         };
         const uint32_t maxX = device().maxComputeWorkGroupCount()[0];
         const uint32_t units = groups == 1u ? Hq : groups;   // what a chunk counts: heads, or groups
-        const uint64_t qPitch = padQ ? Dh16 : Dh;
+        const uint64_t qPitch = padQ ? dh16 : Dh;
         for (uint32_t u0 = 0, chunk = 0; u0 < units; u0 += xe3PerChunk_, ++chunk)
         {
             const uint32_t count = std::min(xe3PerChunk_, units - u0);
@@ -1501,13 +1501,15 @@ inline void Attention::run(eva::CommandBuffer cmdBuff)
             auto kSrc = padQ ? Kp : caching ? K_cache : K;
             // N is the key rows up to whole 16s: the columns past the keys hold nothing the softmax reads.
             const uint32_t qkConsts[] = {
-                M, xe3KeyRows_, Dh16, Dh16, uint32_t(qPitch), Dh16, 0u, 0u, 0u, 1u, 0u, M, kRows
+                M, xe3KeyRows_, dh16, dh16, uint32_t(qPitch), dh16, 0u, 0u, 0u, 1u, 0u, M, kRows
             };
             descSetXe3Qk_[chunk].write(
                 { S,
                   (padQ ? Qp : Q)(row0 * qPitch * 2u, uint64_t(rows) * qPitch * 2u),
-                  kSrc(uint64_t(g0) * kRows * Dh16 * 2u, uint64_t(products) * kRows * Dh16 * 2u),
-                  L, L, L });   // 4 / 5: Linear's bias / residual, unread here
+                  kSrc(uint64_t(g0) * kRows * dh16 * 2u, uint64_t(products) * kRows * dh16 * 2u),
+                  L,
+                  L,
+                  L });   // 4 / 5: Linear's bias / residual, unread here
             grid(xe3QkPick_, M, xe3KeyRows_, gx, gy);
             cmdBuff.bindPipeline(pipeXe3Qk_)
                 .bindDescSets({ descSetXe3Qk_[chunk] })
@@ -1534,7 +1536,12 @@ inline void Attention::run(eva::CommandBuffer cmdBuff)
                 M, Dh, xe3KeyRows_, xe3KeyRows_, xe3KeyRows_, ldv, Tq_, Hq, h0, Hkv, g0, M, xe3KeyRows_
             };
             descSetXe3Pv_[chunk].write(
-                { O, P, Vp(uint64_t(g0) * xe3KeyRows_ * ldv * 2u, uint64_t(products) * xe3KeyRows_ * ldv * 2u), L, L, L });
+                { O,
+                  P,
+                  Vp(uint64_t(g0) * xe3KeyRows_ * ldv * 2u, uint64_t(products) * xe3KeyRows_ * ldv * 2u),
+                  L,
+                  L,
+                  L });
             grid(xe3PvPick_, M, Dh, gx, gy);
             cmdBuff.bindPipeline(pipeXe3Pv_)
                 .bindDescSets({ descSetXe3Pv_[chunk] })

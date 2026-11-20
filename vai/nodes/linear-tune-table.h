@@ -62,16 +62,14 @@ struct LinearTuneEntry
 };
 
 // Where linearTunePick()'s configuration came from.
-enum class LinearTuneSource
-{
+enum class LinearTuneSource {
     Exact,       // the table's row for this shape
     Neighbour,   // a nearby row's configuration, revised and reranked
     Fallback,    // the vendor's rule
 };
 
 // What linearTunePick() does with a shape the table does not have.
-enum class LinearTuneMiss
-{
+enum class LinearTuneMiss {
     Fallback,    // the vendor's rule
     Neighbour,   // the nearest rows' configurations, revised and reranked
 };
@@ -177,8 +175,9 @@ private:
 //   score(s, cfg)   -> double              higher is better
 //   fallback(s)     -> Cfg
 template <class Cfg, class Revise, class Score, class Fallback>
-LinearTuneResult<Cfg> linearTunePick(const LinearTuneTable<Cfg>& table, const LinearShape& s, LinearTuneMiss miss,
-                                     uint32_t k, Revise&& revise, Score&& score, Fallback&& fallback)
+LinearTuneResult<Cfg> linearTunePick(
+    const LinearTuneTable<Cfg>& table, const LinearShape& s, LinearTuneMiss miss, uint32_t k, Revise&& revise,
+    Score&& score, Fallback&& fallback)
 {
     if (const auto* hit = table.exact(s))
         return { hit->cfg, LinearTuneSource::Exact };
@@ -205,6 +204,6 @@ LinearTuneResult<Cfg> linearTunePick(const LinearTuneTable<Cfg>& table, const Li
 }
 
 
-} // namespace vai::node
+}   // namespace vai::node
 
-#endif // VAI_NODES_LINEAR_TUNE_TABLE_H
+#endif   // VAI_NODES_LINEAR_TUNE_TABLE_H

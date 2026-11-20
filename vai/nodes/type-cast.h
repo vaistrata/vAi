@@ -103,10 +103,9 @@ inline void TypeCast::run(eva::CommandBuffer cmdBuff)
     const uint32_t groups = CEIL_DIV(N, wgSize);
     const uint32_t gy = CEIL_DIV(groups, device().maxComputeWorkGroupCount()[0]), gx = CEIL_DIV(groups, gy);
 
-    cmdBuff
-        .bindPipeline(pipe)
+    cmdBuff.bindPipeline(pipe)
         .setPushConstants(0, sizeof(constants), &constants)
-        .bindDescSets({descSet})
+        .bindDescSets({ descSet })
         .dispatch(gx, gy)
         .barrier(eva::SYNC_SCOPE::COMPUTE_WRITE / (*this)["out0"].buffer() / eva::SYNC_SCOPE::COMPUTE_READ);
 }

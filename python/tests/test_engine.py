@@ -1,4 +1,5 @@
 """Tensor <-> numpy, forward I/O and Weights."""
+
 import gc
 import json
 import struct
@@ -15,6 +16,7 @@ from pyvai import nodes
 # ---------------------------------------------------------------------------
 # Tensor <-> numpy
 # ---------------------------------------------------------------------------
+
 
 def test_tensor_numpy_roundtrip(rng):
     """from_numpy() / to_numpy() keep shape and values, through reshape() and permute() too."""
@@ -43,8 +45,10 @@ def test_u32_roundtrip():
 # Forward I/O
 # ---------------------------------------------------------------------------
 
+
 class _ReluNet(pyvai.NeuralNet):
     """A real kernel with its own output buffer (no aliasing)."""
+
     def __init__(self):
         super().__init__()
         self.act = nodes.ActivationNode(act_type=pyvai.ActType.RELU)
@@ -53,15 +57,17 @@ class _ReluNet(pyvai.NeuralNet):
 
 class _AddNet(pyvai.NeuralNet):
     """Two inputs (a, b), one output."""
+
     def __init__(self):
         super().__init__()
         self.add = nodes.AddNode()
-        self.input("a") - "in0"/self.add - self.output("out0")
-        self.input("b") - "in1"/self.add
+        self.input("a") - "in0" / self.add - self.output("out0")
+        self.input("b") - "in1" / self.add
 
 
 class _TwoOutNet(pyvai.NeuralNet):
     """One input fanning out to two outputs: `same` (identity) and `relu`."""
+
     def __init__(self):
         super().__init__()
         self.id = nodes.IdentityNode()
@@ -115,10 +121,10 @@ def test_output_keeps_net_alive():
     np.testing.assert_array_equal(view.to_numpy(), _RELU_X.reshape(2, 2))
     del out
     gc.collect()
-    assert dead() is not None                       # the view alone still pins it
+    assert dead() is not None  # the view alone still pins it
     del view
     gc.collect()
-    assert dead() is None                           # the net <-> cached-output cycle is collectable
+    assert dead() is None  # the net <-> cached-output cycle is collectable
 
 
 def test_no_leaks_at_interpreter_exit(tmp_path):
@@ -133,11 +139,17 @@ def test_no_leaks_at_interpreter_exit(tmp_path):
         " - net.output('out0')\n"
         "out = net(pyvai.Tensor.from_numpy(np.arange(4, dtype=np.float32)))\n"
         "view = out.reshape([2, 2]); view.to_numpy()\n"
-        "nodes.IdentityNode() - nodes.IdentityNode()\n"      # wired, never given a net
+        "nodes.IdentityNode() - nodes.IdentityNode()\n"  # wired, never given a net
         "del net, out, view\n"
     )
-    r = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True,
-                       stdin=subprocess.DEVNULL, timeout=120, cwd=str(tmp_path))
+    r = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+        timeout=120,
+        cwd=str(tmp_path),
+    )
     assert r.returncode == 0, r.stderr
     assert "leaked" not in r.stderr, r.stderr
 
@@ -146,12 +158,16 @@ def test_no_leaks_at_interpreter_exit(tmp_path):
 # Weights
 # ---------------------------------------------------------------------------
 
+
 def _write_safetensors(path, tensors: dict) -> None:
     """Hand-rolled minimal safetensors writer — no `safetensors` dependency."""
     metadata, blobs, offset = {}, [], 0
     for name, arr in tensors.items():
-        metadata[name] = {"dtype": "F32", "shape": list(arr.shape),
-                          "data_offsets": [offset, offset + arr.nbytes]}
+        metadata[name] = {
+            "dtype": "F32",
+            "shape": list(arr.shape),
+            "data_offsets": [offset, offset + arr.nbytes],
+        }
         blobs.append(arr.tobytes())
         offset += arr.nbytes
     header = json.dumps(metadata).encode("utf-8")

@@ -108,7 +108,7 @@ def _tensor(array):
 def _net(make, slots, params):
     class Net(pyvai.NeuralNet):
         def __init__(self):
-            super().__init__(w_default_dtype=pyvai.Dtype.F32)
+            super().__init__(w_default_dtype=pyvai.Dtype.F32, o_default_dtype=pyvai.Dtype.F32)
             self.node = make()
             self.input(slots[0]) - slots[0] / self.node - self.output("out0")
             for slot in slots[1:]:

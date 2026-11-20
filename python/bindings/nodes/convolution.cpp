@@ -21,7 +21,7 @@ static void bindConvolution(nb::module_& m)
         required("stride", &C::stride).check(atLeast(1u), "must be >= 1"),
         field("accept_residual", &C::acceptResidual),
         field("residual_order", &C::residualOrder),
-        field("act_type", &C::activation));
+        field("act_type", &C::actType));
 }
 PYVAI_NODE_BINDING(bindConvolution);
 

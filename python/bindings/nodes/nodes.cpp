@@ -29,12 +29,12 @@ void bindNodes(nb::module_& m)
     // vai::ActType, ResidualOrder and KVCacheCounter are argument types of nodes below:
     // register them first.
     nb::enum_<vai::ActType>(m, "ActType")
-        .value("NONE",      vai::ActType::None)
-        .value("RELU",      vai::ActType::Relu)
-        .value("GELU",      vai::ActType::Gelu,     "Exact, through erf.")
+        .value("NONE", vai::ActType::None)
+        .value("RELU", vai::ActType::Relu)
+        .value("GELU", vai::ActType::Gelu, "Exact, through erf.")
         .value("GELU_TANH", vai::ActType::GeluTanh, "The tanh approximation (gelu_pytorch_tanh).")
-        .value("SILU",      vai::ActType::Silu)
-        .value("SIGMOID",   vai::ActType::Sigmoid);
+        .value("SILU", vai::ActType::Silu)
+        .value("SIGMOID", vai::ActType::Sigmoid);
 
     nb::enum_<vai::ResidualOrder>(
         m, "ResidualOrder", "Where a node adds its `residual` input, relative to the activation.")

@@ -21,7 +21,7 @@ static void bindLinear(nb::module_& m)
         required("out_dim", &C::outDim),
         field("accept_residual", &C::acceptResidual),
         field("residual_order", &C::residualOrder),
-        field("act_type", &C::activation),
+        field("act_type", &C::actType),
         field("scalar_scale", &C::scalarScale),
         // The core asserts (aborts) on the tile path.
         field("split_size", &C::splitSize).check([](uint32_t s) { return s == 0 || s >= 32; }, "must be 0 or >= 32"));

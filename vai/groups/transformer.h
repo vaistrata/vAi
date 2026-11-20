@@ -33,11 +33,11 @@ struct TransformerConfig {
     uint32_t numQHeads;
     uint32_t numKVHeads;   // fewer than numQHeads for GQA
     uint32_t ffnHiddenDim;
-    vai::ActType ffnActType;              // the FFN's activation, its GLU variant when gated
+    vai::ActType ffnActType;                  // the FFN's activation, its GLU variant when gated
     float normEps = 1e-5f;                    // every norm, QK included
     bool withQkNorm = false;                  // per-head RMS norm on Q and K, before RoPE
     std::optional<vai::RopeConfig> ropeCfg;   // absent: no position encoding
-    bool ffnFuseGlu = false;                  // gated FFN: the GLU inside its first projection (GatedFeedForward::fuseGlu)
+    bool ffnFuseGlu = false;   // gated FFN: the GLU inside its first projection (GatedFeedForward::fuseGlu)
 };
 
 

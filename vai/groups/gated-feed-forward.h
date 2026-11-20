@@ -39,16 +39,13 @@ struct GatedFeedForward : public vai::NodeGroup
     };
 
     GatedFeedForward(Config config)
-    : gateValue({
-        .inDim = config.inDim,
-        .outDim = 2 * config.hiddenDim,
-        .actType = config.fuseGlu ? config.actType : vai::ActType::None,   // fused: the gate's
-        .glu = config.fuseGlu})
-    , gatedMul({config.actType})
-    , out({
-        .inDim = config.hiddenDim,
-        .outDim = config.outDim,
-        .acceptResidual = config.acceptResidual})
+    : gateValue(
+          { .inDim = config.inDim,
+            .outDim = 2 * config.hiddenDim,
+            .actType = config.fuseGlu ? config.actType : vai::ActType::None,   // fused: the gate's
+            .glu = config.fuseGlu })
+    , gatedMul({ config.actType })
+    , out({ .inDim = config.hiddenDim, .outDim = config.outDim, .acceptResidual = config.acceptResidual })
     {
         // clang-format off
         if (config.fuseGlu)
