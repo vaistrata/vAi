@@ -6828,7 +6828,7 @@ inline void Convolution::runK3S2(eva::CommandBuffer cmdBuff, const Workload& wor
         VAI_ASSERT((plan.cooperativeMatrix() && plan.packedWeights) ? plan.shape.wo == workload.wo : plan.shape.matchShape(workload));
     }
     if (plan.split() && !plan_.useCM)
-        VAI_ASSERT(plan.splitK == 4u || plan.splitK == 8u);
+        VAI_ASSERT(plan.splitK == 4u || plan.splitK == 8u || plan.splitK == 16u);
 
     PipelineBinding& dispatchPipeline = workload.wDtype == Dtype::Fp16 &&
             !plan_.useCM && plan.split()
