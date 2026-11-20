@@ -38,6 +38,8 @@ class Pool2d : public vai::Node
 public:
     struct PipeParams {
         bool aligned = false;
+        uint32_t wgSize = 64u;
+        bool interior = false;
         vai::Dtype iDtype = vai::Dtype::None;
 
         bool operator==(const PipeParams&) const = default;
@@ -127,12 +129,23 @@ inline void Pool2d<mode>::prepare()
     else                      { outShape[r - 2] = Ho; outShape[r - 1] = Wo; }
     (*this)["out0"] = Tensor(outShape, oDtype);
 
-    const PipeParams p = { .aligned = config_.channelsLast && C % 4 == 0, .iDtype = iDtype };
+    const bool interior =
+        mode == PoolMode::Max && !config_.channelsLast && !config_.ceilMode && K == 3u && S == 2u && P == 1u &&
+        B == 1u && C == 64u && H == 240u && W == 320u && iDtype == Dtype::Fp32 && oDtype == Dtype::Fp32 &&
+        device().vendorID() == eva::VENDOR_ID::NVIDIA && device().deviceID() == 0x2b85u &&
+        device().computeBlockCount() == 170u && device().maxComputeWorkGroupInvocations() >= 256u;
+    const PipeParams p = {
+        .aligned = config_.channelsLast && C % 4 == 0,
+        .wgSize = interior ? 256u : 64u,
+        .interior = interior,
+        .iDtype = iDtype
+    };
     if (!pipe || p != pipeParams)
     {
         pipeParams = p;
         // clang-format off
         pipe = pipelinePool().request("pool2d", {
+            eva::constant_id<7>(p.wgSize), eva::constant_id<8>(p.interior),
             eva::constant_id<0>(config_.channelsLast ? 1u : 0u),      // channelsLast
             eva::constant_id<1>(K),                                   // K
             eva::constant_id<2>(S),                                   // S
@@ -177,9 +190,9 @@ inline void Pool2d<mode>::run(eva::CommandBuffer cmdBuff)
         .setPushConstants(0, sizeof(constants), &constants);
 
     if (config_.channelsLast)
-        cmdBuff.dispatch2(pipeParams.aligned ? C / 4 : C, Wo, B * Ho);
+        cmdBuff.dispatch(CEIL_DIV(pipeParams.aligned ? C / 4 : C, pipeParams.wgSize), Wo, B * Ho);
     else
-        cmdBuff.dispatch2(Ho * Wo, C);
+        cmdBuff.dispatch(CEIL_DIV(Ho * Wo, pipeParams.wgSize), C);
 
     cmdBuff.barrier(eva::SYNC_SCOPE::COMPUTE_WRITE / outBuf / eva::SYNC_SCOPE::COMPUTE_READ);
 }
