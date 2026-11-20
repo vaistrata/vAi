@@ -71,7 +71,8 @@ class YOLOX:
 
         # BGR in 0..255, as the checkpoint expects.
         proc = image_processor(image).letterbox(self.image_size, Align.TOP_LEFT, 114.0).bgr().chw()
-        out = self.model(Tensor.from_numpy(proc.to_numpy())).to_numpy().reshape(-1)
+        pixels = proc.to_numpy()[None, ...]
+        out = self.model(Tensor.from_numpy(pixels)).to_numpy()[0]
 
         # Objectness * class filter + NMS, mapped back to the image (C++).
         return list(
