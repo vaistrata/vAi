@@ -21,7 +21,7 @@
 | [Identity](#identity) | Pass-through node (no computation) | None |
 | [IndexCopy](#indexcopy) | write source slices at listed indices, as torch.index_copy | `index-copy.comp` |
 | [LayerNorm](#layernorm) | layer normalization over the feature axis, single kernel | `layer-norm.comp` |
-| [Linear](#linear) | O = I · Wᵀ, split between two output decompositions | `linear-pack-intel.comp`, `linear-preshuffle.comp`, `linear-slab.comp`, `linear-tile-intel.comp`, `linear-cm-amd.comp`, `linear-cm-nv.comp`, `linear-cm.comp`, `linear-tile.comp`, `linear-reduce.comp` |
+| [Linear](#linear) | O = I · Wᵀ, split between two output decompositions | `linear-pack-intel.comp`, `linear-preshuffle.comp`, `linear-slab-q.comp`, `linear-slab.comp`, `linear-tile-intel.comp`, `linear-cm-amd.comp`, `linear-tile-q.comp`, `linear-cm-nv.comp`, `linear-cm.comp`, `linear-tile.comp`, `linear-reduce.comp`, `quantize.comp` |
 | [Mul](#mul) | Element-wise multiplication | `mul.comp` |
 | [NearestUpsample](#nearestupsample) | Replicates CHW pixels by an integer scale factor. | `upsample.comp` |
 | [Permute](#permute) | Permutes the axes of a tensor of any rank. | `permute.comp` |
@@ -740,6 +740,7 @@ Source: [`vai/nodes/linear.h`](../../vai/nodes/linear.h)
 | `out0` | output |  |
 | `bias` | persistent |  |
 | `weight` | persistent |  |
+| `inQuant` | temporary |  |
 | `partial` | temporary |  |
 
 **Config**
@@ -797,17 +798,27 @@ s is Config::scalarScale (e.g. dt of an Euler step x + dt · v), 1 by default.
 a batch. The "bias" slot always exists; the bias applies only when the
 weight loader filled it.
 
+A quantized weight is a "weight" tensor of dtype Dtype::Qint8: [N, K] int8
+quants, then in the same buffer one fp16 scale per 32 elements of a row. The
+float kernels dequantize it as they load, or once into the packed copy on
+Strix. Where the device runs the packed 4x8 signed integer dot product
+natively, an integer kernel (linear-slab-q, linear-tile-q) can run instead,
+reading in0 quantized into the temporary "inQuant" (useIntegerDot()).
+
 **Kernels**
 
 - `vai/shaders/linear-pack-intel.comp`
 - `vai/shaders/linear-preshuffle.comp`
+- `vai/shaders/linear-slab-q.comp`
 - `vai/shaders/linear-slab.comp`
 - `vai/shaders/linear-tile-intel.comp`
 - `vai/shaders/linear-cm-amd.comp`
+- `vai/shaders/linear-tile-q.comp`
 - `vai/shaders/linear-cm-nv.comp`
 - `vai/shaders/linear-cm.comp`
 - `vai/shaders/linear-tile.comp`
 - `vai/shaders/linear-reduce.comp`
+- `vai/shaders/quantize.comp`
 
 ---
 
@@ -1177,6 +1188,9 @@ Only Gemma uses scale (sqrt(D)). It stays out of the weights because a tied LM h
 reads the same table. posTableSize > 0 adds a "posWeight" [posTableSize, D] slot
 and needs setKvCacheCounter() to supply cachedCount; positions restart at each
 sequence, which the kernel only has to work out when there is more than one.
+
+A quantized table is the Dtype::Qint8 "weight" tensor a Linear takes ([V, D]),
+so a tied head shares it. The kernel dequantizes the rows it gathers.
 
 **Kernels**
 
