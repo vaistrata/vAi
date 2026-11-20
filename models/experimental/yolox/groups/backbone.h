@@ -13,10 +13,10 @@ namespace model::experimental::yolox::group {
 
 /////////////////////////////////////////////////////////////////////////////////////////
 // Backbone - CSPDarknet backbone
-// Input:   in0     [3, H, W]
-// Outputs: out_p3  [4*baseChannels, H/8, W/8]
-//          out_p4  [8*baseChannels, H/16, W/16]
-//          out_p5  [16*baseChannels, H/32, W/32]
+// Input:   in0     [B, 3, H, W]
+// Outputs: out_p3  [B, 4*baseChannels, H/8, W/8]
+//          out_p4  [B, 8*baseChannels, H/16, W/16]
+//          out_p5  [B, 16*baseChannels, H/32, W/32]
 /////////////////////////////////////////////////////////////////////////////////////////
 struct Backbone : public vai::NodeGroup
 {
@@ -34,7 +34,6 @@ struct Backbone : public vai::NodeGroup
                  .epilogue = vai::Epilogue::Silu })
         , csp(outChannels, outChannels, repeats, shortcut)
         {
-
             if (hasSPP)
                 spp.emplace(outChannels, outChannels);
 
@@ -61,9 +60,7 @@ struct Backbone : public vai::NodeGroup
         stem - stage1 - stage2 - stage3 - stage4;
         // clang-format on
         defineSlot("in0", stem.slot("in0"));
-        defineSlot(
-
-            "out_p3", stage2.slot("out0"));
+        defineSlot("out_p3", stage2.slot("out0"));
         defineSlot("out_p4", stage3.slot("out0"));
         defineSlot("out_p5", stage4.slot("out0"));
     }

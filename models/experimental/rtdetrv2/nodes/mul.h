@@ -8,18 +8,17 @@
 
 namespace model::experimental::rtdetrv2::node {
 
+/*=============================================================================
+  Mul - Element-wise multiplication
+  Input: in0 / in1 with broadcast-compatible, contiguous shapes.
+  Output: out0 [broadcast shape] = in0 * in1
 
-/////////////////////////////////////////////////////////////////////////////////////////
-// Mul - Element-wise multiplication
-// Input: in0 / in1 with broadcast-compatible, contiguous shapes.
-// Output: out0 [broadcast shape] = in0 * in1
-//
-// Align axes from the right: dimensions must match or one must be 1.
-// Inputs share a dtype. Like vai::Tensor, this node requires nonempty, positive
-// shapes; use [1] for a scalar. No input data is replicated for broadcasting.
-// With constantIn1, assign in1 directly before the first inference instead of
-// connecting a producer. It is uploaded and retained as a persistent tensor.
-/////////////////////////////////////////////////////////////////////////////////////////
+  Align axes from the right: dimensions must match or one must be 1.
+  Inputs share a dtype. Like vai::Tensor, this node requires nonempty, positive
+  shapes; use [1] for a scalar. No input data is replicated for broadcasting.
+  With constantIn1, assign in1 directly before the first inference instead of
+  connecting a producer. It is uploaded and retained as a persistent tensor.
+=============================================================================*/
 class Mul : public vai::Node
 {
     eva::ComputePipeline pipe_;

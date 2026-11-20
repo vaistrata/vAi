@@ -1,40 +1,25 @@
 /*=============================================================================
   Written by   phg9296@vaistrata.com
   Task         RT-DETRv2 — detects objects in one image and reports timings.
-  Assets       data/rtdetrv2/ckpts/small/model.safetensors
+  Assets       data/ckpts/rtdetrv2/pekingu/small/model.safetensors
                  from  huggingface.co/PekingU/rtdetr_v2_r18vd
                data/images/dog.jpg
                  ships with the repo
 =============================================================================*/
 
-#include "models/experimental/rtdetrv2/pekingu-weights.h"
-#include "models/experimental/rtdetrv2/processing.h"
+#include "net.h"
+#include "pekingu-weights.h"
+#include "processing.h"
 #include "vai/utils/image-processor.h"
 #include <cstdio>
-#include <iterator>
 #include <string>
 
 namespace rtdetrv2 = model::experimental::rtdetrv2;
 
 namespace {
 
-constexpr const char* cocoClasses[80] = {
-    "person",         "bicycle",    "car",           "motorcycle",    "airplane",     "bus",           "train",
-    "truck",          "boat",       "traffic light", "fire hydrant",  "stop sign",    "parking meter", "bench",
-    "bird",           "cat",        "dog",           "horse",         "sheep",        "cow",           "elephant",
-    "bear",           "zebra",      "giraffe",       "backpack",      "umbrella",     "handbag",       "tie",
-    "suitcase",       "frisbee",    "skis",          "snowboard",     "sports ball",  "kite",          "baseball bat",
-    "baseball glove", "skateboard", "surfboard",     "tennis racket", "bottle",       "wine glass",    "cup",
-    "fork",           "knife",      "spoon",         "bowl",          "banana",       "apple",         "sandwich",
-    "orange",         "broccoli",   "carrot",        "hot dog",       "pizza",        "donut",         "cake",
-    "chair",          "couch",      "potted plant",  "bed",           "dining table", "toilet",        "tv",
-    "laptop",         "mouse",      "remote",        "keyboard",      "cell phone",   "microwave",     "oven",
-    "toaster",        "sink",       "refrigerator",  "book",          "clock",        "vase",          "scissors",
-    "teddy bear",     "hair drier", "toothbrush"
-};
-
 // Group matching operations by stage and input shape, as in the YOLO demos.
-void setProfileTags(rtdetrv2::Model& model)
+void setProfileTags(rtdetrv2::Net& net)
 {
     auto tagConv = [](vai::node::Convolution& node, const std::string& stage, uint32_t spatial) {
         const auto& cfg = node.config_;
@@ -70,7 +55,7 @@ void setProfileTags(rtdetrv2::Model& model)
             tagConv(*csp.optionConv, "Encoder", spatial);
     };
 
-    auto& backbone = model.backbone;
+    auto& backbone = net.backbone;
     uint32_t spatial = 640;
     tagConv(backbone.stem0, "Backbone", spatial);
     spatial /= backbone.stem0.config_.stride;
@@ -78,7 +63,7 @@ void setProfileTags(rtdetrv2::Model& model)
     spatial /= backbone.stem1.config_.stride;
     tagConv(backbone.stem2, "Backbone", spatial);
     spatial /= backbone.stem2.config_.stride;
-    backbone.maxpool.setProfileTag("Backbone.MaxPool");
+    backbone.maxPool.setProfileTag("Backbone.MaxPool");
     spatial /= 2;
     for (auto& block : backbone.blocks)
     {
@@ -97,7 +82,7 @@ void setProfileTags(rtdetrv2::Model& model)
             tagConv(*shortcut, "Backbone", shortcutSpatial);
     }
 
-    auto& encoder = model.encoder;
+    auto& encoder = net.encoder;
     tagConv(encoder.proj0, "Encoder", 80);
     tagConv(encoder.proj1, "Encoder", 40);
     tagConv(encoder.proj2, "Encoder", 20);
@@ -127,15 +112,15 @@ void setProfileTags(rtdetrv2::Model& model)
     encoder.fpnConcat1.setProfileTag("Encoder.Concat");
     encoder.panConcat1.setProfileTag("Encoder.Concat");
 
-    tagConv(model.proj0, "DecoderInput", 80);
-    model.tokenPermute0.setProfileTag("DecoderInput.Permute");
-    tagConv(model.proj1, "DecoderInput", 40);
-    model.tokenPermute1.setProfileTag("DecoderInput.Permute");
-    tagConv(model.proj2, "DecoderInput", 20);
-    model.tokenPermute2.setProfileTag("DecoderInput.Permute");
-    model.memory.setProfileTag("DecoderInput.Concat");
+    tagConv(net.proj0, "DecoderInput", 80);
+    net.tokenPermute0.setProfileTag("DecoderInput.Permute");
+    tagConv(net.proj1, "DecoderInput", 40);
+    net.tokenPermute1.setProfileTag("DecoderInput.Permute");
+    tagConv(net.proj2, "DecoderInput", 20);
+    net.tokenPermute2.setProfileTag("DecoderInput.Permute");
+    net.memory.setProfileTag("DecoderInput.Concat");
 
-    auto& querySelection = model.querySelection;
+    auto& querySelection = net.querySelection;
     tagLinear(querySelection.proj, "QuerySelection", 8400);
     tagLinear(querySelection.classHead, "QuerySelection", 8400);
     querySelection.norm.setProfileTag("QuerySelection.LayerNorm");
@@ -148,7 +133,7 @@ void setProfileTags(rtdetrv2::Model& model)
     querySelection.querySelect.setProfileTag("QuerySelection.GatherMemory");
     querySelection.anchorSelect.setProfileTag("QuerySelection.GatherAnchors");
 
-    auto& decoder = model.decoder;
+    auto& decoder = net.decoder;
     tagLinear(decoder.valueProjection, "Decoder.CrossAttention.Values", 8400);
     decoder.initBoxes.setProfileTag("Decoder.InitBoxes.Sigmoid");
     for (auto& block : decoder.blocks)
@@ -184,15 +169,15 @@ void setProfileTags(rtdetrv2::Model& model)
 
 int main()
 {
-    constexpr auto modelCfg = rtdetrv2::ModelConfig::S();
+    constexpr auto modelCfg = rtdetrv2::ModelConfig::small();
     constexpr vai::Dtype dtype = vai::Dtype::Fp32;
     constexpr float threshold = 0.5f;
     const std::string imagePath = VAI_DATA_DIR "/images/dog.jpg";
 
     auto device = vai::getVaiDevice();
-    rtdetrv2::Model model({ .device = device, .wDefaultDtype = dtype, .oDefaultDtype = dtype }, modelCfg);
-    loadWeights<"pekingu">(model);
-    setProfileTags(model);
+    rtdetrv2::Net net({ .device = device, .wDefaultDtype = dtype, .oDefaultDtype = dtype }, modelCfg);
+    loadWeights<"pekingu">(net);
+    setProfileTags(net);
 
     // Pillow's antialias squashes the image to 640x640 in [0, 1].
     vai::utils::ImageProcessor image(imagePath);
@@ -201,12 +186,12 @@ int main()
 
     vai::Tensor logits, boxes;
     for (uint32_t i = 0; i < 5u; ++i)
-        model({ { "in0", input } }, { { "pred_logits", &logits }, { "pred_boxes", &boxes } });
-    model.resetProfileRecords();
+        net({ { "in0", input } }, { { "pred_logits", &logits }, { "pred_boxes", &boxes } });
+    net.resetProfileRecords();
 
     for (uint32_t i = 0; i < 10u; ++i)
-        model({ { "in0", input } }, { { "pred_logits", &logits }, { "pred_boxes", &boxes } });
-    model.printProfile();
+        net({ { "in0", input } }, { { "pred_logits", &logits }, { "pred_boxes", &boxes } });
+    net.printProfile();
 
     auto detections = rtdetrv2::postprocess(
         logits.getData<float>(),
@@ -222,7 +207,7 @@ int main()
         std::printf(
             "[%zu] %s (%.2f%%): [%.1f, %.1f, %.1f, %.1f]\n",
             i,
-            cocoClasses[detection.label],
+            rtdetrv2::cocoClasses[detection.label],
             detection.score * 100.0f,
             detection.x1,
             detection.y1,

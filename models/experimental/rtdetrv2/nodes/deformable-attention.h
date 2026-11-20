@@ -6,27 +6,27 @@
 
 namespace model::experimental::rtdetrv2::node {
 
-/////////////////////////////////////////////////////////////////////////////////////////
-// DeformableAttention - Sampling coordinates, softmax, and weighted bilinear sampling
-// Input:  values [B, S, M, D] (FP32 or FP16), boxes [B, Q, R, C],
-//         offsets [B, Q, M, P, 2], logits [B, Q, M, P] (remaining inputs FP32)
-// Output: out0 [B, Q, M*D] (FP32)
-//
-// S=sum(H_l*W_l), P=sum(pointCounts_l), in spatialShapes/pointCounts level order.
-// R=1 shares boxes across levels; R=L supplies a box per level.
-// For a level with P_l points, C=4 boxes use normalized (cx, cy, width, height):
-//   locations = boxes.xy + offsets / P_l * boxes.wh * offsetScale.
-// C=2 also accepts point coordinates: boxes.xy + offsets / (W_l, H_l).
-// weights = softmax(logits, axis=P), over ALL levels for each (batch, query, head).
-// out[b,q,m,d] = sum_p(weights[b,q,m,p] * bilinear(values, locations[b,q,m,p], m,d)).
-//
-// Two kernels share temporary locations/weights buffers within this node. The second
-// indexes each level directly, with no Split/Concatenate buffers. Pixel coordinates
-// are (u*W_l-0.5, v*H_l-0.5); out-of-bounds neighbors are zero (align_corners=false).
-// Coordinates, interpolation, accumulation, and output use FP32. Output is query-major,
-// so merging M*D needs no permute.
-// All tensors are contiguous with positive dimensions; inputs must be finite.
-/////////////////////////////////////////////////////////////////////////////////////////
+/*=============================================================================
+  DeformableAttention - Sampling coordinates, softmax, and weighted bilinear sampling
+  Input:  values [B, S, M, D] (FP32 or FP16), boxes [B, Q, R, C],
+          offsets [B, Q, M, P, 2], logits [B, Q, M, P] (remaining inputs FP32)
+  Output: out0 [B, Q, M*D] (FP32)
+
+  S=sum(H_l*W_l), P=sum(pointCounts_l), in spatialShapes/pointCounts level order.
+  R=1 shares boxes across levels; R=L supplies a box per level.
+  For a level with P_l points, C=4 boxes use normalized (cx, cy, width, height):
+    locations = boxes.xy + offsets / P_l * boxes.wh * offsetScale.
+  C=2 also accepts point coordinates: boxes.xy + offsets / (W_l, H_l).
+  weights = softmax(logits, axis=P), over ALL levels for each (batch, query, head).
+  out[b,q,m,d] = sum_p(weights[b,q,m,p] * bilinear(values, locations[b,q,m,p], m,d)).
+
+  Two kernels share temporary locations/weights buffers within this node. The second
+  indexes each level directly, with no Split/Concatenate buffers. Pixel coordinates
+  are (u*W_l-0.5, v*H_l-0.5); out-of-bounds neighbors are zero (align_corners=false).
+  Coordinates, interpolation, accumulation, and output use FP32. Output is query-major,
+  so merging M*D needs no permute.
+  All tensors are contiguous with positive dimensions; inputs must be finite.
+=============================================================================*/
 class DeformableAttention : public vai::Node
 {
     eva::ComputePipeline paramsPipe_, samplePipe_;

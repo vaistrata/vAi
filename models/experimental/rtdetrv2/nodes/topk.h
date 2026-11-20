@@ -6,17 +6,17 @@
 
 namespace model::experimental::rtdetrv2::node {
 
-/////////////////////////////////////////////////////////////////////////////////////////
-// TopK - Row-wise top-k selection
-// Input:  in0     [N] or [M, N] (contiguous fp32 or fp16)
-// Output: values  [K] or [M, K] (same dtype as in0)
-//         indices [K] or [M, K] (raw uint32 indices, in 4-byte slots)
-//
-// Each row selects its K largest values, sorted by descending value then ascending
-// index. Indices are positions within the input row; read with getData<uint32_t>().
-// NaNs sort after all numbers, including -infinity, with ties broken by index.
-// Output values preserve the input bits, including signed zero and NaN payloads.
-/////////////////////////////////////////////////////////////////////////////////////////
+/*=============================================================================
+  TopK - Row-wise top-k selection
+  Input:  in0     [N] or [M, N] (contiguous fp32 or fp16)
+  Output: values  [K] or [M, K] (same dtype as in0)
+          indices [K] or [M, K] (raw uint32 indices, in 4-byte slots)
+
+  Each row selects its K largest values, sorted by descending value then ascending
+  index. Indices are positions within the input row; read with getData<uint32_t>().
+  NaNs sort after all numbers, including -infinity, with ties broken by index.
+  Output values preserve the input bits, including signed zero and NaN payloads.
+=============================================================================*/
 class TopK : public vai::Node
 {
     eva::ComputePipeline blockPipe_, mergePipe_;

@@ -5,11 +5,11 @@
 
 namespace model::experimental::rtdetrv2::node {
 
-/////////////////////////////////////////////////////////////////////////////////////////
-// QueryScore - Maximum class logit per candidate
-// Input:  in0 [N, C] (fp32)
-// Output: out0 [N] (fp32)
-/////////////////////////////////////////////////////////////////////////////////////////
+/*=============================================================================
+  QueryScore - Maximum class logit per candidate
+  Input:  in0 [N, C] (fp32)
+  Output: out0 [N] (fp32)
+=============================================================================*/
 class QueryScore : public vai::Node
 {
     eva::ComputePipeline pipe_;

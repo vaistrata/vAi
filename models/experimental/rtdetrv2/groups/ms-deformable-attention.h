@@ -14,7 +14,7 @@ namespace model::experimental::rtdetrv2::group {
 // MS-Deformable Attention Config
 /////////////////////////////////////////////////////////////////////////////////////////
 
-struct MSDeformableAttnConfig
+struct MSDeformableAttentionConfig
 {
     uint32_t inDim;
     uint32_t outDim;
@@ -45,7 +45,7 @@ struct MSDeformableAttention : public vai::NodeGroup
     vai::node::Reshape valueShape, offsetShape, logitShape;
     node::DeformableAttention attnCore;
 
-    MSDeformableAttention(MSDeformableAttnConfig config)
+    MSDeformableAttention(MSDeformableAttentionConfig config)
     : offsets({ .inDim = config.inDim, .outDim = config.numHeads * config.totalPoints() * 2 })
     , logits({ .inDim = config.inDim, .outDim = config.numHeads * config.totalPoints() })
     , out({ .inDim = config.outDim, .outDim = config.outDim })
