@@ -2,6 +2,7 @@
 #define EXPERIMENTAL_YOLOX_GROUPS_NECK_H
 
 #include "csp-layer.h"
+#include "vai/nodes/convolution.h"
 #include "vai/nodes/identity.h"
 #include "vai/nodes/nearest-upsample.h"
 #include "vai/nodes/concat.h"
@@ -16,49 +17,66 @@ namespace model::experimental::yolox::group {
 /////////////////////////////////////////////////////////////////////////////////////////
 struct Neck : public vai::NodeGroup
 {
-    vai::node::Convolution lateralConv0;
-    vai::node::NearestUpsample upsample0{ 2u };
-    vai::node::Concat concatP4;
-    CSPLayer c3P4;
-    vai::node::Convolution reduceConv1;
-    vai::node::NearestUpsample upsample1{ 2u };
-    vai::node::Concat concatP3;
-    CSPLayer c3P3;
-    vai::node::Convolution bottomUpConv2;
-    vai::node::Concat concatN3;
-    CSPLayer c3N3;
-    vai::node::Convolution bottomUpConv1;
-    vai::node::Concat concatN4;
-    CSPLayer c3N4;
+    vai::node::Convolution fpnConv0, fpnConv1;   // 1x1 stride-1
+    vai::node::Convolution panConv0, panConv1;   // 3x3 stride-2
+    CSPLayer fpn0, fpn1;
+    CSPLayer pan0, pan1;
+    vai::node::NearestUpsample upsample0, upsample1;
+    vai::node::Concat fpnConcat0{ { .axis = 1 } }, fpnConcat1{ { .axis = 1 } };
+    vai::node::Concat panConcat0{ { .axis = 1 } }, panConcat1{ { .axis = 1 } };
 
-    Neck(const ModelBaseConfig& cfg)
-    : lateralConv0(baseConv(16u * cfg.baseChannels, 8u * cfg.baseChannels, 1u, 1u))
-    , c3P4(16u * cfg.baseChannels, 8u * cfg.baseChannels, cfg.baseDepth, false)
-    , reduceConv1(baseConv(8u * cfg.baseChannels, 4u * cfg.baseChannels, 1u, 1u))
-    , c3P3(8u * cfg.baseChannels, 4u * cfg.baseChannels, cfg.baseDepth, false)
-    , bottomUpConv2(baseConv(4u * cfg.baseChannels, 4u * cfg.baseChannels, 3u, 2u))
-    , c3N3(8u * cfg.baseChannels, 8u * cfg.baseChannels, cfg.baseDepth, false)
-    , bottomUpConv1(baseConv(8u * cfg.baseChannels, 8u * cfg.baseChannels, 3u, 2u))
-    , c3N4(16u * cfg.baseChannels, 16u * cfg.baseChannels, cfg.baseDepth, false)
+    Neck(uint32_t baseChannels, uint32_t baseDepth)
+    : fpnConv0(
+          { .inChannels = 16u * baseChannels,
+            .outChannels = 8u * baseChannels,
+            .kernelSize = 1u,
+            .stride = 1u,
+            .epilogue = vai::Epilogue::Silu })
+    , fpnConv1(
+          { .inChannels = 8u * baseChannels,
+            .outChannels = 4u * baseChannels,
+            .kernelSize = 1u,
+            .stride = 1u,
+            .epilogue = vai::Epilogue::Silu })
+    , panConv0(
+          { .inChannels = 4u * baseChannels,
+            .outChannels = 4u * baseChannels,
+            .kernelSize = 3u,
+            .stride = 2u,
+            .epilogue = vai::Epilogue::Silu })
+    , panConv1(
+          { .inChannels = 8u * baseChannels,
+            .outChannels = 8u * baseChannels,
+            .kernelSize = 3u,
+            .stride = 2u,
+            .epilogue = vai::Epilogue::Silu })
+    , fpn0(16u * baseChannels, 8u * baseChannels, baseDepth, false)
+    , fpn1(8u * baseChannels, 4u * baseChannels, baseDepth, false)
+    , pan0(8u * baseChannels, 8u * baseChannels, baseDepth, false)
+    , pan1(16u * baseChannels, 16u * baseChannels, baseDepth, false)
+    , upsample0(2u)
+    , upsample1(2u)
     {
         // clang-format off
-        lateralConv0 - upsample0 - "in0"/concatP4;
-        concatP4 - c3P4 - reduceConv1 - upsample1 - "in0"/concatP3;
-        concatP3 - c3P3;
-
-        c3P3       - bottomUpConv2 - "in0"/concatN3;
-        reduceConv1                 - "in1"/concatN3;
-        concatN3 - c3N3 - bottomUpConv1 - "in0"/concatN4;
-        lateralConv0                    - "in1"/concatN4;
-        concatN4 - c3N4;
+        fpnConv0 - upsample0 - "in0" / fpnConcat0;
+        fpnConcat0 - fpn0 - fpnConv1 - upsample1 - "in0" / fpnConcat1;
+        fpnConcat1 - fpn1;
         // clang-format on
 
-        defineSlot("in_p3", concatP3.slot("in1"));
-        defineSlot("in_p4", concatP4.slot("in1"));
-        defineSlot("in_p5", lateralConv0.slot("in0"));
-        defineSlot("out_p3", c3P3.slot("out0"));
-        defineSlot("out_p4", c3N3.slot("out0"));
-        defineSlot("out_p5", c3N4.slot("out0"));
+        // clang-format off
+        fpn1 - panConv0 - "in0" / panConcat0;
+        fpnConv1 - "in1" / panConcat0;
+        panConcat0 - pan0 - panConv1 - "in0" / panConcat1;
+        fpnConv0 - "in1" / panConcat1;
+        panConcat1 - pan1;
+        // clang-format on
+
+        defineSlot("in_p3", fpnConcat1.slot("in1"));
+        defineSlot("in_p4", fpnConcat0.slot("in1"));
+        defineSlot("in_p5", fpnConv0.slot("in0"));
+        defineSlot("out_p3", fpn1.slot("out0"));
+        defineSlot("out_p4", pan0.slot("out0"));
+        defineSlot("out_p5", pan1.slot("out0"));
     }
 };
 

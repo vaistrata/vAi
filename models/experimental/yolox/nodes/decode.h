@@ -4,17 +4,14 @@
 #include "vai/nodes/common.h"
 #include <cstdint>
 #include <string>
-#include <unordered_map>
 
 namespace model::experimental::yolox::node {
 
-inline eva::SpvBlob decodeSpv = eva::SpvBlob::readFrom(EXPERIMENTAL_YOLOX_SHADER_OUTPUT_DIR "/decode.comp.spv");
-
-/////////////////////////////////////////////////////////////////////////////////////////
-// Decode - Decode and interleave the three YOLOX prediction scales
-// Inputs per scale: regobj [5,H,W], cls [numClasses,H,W]
-// Output: out0 [N, 5 + numClasses], rows are cx, cy, w, h, obj, class probabilities
-/////////////////////////////////////////////////////////////////////////////////////////
+/*=============================================================================
+  Decode - Decode and interleave the three YOLOX prediction scales
+  Inputs per scale: regobj [...,5,H,W], cls [...,numClasses,H,W]
+  Output: out0 [...,N,5 + numClasses], rows are cx, cy, w, h, obj, class probabilities
+=============================================================================*/
 class Decode : public vai::Node
 {
     eva::ComputePipeline pipe;
@@ -24,6 +21,7 @@ public:
     struct PipeParams
     {
         vai::Dtype iDtype = vai::Dtype::None;
+        bool batched = false;
 
         bool operator==(const PipeParams&) const = default;
     };
@@ -59,61 +57,49 @@ inline Decode::Decode(Config config)
 inline void Decode::prepare()
 {
     const vai::Dtype oDtype = (oDtype_ == vai::Dtype::None) ? oDefaultDtype() : oDtype_;
-    const uint32_t channels = 5u + config_.numClasses;
-    const uint32_t sizes[3] = {
-        config_.imageSize / 8u,
-        config_.imageSize / 16u,
-        config_.imageSize / 32u,
-    };
-    const char* scales[3] = { "p3", "p4", "p5" };
-
-    const vai::Dtype iDtype = (*this)["regobj_p3"].dtype();
-    uint32_t n = 0u;
-    for (uint32_t i = 0; i < 3u; ++i)
+    const auto& first = (*this)["regobj_p3"];
+    const auto& shape = first.shape();
+    VAI_ASSERT(shape.size() == 3 || shape.size() == 4);
+    const uint32_t batch = vai::outerSize(shape, 3);
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < 3; ++i)
     {
-        const vai::Tensor& regobj = (*this)[std::string("regobj_") + scales[i]];
-        const vai::Tensor& cls = (*this)[std::string("cls_") + scales[i]];
-        VAI_ASSERT(regobj.validShape() && cls.validShape());
-        VAI_ASSERT(regobj.dtype() == iDtype);
-        VAI_ASSERT(cls.dtype() == iDtype);
-        VAI_ASSERT(regobj.isShapeOf(5u, sizes[i], sizes[i]));
-        VAI_ASSERT(cls.isShapeOf(config_.numClasses, sizes[i], sizes[i]));
-        n += sizes[i] * sizes[i];
+        const auto scale = "p" + std::to_string(i + 3);
+        const uint32_t side = config_.imageSize / (8u << i);
+        auto expected = shape;
+        expected[shape.size() - 2] = expected.back() = side;
+        expected[shape.size() - 3] = 5u;
+        const auto& reg = (*this)["regobj_" + scale];
+        const auto& cls = (*this)["cls_" + scale];
+        VAI_ASSERT(reg.shape() == expected && reg.dtype() == first.dtype());
+        expected[shape.size() - 3] = config_.numClasses;
+        VAI_ASSERT(cls.shape() == expected && cls.dtype() == first.dtype());
+        n += side * side;
     }
-
-    const PipeParams p = { .iDtype = iDtype };
+    VAI_ASSERT(batch && batch <= device().maxComputeWorkGroupCount()[2]);
+    const PipeParams p = { .iDtype = first.dtype(), .batched = batch > 1 };
     if (!pipe || p != pipeParams)
     {
         pipeParams = p;
-        const uint32_t p3Size = config_.imageSize / 8u;
-        const uint32_t p4Size = config_.imageSize / 16u;
-        const uint32_t p5Size = config_.imageSize / 32u;
-        const uint32_t p3N = p3Size * p3Size;
-        const uint32_t p4N = p4Size * p4Size;
-        const uint32_t p5N = p5Size * p5Size;
-        const uint32_t n = p3N + p4N + p5N;
-
-        const uint64_t cacheKey = uint64_t(p.iDtype) | (uint64_t(oDtype) << 4u) | (uint64_t(config_.imageSize) << 8u) |
-                                  (uint64_t(config_.numClasses) << 32u);
-        static std::unordered_map<uint64_t, eva::ComputePipeline> cached;
-        auto it = cached.find(cacheKey);
-        if (it == cached.end())
-        {
-            eva::ComputePipeline created = vai::getVaiDevice().createComputePipeline({
-                .csStage = decodeSpv + eva::constant_id<0>(n) + eva::constant_id<1>(config_.numClasses) +
-                           eva::constant_id<2>(p3N) + eva::constant_id<3>(p4N) + eva::constant_id<4>(p5N) +
-                           eva::constant_id<5>(p3Size) + eva::constant_id<6>(p4Size) + eva::constant_id<7>(p5Size) +
-                           eva::constant_id<8>(config_.imageSize) + eva::constant_id<SPEC_ID_TYPE_I>(p.iDtype) +
-                           eva::constant_id<SPEC_ID_TYPE_O>(oDtype),
+        pipe = pipelinePool().request(
+            EXPERIMENTAL_YOLOX_SHADER_OUTPUT_DIR,
+            "decode",
+            {
+                eva::constant_id<0>(config_.imageSize),
+                eva::constant_id<1>(config_.numClasses),
+                eva::constant_id<2>(p.batched),
+                eva::constant_id<SPEC_ID_TYPE_I>(p.iDtype),
+                eva::constant_id<SPEC_ID_TYPE_O>(oDtype),
             });
-            it = cached.emplace(cacheKey, std::move(created)).first;
-        }
-        pipe = it->second;
         if (!descSet)
             descSet = vai::gVaiDestSetPool(pipe.descSetLayout(0));
     }
 
-    (*this)["out0"] = vai::Tensor({ n, channels }, oDtype);
+    std::vector<uint32_t> outShape;
+    if (shape.size() == 4)
+        outShape.push_back(batch);
+    outShape.insert(outShape.end(), { n, 5u + config_.numClasses });
+    (*this)["out0"] = vai::Tensor(outShape, oDtype);
 }
 
 inline void Decode::run(eva::CommandBuffer cmdBuff)
@@ -131,7 +117,8 @@ inline void Decode::run(eva::CommandBuffer cmdBuff)
 
     cmdBuff.bindPipeline(pipe)
         .bindDescSets({ descSet })
-        .dispatch2(outTen.numElements())
+        .dispatch2(
+            outTen.shape()[outTen.shape().size() - 2] * outTen.shape().back(), 1u, vai::outerSize(outTen.shape(), 2))
         .barrier(eva::SYNC_SCOPE::COMPUTE_WRITE / outTen.buffer() / eva::SYNC_SCOPE::COMPUTE_READ);
 }
 
