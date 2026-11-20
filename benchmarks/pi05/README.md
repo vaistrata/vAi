@@ -82,8 +82,6 @@ Each latency cell is **mean ± SD in milliseconds per prediction**, as printed b
 
 The maximum absolute error is calculated against the corresponding PyTorch FP32 reference.
 
-vAi runs the experimental pi0.5 with the per-tower precision under [Precision configuration](#precision-configuration), as [#46](https://github.com/vaistrata/vAi/pull/46) sets it in [net.h](../../models/experimental/pi05/net.h).
-
 ### pi0.5 LIBERO
 
 #### NVIDIA GeForce RTX 5090
@@ -136,7 +134,4 @@ vAi runs the experimental pi0.5 with the per-tower precision under [Precision co
 
 ### Precision configuration
 
-See [benchmarks/PRECISION.md](../PRECISION.md).
-
-> **IMPORTANT**
-> Results are specific to the tested checkpoint, GPU, framework versions, precision settings, and workload. A lower latency under one workload does not establish higher performance under different camera counts, action chunks, or denoising steps.
+See [PRECISION.md](PRECISION.md).
