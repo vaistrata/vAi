@@ -9,7 +9,9 @@
 #include "groups/backbone.h"
 #include "groups/neck.h"
 #include "groups/head.h"
-#include "groups/detection-decoder.h"
+#include "nodes/decode.h"
+#include <cmath>
+#include <cstdint>
 
 
 namespace model::experimental::yolox {
@@ -20,18 +22,24 @@ namespace model::experimental::yolox {
 /////////////////////////////////////////////////////////////////////////////////////////
 enum class Tier { SMALL, MEDIUM, LARGE, XLARGE };
 
-inline static constexpr group::ModelBaseConfig getModelBaseConfig(Tier tier)
+struct ModelScale
+{
+    float depth;
+    float width;
+};
+
+inline static constexpr ModelScale getModelScale(Tier tier)
 {
     switch (tier)
     {
     case Tier::SMALL:
-        return { 32u, 1u };
+        return { .depth = 0.33f, .width = 0.50f };
     case Tier::MEDIUM:
-        return { 48u, 2u };
+        return { .depth = 0.67f, .width = 0.75f };
     case Tier::LARGE:
-        return { 64u, 3u };
+        return { .depth = 1.00f, .width = 1.00f };
     case Tier::XLARGE:
-        return { 80u, 4u };
+        return { .depth = 1.33f, .width = 1.25f };
     default:
         return {};
     }
@@ -39,7 +47,7 @@ inline static constexpr group::ModelBaseConfig getModelBaseConfig(Tier tier)
 
 struct ModelConfig
 {
-    group::ModelBaseConfig baseCfg;
+    ModelScale scale;
     Tier tier;
     uint32_t numClasses;
 };
@@ -54,7 +62,7 @@ struct RuntimeConfig
 inline static constexpr ModelConfig getConfigCOCO(Tier tier)
 {
     return {
-        .baseCfg = getModelBaseConfig(tier),
+        .scale = getModelScale(tier),
         .tier = tier,
         .numClasses = 80u,
     };
@@ -80,8 +88,9 @@ inline const char* tierName(Tier tier)
 
 /////////////////////////////////////////////////////////////////////////////////////////
 // Net - Full YOLOX detection network
-// Input : in0  [3, imageSize, imageSize]
-// Output: out0 [N, 5 + numClasses], e.g. [8400, 85] for COCO at 640x640
+// Input : in0  [B, 3, imageSize, imageSize]
+// Output: out0 [B, N, 5 + numClasses], e.g. [1, 8400, 85] for COCO at 640x640
+// B is the batch size; a single image uses B=1.
 /////////////////////////////////////////////////////////////////////////////////////////
 struct Net : public vai::NeuralNet
 {
@@ -91,15 +100,15 @@ struct Net : public vai::NeuralNet
     group::Backbone backbone;
     group::Neck neck;
     group::Head head;
-    group::DetectionDecoder detector;
+    node::Decode detector;
 
     Net(const vai::NeuralNetConfig& netCfg, const ModelConfig& cfg, const RuntimeConfig& runtimeCfg = {})
     : NeuralNet(netCfg)
     , cfg(cfg)
     , runtimeCfg(runtimeCfg)
-    , backbone(cfg.baseCfg)
-    , neck(cfg.baseCfg)
-    , head({ .baseChannels = cfg.baseCfg.baseChannels, .numClasses = cfg.numClasses })
+    , backbone(64.0f * cfg.scale.width, std::round(3.0f * cfg.scale.depth))
+    , neck(64.0f * cfg.scale.width, std::round(3.0f * cfg.scale.depth))
+    , head({ .baseChannels = static_cast<uint32_t>(64.0f * cfg.scale.width), .numClasses = cfg.numClasses })
     , detector({ .imageSize = runtimeCfg.imageSize, .numClasses = cfg.numClasses })
     {
         VAI_ASSERT(runtimeCfg.imageSize >= 32u && (runtimeCfg.imageSize % 32u) == 0u);
@@ -124,7 +133,7 @@ struct Net : public vai::NeuralNet
         // clang-format on
 
         // The detections go to the host's postprocess as fp32, whatever oDefaultDtype is.
-        detector.decode.setODtype(vai::Dtype::Fp32, dtypeKey());
+        detector.setODtype(vai::Dtype::Fp32, dtypeKey());
     }
 };
 

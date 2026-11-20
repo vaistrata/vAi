@@ -1,10 +1,10 @@
-// =============================================================================
-// YOLOX decode: consume split regobj/cls heads and produce anchor-major
-// [N,5+classes] without materializing concatenated per-scale tensors.
-// Box centers add their grid coordinate, box sizes use exp, and object/class
-// logits use sigmoid. Bindings: P3 regobj/cls=0..1, P4=2..3,
-// P5=4..5, O=6.
-// =============================================================================
+/*=============================================================================
+ YOLOX decode: consume split regobj/cls heads and produce anchor-major
+ [N,5+classes] without materializing concatenated per-scale tensors.
+ Box centers add their grid coordinate, box sizes use exp, and object/class
+ logits use sigmoid. Bindings: P3 regobj/cls=0..1, P4=2..3,
+ P5=4..5, O=6.
+=============================================================================*/
 #version 450
 #extension GL_GOOGLE_include_directive : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
@@ -14,18 +14,10 @@
 
 layout(local_size_x = 256) in;
 
+layout(constant_id = 0) const uint imageSize = 0u;
+layout(constant_id = 1) const uint numClasses = 0u;
 layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0u;
 layout(constant_id = SPEC_ID_TYPE_I) const uint typeI = 0u;
-
-layout(constant_id = 0) const uint N = 0u;
-layout(constant_id = 1) const uint numClasses = 0u;
-layout(constant_id = 2) const uint p3N = 0u;
-layout(constant_id = 3) const uint p4N = 0u;
-layout(constant_id = 4) const uint p5N = 0u;
-layout(constant_id = 5) const uint p3Size = 0u;
-layout(constant_id = 6) const uint p4Size = 0u;
-layout(constant_id = 7) const uint p5Size = 0u;
-layout(constant_id = 8) const uint imageSize = 0u;
 
 layout(set = 0, binding = 0) readonly buffer P3_REGOBJ_BUF_F32 { float bufferP3RegObj_f32[]; };
 layout(set = 0, binding = 0) readonly buffer P3_REGOBJ_BUF_F16 { float16_t bufferP3RegObj_f16[]; };
@@ -44,6 +36,16 @@ layout(set = 0, binding = 5) readonly buffer P5_CLS_BUF_F16 { float16_t bufferP5
 
 layout(set = 0, binding = 6) writeonly buffer O_BUF_F32 { float bufferO_f32[]; };
 layout(set = 0, binding = 6) writeonly buffer O_BUF_F16 { float16_t bufferO_f16[]; };
+
+const uint p3Size = imageSize / 8u;
+const uint p4Size = imageSize / 16u;
+const uint p5Size = imageSize / 32u;
+const uint p3N = p3Size * p3Size;
+const uint p4N = p4Size * p4Size;
+const uint p5N = p5Size * p5Size;
+const uint N = p3N + p4N + p5N;
+layout(constant_id = 2) const bool batched = false;
+uint imageIndex() { return batched ? gl_WorkGroupID.z : 0u; }
 
 float sigmoid(float value)
 {
@@ -120,9 +122,9 @@ void main()
 
     float raw;
     if (channel < 5u)
-        raw = readRegObj(scale, channel * scaleN + localAnchor);
+        raw = readRegObj(scale, (imageIndex() * 5u + channel) * scaleN + localAnchor);
     else
-        raw = readCls(scale, (channel - 5u) * scaleN + localAnchor);
+        raw = readCls(scale, (imageIndex() * numClasses + channel - 5u) * scaleN + localAnchor);
     const float stride = float(imageSize) / float(gridSize);
     float value;
     if (channel == 0u)
@@ -134,5 +136,5 @@ void main()
     else
         value = sigmoid(raw);
 
-    writeO(idx, value);
+    writeO(imageIndex() * channels * N + idx, value);
 }
