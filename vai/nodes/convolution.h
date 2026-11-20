@@ -491,6 +491,7 @@ struct ImplicitGemmPlan
     uint32_t panelK = 32u;
     uint32_t accType = 1u;
     bool cooperativeMatrix = false;
+    bool directK1S2 = false;
     bool structuredInputLoad = false;
     bool alignM = false;
     bool alignN = false;
@@ -1256,6 +1257,71 @@ inline const K1S1ExactRule* findK1S1ExactRule(const eva::Device& device, const W
     return nullptr;
 }
 
+struct K1S2ExactRule
+{
+    uint32_t vendorId;
+    uint32_t deviceId;
+    uint32_t computeBlockCount;
+    Dtype inputDtype;
+    Dtype outputDtype;
+    Dtype weightDtype;
+    ConvolutionFusion fusion;
+    uint32_t batch;
+    ShapeSpec shape;
+    ImplicitGemmPlan plan;
+};
+
+constexpr std::array<K1S2ExactRule, 3> kK1S2ExactTable{
+    {
+        { eva::VENDOR_ID::NVIDIA,
+          0x2b85u,
+          170u,
+          Dtype::Fp32,
+          Dtype::Fp32,
+          Dtype::Fp32,
+          ConvolutionFusion::Scale,
+          1u,
+          { 120u, 160u, 60u, 80u, 64u, 128u },
+          { .wgSize = 256u, .wgM = 64u, .wgN = 64u, .wgK = 8u, .tM = 4u, .directK1S2 = true } },
+        { eva::VENDOR_ID::NVIDIA,
+          0x2b85u,
+          170u,
+          Dtype::Fp32,
+          Dtype::Fp32,
+          Dtype::Fp32,
+          ConvolutionFusion::Scale,
+          1u,
+          { 60u, 80u, 30u, 40u, 128u, 256u },
+          { .wgSize = 256u, .wgM = 64u, .wgN = 64u, .wgK = 8u, .tM = 4u, .directK1S2 = true } },
+        { eva::VENDOR_ID::NVIDIA,
+          0x2b85u,
+          170u,
+          Dtype::Fp32,
+          Dtype::Fp32,
+          Dtype::Fp32,
+          ConvolutionFusion::Scale,
+          1u,
+          { 30u, 40u, 15u, 20u, 256u, 512u },
+          { .wgSize = 256u, .wgM = 64u, .wgN = 64u, .wgK = 8u, .tM = 4u, .directK1S2 = true } },
+    },
+};
+
+inline const K1S2ExactRule* findK1S2ExactRule(const eva::Device& device, const Workload& workload)
+{
+    if (workload.kernel != 1u || workload.stride != 2u)
+        return nullptr;
+
+    for (const K1S2ExactRule& rule : kK1S2ExactTable)
+    {
+        if (rule.vendorId == device.vendorID() && rule.deviceId == device.deviceID() &&
+            rule.computeBlockCount == device.computeBlockCount() && rule.inputDtype == workload.iDtype &&
+            rule.outputDtype == workload.oDtype && rule.weightDtype == workload.wDtype &&
+            rule.fusion == workload.fusion && rule.batch == workload.batch && rule.shape.matchShape(workload))
+            return &rule;
+    }
+    return nullptr;
+}
+
 struct ConvBucketStep
 {
     uint32_t upperBound;
@@ -1408,14 +1474,112 @@ constexpr std::array<K3S1ExactAlgorithmRule, 10> kK3S1ExactAlgorithmTable{
     },
 };
 
-inline const K3S1ExactAlgorithmRule* findK3S1ExactAlgorithmRule(
-    const eva::Device& device, const Workload& workload)
+inline const K3S1ExactAlgorithmRule* findK3S1ExactAlgorithmRule(const eva::Device& device, const Workload& workload)
 {
     for (const K3S1ExactAlgorithmRule& rule : kK3S1ExactAlgorithmTable)
     {
         if (rule.vendorId == device.vendorID() && rule.deviceId == device.deviceID() &&
             rule.computeBlockCount == device.computeBlockCount() && rule.weightDtype == workload.wDtype &&
             rule.shape.matchShape(workload))
+            return &rule;
+    }
+    return nullptr;
+}
+
+struct K3S1WinogradPlanRule
+{
+    uint32_t vendorId;
+    uint32_t deviceId;
+    uint32_t computeBlockCount;
+    Dtype weightDtype;
+    ShapeSpec shape;
+    K3S1Plan plan;
+    Dtype inputDtype;
+    Dtype outputDtype;
+    ConvolutionFusion fusion;
+    uint32_t batch;
+};
+
+constexpr std::array<K3S1WinogradPlanRule, 4> kK3S1WinogradPlanTable{
+    {
+        { eva::VENDOR_ID::NVIDIA,
+          0x2b85u,
+          170u,
+          Dtype::Fp32,
+          { 120u, 160u, 120u, 160u, 64u, 64u },
+          { .algorithm = ConvAlgorithm::Winograd,
+            .wgSize = 128u,
+            .wgM = 64u,
+            .wgN = 32u,
+            .wgK = 32u,
+            .tM = 4u,
+            .tN = 4u },
+          Dtype::Fp32,
+          Dtype::Fp32,
+          ConvolutionFusion::Scale,
+          1u },
+        { eva::VENDOR_ID::NVIDIA,
+          0x2b85u,
+          170u,
+          Dtype::Fp32,
+          { 60u, 80u, 60u, 80u, 128u, 128u },
+          { .algorithm = ConvAlgorithm::Winograd,
+            .wgSize = 128u,
+            .wgM = 64u,
+            .wgN = 32u,
+            .wgK = 32u,
+            .tM = 4u,
+            .tN = 4u },
+          Dtype::Fp32,
+          Dtype::Fp32,
+          ConvolutionFusion::Scale,
+          1u },
+        { eva::VENDOR_ID::NVIDIA,
+          0x2b85u,
+          170u,
+          Dtype::Fp32,
+          { 30u, 40u, 30u, 40u, 256u, 256u },
+          { .algorithm = ConvAlgorithm::Winograd,
+            .wgSize = 128u,
+            .wgM = 64u,
+            .wgN = 32u,
+            .wgK = 32u,
+            .tM = 4u,
+            .tN = 4u },
+          Dtype::Fp32,
+          Dtype::Fp32,
+          ConvolutionFusion::Scale,
+          1u },
+        { eva::VENDOR_ID::NVIDIA,
+          0x2b85u,
+          170u,
+          Dtype::Fp32,
+          { 15u, 20u, 15u, 20u, 512u, 512u },
+          { .algorithm = ConvAlgorithm::Winograd,
+            .wgSize = 128u,
+            .wgM = 64u,
+            .wgN = 32u,
+            .wgK = 32u,
+            .tM = 4u,
+            .tN = 4u },
+          Dtype::Fp32,
+          Dtype::Fp32,
+          ConvolutionFusion::Scale,
+          1u },
+    },
+};
+
+inline const K3S1WinogradPlanRule* findK3S1WinogradPlanRule(const eva::Device& device, const Workload& workload)
+{
+    if (workload.kernel != 3u || workload.stride != 1u)
+        return nullptr;
+
+    for (const K3S1WinogradPlanRule& rule : kK3S1WinogradPlanTable)
+    {
+        if (rule.vendorId == device.vendorID() && rule.deviceId == device.deviceID() &&
+            rule.computeBlockCount == device.computeBlockCount() && rule.weightDtype == workload.wDtype &&
+            rule.shape.matchShape(workload) && rule.inputDtype == workload.iDtype &&
+            rule.outputDtype == workload.oDtype && rule.fusion == workload.fusion && rule.batch == workload.batch)
             return &rule;
     }
     return nullptr;
@@ -2190,10 +2354,35 @@ struct K3S2ExactRule
     bool useCM;
     ShapeSpec shape;
     K3S2Plan plan;
+    uint32_t batch = 0u;   // 0: any image batch
 };
 
-constexpr std::array<K3S2ExactRule, 18> kK3S2ExactTable{
+constexpr std::array<K3S2ExactRule, 21> kK3S2ExactTable{
     {
+        { eva::VENDOR_ID::NVIDIA,
+          0x2b85u,
+          170u,
+          Dtype::Fp32,
+          false,
+          { 120u, 160u, 60u, 80u, 64u, 128u },
+          { .splitK = 8u, .wgSize = 256u, .wgM = 128u, .wgN = 64u, .wgK = 8u, .tM = 8u },
+          1u },
+        { eva::VENDOR_ID::NVIDIA,
+          0x2b85u,
+          170u,
+          Dtype::Fp32,
+          false,
+          { 60u, 80u, 30u, 40u, 128u, 256u },
+          { .splitK = 8u, .wgSize = 256u, .wgM = 128u, .wgN = 64u, .wgK = 8u, .tM = 8u },
+          1u },
+        { eva::VENDOR_ID::NVIDIA,
+          0x2b85u,
+          170u,
+          Dtype::Fp32,
+          false,
+          { 30u, 40u, 15u, 20u, 256u, 512u },
+          { .splitK = 16u, .wgSize = 256u, .wgM = 128u, .wgN = 64u, .wgK = 8u, .tM = 8u },
+          1u },
         { eva::VENDOR_ID::AMD,
           kAMDStrixHaloDeviceId,
           40u,
@@ -2429,7 +2618,52 @@ inline const K3S2ExactRule* findK3S2ExactRule(const eva::Device& device, const W
     {
         if (rule.vendorId == device.vendorID() && rule.deviceId == device.deviceID() &&
             rule.computeBlockCount == device.computeBlockCount() && rule.weightDtype == workload.wDtype &&
-            rule.shape.matchShape(workload))
+            rule.shape.matchShape(workload) && (rule.batch == 0u || rule.batch == workload.batch))
+            return &rule;
+    }
+    return nullptr;
+}
+
+struct K7S2ExactRule
+{
+    uint32_t vendorId;
+    uint32_t deviceId;
+    uint32_t computeBlockCount;
+    Dtype inputDtype;
+    Dtype outputDtype;
+    Dtype weightDtype;
+    ConvolutionFusion fusion;
+    uint32_t batch;
+    ShapeSpec shape;
+    ImplicitGemmPlan plan;
+};
+
+constexpr std::array<K7S2ExactRule, 1> kK7S2ExactTable{
+    {
+        { eva::VENDOR_ID::NVIDIA,
+          0x2b85u,
+          170u,
+          Dtype::Fp32,
+          Dtype::Fp32,
+          Dtype::Fp32,
+          ConvolutionFusion::Scale,
+          1u,
+          { 480u, 640u, 240u, 320u, 3u, 64u },
+          { .wgSize = 256u, .wgM = 64u, .wgN = 64u, .wgK = 8u, .tM = 4u, .alignM = true, .alignN = true } },
+    },
+};
+
+inline const K7S2ExactRule* findK7S2ExactRule(const eva::Device& device, const Workload& workload)
+{
+    if (workload.kernel != 7u || workload.stride != 2u)
+        return nullptr;
+
+    for (const K7S2ExactRule& rule : kK7S2ExactTable)
+    {
+        if (rule.vendorId == device.vendorID() && rule.deviceId == device.deviceID() &&
+            rule.computeBlockCount == device.computeBlockCount() && rule.inputDtype == workload.iDtype &&
+            rule.outputDtype == workload.oDtype && rule.weightDtype == workload.wDtype &&
+            rule.fusion == workload.fusion && rule.batch == workload.batch && rule.shape.matchShape(workload))
             return &rule;
     }
     return nullptr;
@@ -2913,7 +3147,7 @@ inline bool validK3S2Plan(const K3S2Plan& plan, const Workload& workload)
 
     if (plan.split())
         return plan.shape.empty() && plan.wgM == 128u && plan.wgK == 8u && plan.tM == 8u &&
-            (plan.splitK == 4u || plan.splitK == 8u);
+               (plan.splitK == 4u || plan.splitK == 8u || plan.splitK == 16u);
     if (!plan.shape.empty())
     {
         if (!plan.alignM || !plan.alignN ||
@@ -3318,6 +3552,8 @@ inline eva::ComputePipeline ConvPipeline(PipelinePool& pool, const ImplicitGemmP
         eva::constant_id<6>(plan.alignN),     eva::constant_id<7>(plan.alignK), eva::constant_id<8>(residual.enabled),
         eva::constant_id<12>(residual.order),
     };
+    if (!k3s1Variant)
+        specialization.addConstant(eva::constant_id<9>(plan.directK1S2));
     if (k3s1Variant)
     {
         specialization.addConstant(eva::constant_id<9>(plan.structuredInputLoad));
@@ -3854,6 +4090,11 @@ inline ConvLaunch deriveConvLaunch(const ConvPlan& convPlan, const Workload& wor
     else if (convPlan.path == ConvPlan::Path::General)
     {
         const ImplicitGemmPlan& plan = convPlan.implicit;
+        if (plan.directK1S2)
+            return ConvLaunch{
+                .groupCount = { convWorkgroupCount(CEIL_DIV(uint64_t(Co), 4u) * N, plan.wgSize), 1u, 1u },
+                .sharedMemoryBytes = convSharedMemoryBytes(plan, workload.wDtype)
+            };
         const uint8_t cmFeatures = convPlan.useCM
             ? uint8_t(ConvLaunch::CooperativeMatrix)
             : 0u;
@@ -4613,8 +4854,17 @@ inline std::optional<K3S1Plan> selectK3S1WinogradPlan(
 
     if (workload.wDtype == Dtype::Fp32)
     {
-        const K3S1ExactAlgorithmRule* exactAlgorithmRule =
-            findK3S1ExactAlgorithmRule(device, workload);
+        const K3S1ExactAlgorithmRule* exactAlgorithmRule = findK3S1ExactAlgorithmRule(device, workload);
+        if (const K3S1WinogradPlanRule* rule = findK3S1WinogradPlanRule(device, workload))
+        {
+            selectedPlan = rule->plan;
+            selectedPlan.alignM = co % selectedPlan.wgM == 0u;
+            selectedPlan.alignN = numTiles % selectedPlan.wgN == 0u;
+            selectedPlan.alignK = ci % selectedPlan.wgK == 0u;
+            selectedPlan.storeMode = numTiles % 4u == 0u;
+            selectedPlan.outputStoreMode = ho % 4u == 0u && wo % 4u == 0u;
+            return selectedPlan;
+        }
         selectedPlan.algorithm = exactAlgorithmRule != nullptr
             ? exactAlgorithmRule->algorithm
             : ConvAlgorithm::Winograd;
@@ -4867,8 +5117,7 @@ inline std::optional<ConvPlan> selectK3S1Candidate(
     const Workload& workload,
     const ConvPlan& basePlan)
 {
-    const K3S1ExactAlgorithmRule* exactAlgorithmRule =
-        findK3S1ExactAlgorithmRule(device, workload);
+    const K3S1ExactAlgorithmRule* exactAlgorithmRule = findK3S1ExactAlgorithmRule(device, workload);
     if (findK3S1ImplicitRule(device, workload.wDtype) != nullptr &&
         exactAlgorithmRule == nullptr)
         return std::nullopt;
@@ -5304,6 +5553,19 @@ inline ConvPlan selectGeneralFallbackPlan(
 {
     ConvPlan fallback = basePlan;
     fallback.path = ConvPlan::Path::General;
+    const ImplicitGemmPlan* exactPlan = nullptr;
+    if (const K1S2ExactRule* rule = findK1S2ExactRule(device, workload))
+        exactPlan = &rule->plan;
+    else if (const K7S2ExactRule* rule = findK7S2ExactRule(device, workload))
+        exactPlan = &rule->plan;
+    if (exactPlan != nullptr)
+    {
+        fallback.implicit = *exactPlan;
+        fallback.useCM = exactPlan->cooperativeMatrix;
+        if (validImplicitGemmPlan(fallback.implicit, device, caps, workload.wDtype) &&
+            validConvLaunches(fallback, workload, device, caps))
+            return fallback;
+    }
     const uint32_t implicitK = workload.ci * workload.kernel * workload.kernel;
     const K3S1ImplicitPlanRule* implicitPlan = findK3S1ImplicitPlanRule(device, workload);
     if (implicitPlan != nullptr)
@@ -6636,10 +6898,19 @@ inline void Convolution::runConv(eva::CommandBuffer cmdBuff, const Workload& wor
     });
 
     const PushConstants constants = makePushConstants(workload);
-    recordDispatch(
-        cmdBuff, implicit.gemm, constants,
-        CEIL_DIV(workload.spatialSize(), plan.wgN),
-        CEIL_DIV(workload.co, plan.wgM));
+    if (plan.directK1S2)
+        recordDispatch(
+            cmdBuff,
+            implicit.gemm,
+            constants,
+            CEIL_DIV(CEIL_DIV(workload.co, 4u) * workload.spatialSize(), plan.wgSize));
+    else
+        recordDispatch(
+            cmdBuff,
+            implicit.gemm,
+            constants,
+            CEIL_DIV(workload.spatialSize(), plan.wgN),
+            CEIL_DIV(workload.co, plan.wgM));
     cmdBuff.barrier(eva::SYNC_SCOPE::COMPUTE_WRITE / outTen.buffer() / eva::SYNC_SCOPE::COMPUTE_READ);
 }
 
