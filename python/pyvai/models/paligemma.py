@@ -32,7 +32,7 @@ class PaliGemma(_CausalLM):
         self,
         config: PaliGemmaConfig | None = None,
         w_default_dtype: Dtype = Dtype.F16,
-        o_default_dtype: Dtype = Dtype.F32,
+        o_default_dtype: Dtype = Dtype.F16,
         device: Device | None = None,
         max_runtime_context: int | None = 2048,
         kv_cache_dtype: Dtype = Dtype.F16,

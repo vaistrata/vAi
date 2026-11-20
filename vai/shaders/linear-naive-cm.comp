@@ -1,9 +1,9 @@
 /*=============================================================================
  linear-naive-cm.comp:  Linear / fully-connected layer (NT, cooperative matrix)
-     O[m, n] = epilogue( sum_k I[m, k] * W[n, k] + bias[n] )
+     O[m, n] = activation( sum_k I[m, k] * W[n, k] + bias[n] )
 
  Cooperative-matrix accelerated counterpart of vai-linear2.comp. Same NT
- interface (W[N,K], bias[N], epilogue) so the host can swap shaders.
+ interface (W[N,K], bias[N], activation) so the host can swap shaders.
  Handles arbitrary M by tiling rows into tM-row blocks.
 
    * typeW applies to W and bias
@@ -36,7 +36,7 @@ layout(constant_id = 3)  const uint tN      = 8;   // coopmat N (queried shape)
 layout(constant_id = 4)  const uint tK      = 16;  // coopmat K (queried shape)
 layout(constant_id = 5)  const uint accType = 0;   // 0: fp32, 1: fp16 — accumulator
 layout(constant_id = 10) const uint WG_SIZE = 32;  // = subgroup size (queried)
-// epilogue spec constant lives at constant_id 100 (common/activation.h)
+// activation spec constant lives at constant_id 100 (common/activation.h)
 
 layout(local_size_x_id = 10) in;   // workgroup x = WG_SIZE (one subgroup)
 
@@ -124,7 +124,7 @@ void storeOut(uint mBase, uint colBase)
             uint m = mBase + r;
             if (m >= M) break;
             float acc = (accType == DTYPE_F32) ? Cs_f32[r * STRIDE + c] : float(Cs_f16[r * STRIDE + c]);
-            bufferO[m * N + col] = applyEpilogue(acc + b);
+            bufferO[m * N + col] = applyActivation(acc + b);
         }
     }
 }

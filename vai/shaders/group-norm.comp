@@ -29,8 +29,8 @@
 //   instead of thread 0 broadcasting through it — one barrier, not three, and
 //   these groups are small enough that the barriers, not the arithmetic, are
 //   what the kernel spends its time on.
-// - residual (hasResidual, input dtype) and the epilogue apply after the
-//   affine: the residual after the epilogue, or before it with residualOrder 1.
+// - residual (hasResidual, input dtype) and the activation apply after the
+//   affine: the residual after the activation, or before it with residualOrder 1.
 // - Dispatch (host): one workgroup per group of each sample ->
 //   .dispatch(samples * groups). The samples (the axes before C) lie one after
 //   another, so a workgroup's group is still one contiguous run of F elements;
@@ -52,7 +52,7 @@ layout(constant_id = 5) const uint numSubgroups = 1;           // wgSize / subgr
 layout(constant_id = 6) const uint cached   = 0;               // 1: one quad per thread, kept in a register
 layout(constant_id = 7) const uint groups   = 1;               // groups per sample (C / chPerGroup)
 layout(constant_id = 8) const uint hasResidual = 0;            // 1: residual[...] of in0's shape
-layout(constant_id = 9) const uint residualOrder = 0;          // 0: after the epilogue, 1: before it
+layout(constant_id = 9) const uint residualOrder = 0;          // 0: after the activation, 1: before it
 layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0;     // O (output) dtype
 layout(constant_id = SPEC_ID_TYPE_I) const uint typeI = 0;     // I (input) dtype
 layout(constant_id = SPEC_ID_TYPE_W) const uint typeW = 0;     // scale / shift dtype
@@ -88,11 +88,11 @@ float readShift(uint c)  { return (hasShift == 0u) ? 0.0 : ((typeW == DTYPE_F32)
 float readResidual(uint i) { return (typeI == DTYPE_F32) ? bufferRes_f32[i] : float(bufferRes_f16[i]); }
 void writeO(uint i, float v) { if (typeO == DTYPE_F32) bufferO_f32[i] = v; else bufferO_f16[i] = float16_t(v); }
 
-// The residual and the epilogue on an affine result, element i of O.
+// The residual and the activation on an affine result, element i of O.
 float finishOutput(float value, uint i)
 {
     if (hasResidual != 0u && residualOrder == 1u) value += readResidual(i);
-    value = applyEpilogue(value);
+    value = applyActivation(value);
     if (hasResidual != 0u && residualOrder == 0u) value += readResidual(i);
     return value;
 }
@@ -101,7 +101,7 @@ float finishOutput(float value, uint i)
 vec4 finishOutput4(vec4 value, uint i4)
 {
     if (hasResidual != 0u && residualOrder == 1u) value += bufferRes_4f32[i4];
-    value = applyEpilogue(value);
+    value = applyActivation(value);
     if (hasResidual != 0u && residualOrder == 0u) value += bufferRes_4f32[i4];
     return value;
 }

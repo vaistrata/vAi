@@ -26,7 +26,7 @@ class GPT2(_CausalLM):
         self,
         config: GPT2Config | None = None,
         w_default_dtype: Dtype = Dtype.F16,
-        o_default_dtype: Dtype = Dtype.F32,
+        o_default_dtype: Dtype = Dtype.F16,
         device: Device | None = None,
         max_runtime_context: int | None = None,
         kv_cache_dtype: Dtype = Dtype.F16,

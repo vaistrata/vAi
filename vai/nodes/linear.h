@@ -4,8 +4,11 @@
 // Linear / fully-connected layer, tile (scalar / coopmat) and slab kernels
 // (ports of the ggml/llama.cpp Vulkan mul_mm / mul_mat_vec kernels).
 #include "common.h"
+#include "linear-tune-table.h"
 #include <optional>
 #include <bit>
+#include <cmath>
+#include <cstdlib>
 
 namespace vai::node {
 
@@ -19,7 +22,7 @@ namespace vai::node {
   (N = outDim, K = inDim).
 
   - slab (M <= 8, linear-slab): a workgroup owns wgN whole columns of O,
-    so K is split across its threads and reduced; bias / epilogue are fused
+    so K is split across its threads and reduced; bias / activation are fused
     in-kernel. See useSlabPath().
   - tile (M > 8): a workgroup owns a wgM x wgN tile. Two kernels share the
     frame, chosen per device in selectLinearTile(): scalar
@@ -35,6 +38,11 @@ namespace vai::node {
     OpenVINO's fully_connected_gpu_bf_tiled, reading W packed once on the GPU
     (packWeightIntel); its tile choice is intelTileParams(), its split
     intelTileSplitCount().
+  - Xe3 (useXe3Cm; every M, slab included): linear-cm-xe3, coopmat loads
+    straight from global memory. Runs only on the local Mesa fork started
+    with ANV_CMAT_BLOCK2D=1 (tests/linear-tune-intel-cm). fp16 I and W only;
+    W is transposed once into [K, N] rows (repackWeightXe3). Its tile, split
+    and the rest are xe3LinearTile().
   Everything below applies to every tile kernel:
 
   The tile params are selected per output shape in prepare(); when a shape
@@ -42,12 +50,12 @@ namespace vai::node {
 
   Split-K (splitSize option; 0 selects the vendor's rule per shape)
   accumulates partials P[splitCount, M, N] (oDtype) in a temporary buffer
-  and folds them in a second pass (linear-reduce); bias / epilogue / the
+  and folds them in a second pass (linear-reduce); bias / activation / the
   residual live in that reduce pass, unless linear-cm-amd fuses them into an
   unsplit tile.
 
-  O = s · epilogue(I · Wᵀ + bias) + R      residualOrder AfterEpilogue
-  O = s · epilogue(I · Wᵀ + bias + R)      residualOrder BeforeEpilogue
+  O = s · activation(I · Wᵀ + bias) + R      residualOrder AfterActivation
+  O = s · activation(I · Wᵀ + bias + R)      residualOrder BeforeActivation
 
   s is Config::scalarScale (e.g. dt of an Euler step x + dt · v), 1 by default.
 
@@ -87,7 +95,11 @@ public:
     //             fragments, even and odd channels of a 32-channel group apart;
     //   Kn        [K, N, 1]: W transposed (N and K multiples of 64).
     // The values are linear-cm-amd's and linear-preshuffle's weightLayout.
-    enum class WeightLayout : uint32_t { Rows = 0, Fragments = 1, PermuteN = 2, Kn = 3 };
+    // Xe3 has its own, written once by linear-pack-xe3 (packWeightXe3):
+    //   KnPitch32 [1, K, xe3WeightPitch(N)]: W transposed, its k rows a pitch of
+    //             N up to whole 32s apart and zero past N; the leading 1 keeps
+    //             the shape apart from Kn's.
+    enum class WeightLayout : uint32_t { Rows = 0, Fragments = 1, PermuteN = 2, Kn = 3, KnPitch32 = 4 };
 
     // Workgroup visit order of linear-cm-amd's lane schedule (its tileOrder):
     // CK's spatially local blocks, N tiles first, or M tiles first.
@@ -141,7 +153,7 @@ public:
     };
 
     // The Strix Point / Halo tile of linear-cm-amd's cooperative schedule: the
-    // picked split and order, the weight layout, and the epilogue the kernel
+    // picked split and order, the weight layout, and the activation the kernel
     // fuses when K is not split. All of it is in the pipeline key.
     struct StrixTile
     {
@@ -150,13 +162,13 @@ public:
         uint32_t schedule = 0;    // StrixSchedule bits
         uint32_t loadWidth = 0;   // amdStrixLoadWidth()
         WeightLayout weights = WeightLayout::Rows;
-        bool fused = false;   // bias / epilogue / residual / scale in the kernel: no reduce pass
+        bool fused = false;   // bias / activation / residual / scale in the kernel: no reduce pass
         bool hasBias = false, hasResidual = false;
         uint32_t biasRepeat = 0, residualRepeat = 0, scaleBits = 0;
         vai::Dtype accType = vai::Dtype::None;
         vai::Dtype biasDtype = vai::Dtype::None;
-        vai::Epilogue epilogue = vai::Epilogue::None;
-        vai::ResidualOrder residualOrder = vai::ResidualOrder::AfterEpilogue;
+        vai::ActType actType = vai::ActType::None;
+        vai::ResidualOrder residualOrder = vai::ResidualOrder::AfterActivation;
 
         bool operator==(const StrixTile&) const = default;
     };
@@ -190,6 +202,7 @@ public:
         uint32_t rowMajor = 0;            // 0: N-first tile order; else M tile count for M-first order
         bool kTailMasked = false;   // coopmat: linear-cm-nv (K tail masked per k-block)
         vai::Dtype iDtype = vai::Dtype::None;
+        bool store = false;   // linear-tile / linear-cm: the epilogue in the store (storeInKernel_)
 
         PipeParamsTile() = default;
 
@@ -238,6 +251,7 @@ public:
     struct PipeParamsReduce {
         uint32_t biasRepeat = 0;
         uint32_t residualRepeat = 0;
+        uint32_t gluBlock = 0;   // > 0: the GLU here (gluBlock_)
 
         bool operator==(const PipeParamsReduce&) const = default;
     };
@@ -249,8 +263,29 @@ public:
         uint32_t bandTiles = 0;
         vai::Dtype accDtype = vai::Dtype::None;
         vai::Dtype iDtype = vai::Dtype::None;
+        bool store = false;   // the epilogue in the store (storeInKernel_)
 
         bool operator==(const PipeParamsIntel&) const = default;
+    };
+
+    // Xe3 coopmat path (linear-cm-xe3): wgSgM x wgSgN subgroups, each uM x uN
+    // accumulator tiles of 8 x 16; kUnroll 16-k steps per trip; pf = prefetch
+    // and split barrier on; skew / smod = the M rows of subgroups read k apart.
+    struct PipeParamsXe3
+    {
+        uint32_t wgSgM = 0, wgSgN = 0;
+        uint32_t uM = 0, uN = 0;
+        uint32_t kUnroll = 0;
+        uint32_t order = 0;   // 0: x walks N tiles, 1: x walks M tiles
+        uint32_t pf = 0;
+        uint32_t skew = 0, smod = 0;
+        uint32_t store = 0;    // the epilogue in the store (storeInKernel_; set by prepare(), not by a pick)
+        uint32_t accF16 = 0;   // 1: fp16 accumulators (setAccDtype(Fp16); set by prepare(), not by a pick)
+        vai::Dtype oDtype = vai::Dtype::None;
+
+        uint32_t tileM() const { return wgSgM * uM * 8u; }
+        uint32_t tileN() const { return wgSgN * uN * 16u; }
+        bool operator==(const PipeParamsXe3&) const = default;
     };
 
     // A warptile's workgroup grid over the (M, N) output: workgroup counts
@@ -272,11 +307,18 @@ public:
         uint32_t outDim;
 
         bool acceptResidual = false;  // input "residual"
-        vai::ResidualOrder residualOrder = vai::ResidualOrder::AfterEpilogue;
-        vai::Epilogue epilogue = vai::Epilogue::None;
-        float scalarScale = 1.0f;   // s, right after the epilogue
+        vai::ResidualOrder residualOrder = vai::ResidualOrder::AfterActivation;
+        // The activation on the output, or under glu on the gate.
+        vai::ActType actType = vai::ActType::None;
+        float scalarScale = 1.0f;   // s, right after the activation
 
         uint32_t splitSize = 0;   // split-K: K length per split (0: the vendor's count per shape)
+
+        // GLU (a gated FFN's first projection): W holds the gate's H rows, then
+        // the up's (outDim = 2H), and O [..., H] = activation(gate + b_gate) *
+        // (up + b_up). The kernel's store computes it with one split, else the
+        // reduce pass does. Takes no residual or scalarScale.
+        bool glu = false;
     } config_;
 
     Linear(Config config);
@@ -288,27 +330,60 @@ public:
 
     void setAccDtype(vai::Dtype dtype, vai::DtypeKey) { accDtype_ = dtype; }
 
+#ifndef VAI_NO_XE3_TUNE
+    // Tuning hook (tests/linear-tune-intel-cm/pi05-cfg): the Xe3 path runs these
+    // parameters and split count in place of xe3LinearChoose()'s. oDtype is
+    // prepare()'s; the next recording picks the change up.
+    // VAI_NO_XE3_TUNE leaves the hook out; define it for the whole build or not at all.
+    void setXe3Tune(const PipeParamsXe3& params, uint32_t splits)
+    {
+        xe3Tune_ = params;
+        xe3TuneSplits_ = splits;
+    }
+    void clearXe3Tune() { xe3TuneSplits_ = 0; }
+#endif
+
+    // Tuning hook: false leaves the epilogue (bias / activation / scale /
+    // residual, the GLU) to the reduce pass even without a split, as before the
+    // kernels' stores took it, for comparisons. The next recording picks it up.
+    void setStoreInKernel(bool allowed) { storeAllowed_ = allowed; }
+
 private:
-    vai::Dtype accDtype_ = vai::Dtype::None;   // None: FP32 on AMD, else the weight's dtype
+    vai::Dtype accDtype_ = vai::Dtype::None;   // None: FP32 on every device
 
     // Intel path: the "weight" slot rewritten into linear-tile-intel's layout,
     // [ceil(N / 32), ceil(K / 2), 64], once (the first prepare).
     void packWeightIntel();
     bool weightPackedIntel() const;
 
-    // No bias / epilogue / residual / scale: the GEMM is the whole output.
+    // No bias / activation / residual / scale: the GEMM is the whole output.
+    // (A GLU's activation is on its gate, not on the output.)
     bool plainOutput() const
     {
-        return !hasBias() && !config_.acceptResidual && config_.epilogue == Epilogue::None &&
+        return !hasBias() && !config_.acceptResidual && (config_.glu || config_.actType == vai::ActType::None) &&
                config_.scalarScale == 1.0f;
     }
 
-    // The reduce pass runs when K is split and/or bias / epilogue / the residual
-    // is requested (the tile kernel itself carries no epilogue), unless
-    // linear-cm-amd fused them.
+    // Xe3 path: the "weight" slot holds the layout linear-cm-xe3 reads
+    // (KnPitch32), rewritten once (repackWeightXe3; the Rows weight is not
+    // kept, no shape picks another layout). weightLayoutXe3() reads the slot's
+    // layout off its shape.
+    WeightLayout weightLayoutXe3() const;
+    void repackWeightXe3(WeightLayout layout);
+    // `source` (Rows) rewritten into `target` by linear-pack-xe3, in a buffer
+    // from the net's pool.
+    Tensor packWeightXe3(const Tensor& source, WeightLayout target);
+
+    // The reduce pass runs when K is split and/or bias / activation / the residual
+    // / the GLU is requested, unless the kernel's store did the epilogue
+    // (storeInKernel_) or linear-cm-amd fused it.
     bool needReducePass() const
     {
-        if (!intel_ &&
+        if (storeInKernel_)
+            return false;
+        if (config_.glu)
+            return true;
+        if (!intel_ && !xe3_ &&
             ((pipeParamsTile.lane && pipeParamsTile.lane->fuseResidual) ||
              (pipeParamsTile.strix && pipeParamsTile.strix->fused)))
             return false;
@@ -317,7 +392,32 @@ private:
 
     // Small batches run the slab kernel instead of the tile one;
     // 8 = ggml mul_mat_vec_max_cols.
-    bool useSlabPath(uint32_t M) const { return M <= 8u && !intel_; }
+    bool useSlabPath(uint32_t M) const { return M <= 8u && !intel_ && !xe3_ && (!config_.glu || gluSlabOk_); }
+
+    // The epilogue: O = s * activation(C + bias) + residual (or the GLU, with
+    // its bias), as linear-reduce computes it. With K not split, linear-cm-xe3,
+    // linear-tile-intel, linear-tile and linear-cm do it in their store
+    // (common/linear-store.h) when storeInKernel_; else the reduce pass does.
+    // addStoreConstants() gives such a pipeline the stage's constants; without
+    // them a kernel stores C as it is.
+    void addStoreConstants(
+        eva::SpecializationConstant& spec, Dtype bDtype, uint32_t biasElems, uint32_t residualElems) const;
+    bool storeInKernel_ = false;   // this shape's kernel writes the epilogue itself
+    bool storeAllowed_ = true;     // setStoreInKernel()
+
+    // GLU (config_.glu): permuteGluRows() reorders the weight rows once, before
+    // any packing, into blocks of gluBlock_ gate rows then gluBlock_ up rows, so
+    // a gate and its up land in one thread of the kernel's store: 16 on Intel
+    // (a lane's columns l and l + 16), 1 elsewhere (adjacent columns). The
+    // store does the GLU with the epilogue; with a split the reduce pass
+    // does, from the same layout.
+    uint32_t gluBlockFor() const { return ((xe3_ || intel_) && (config_.outDim / 2u) % 16u == 0u) ? 16u : 1u; }
+    void permuteGluRows();
+    // linear-cm-xe3 can do the GLU in its store (rows interleaved by 16): with
+    // one split and an even uN.
+    bool xe3Glu() const { return config_.glu && xe3_ && gluBlock_ == 16u; }
+    uint32_t gluBlock_ = 0;   // the block the rows went into (0: not yet permuted)
+    bool gluSlabOk_ = true;   // the slab kernel can take the GLU (fp16 W pairs, plain output)
 
     // Strix Point / Halo: the "weight" slot holds the layout the picked tile
     // reads, as on the Intel path, and is rewritten when a shape picks another
@@ -339,7 +439,18 @@ private:
     Tensor packedWeight_, packedSource_;
     eva::BufferRange packedSourceRange_;
     bool intel_ = false;   // the Intel tile path (useIntelTile), set by prepare()
+    bool xe3_ = false;     // the Xe3 coopmat path (useXe3Cm), set by prepare()
+    // Xe3 with an fp32 I: prepare() sets it from the input's dtype and lays out
+    // "inputF16"; run() casts I into it and the product reads that.
+    bool xe3CastInput_ = false;
+    eva::ComputePipeline pipeCast_;   // cast fp32 -> fp16
+    eva::DescriptorSet descSetCast_;
     PipeParamsIntel pipeParamsIntel;
+    PipeParamsXe3 pipeParamsXe3_;
+#ifndef VAI_NO_XE3_TUNE
+    PipeParamsXe3 xe3Tune_;        // setXe3Tune()
+    uint32_t xe3TuneSplits_ = 0;   // 0: no tuning, xe3LinearChoose() decides
+#endif
     PipeParamsTile pipeParamsTile;
     PipeParamsSlab pipeParamsSlab;
     PipeParamsReduce pipeParamsReduce;
@@ -1140,7 +1251,7 @@ inline bool useAmdMFirst(uint32_t M, uint32_t N, uint32_t K, const Linear::PipeP
 // with fp32 accumulation (the caller's gate): a tile of linear-cm-amd's lane
 // schedule, or a linear-cm geometry (RadvPick::cm) where that kernel wins. No
 // pick: the cm tile already selected stands. `splits` is the resolved split
-// count; `fullResidual` an unsplit layer whose whole epilogue is a residual
+// count; `fullResidual` an unsplit layer whose whole activation is a residual
 // covering O, which the lane kernel can fuse.
 inline std::optional<Linear::RadvPick> amdLinearLaneTile(
     uint32_t M, uint32_t N, uint32_t K, uint32_t splits, eva::Device device, bool fullResidual = false)
@@ -1751,7 +1862,7 @@ inline Linear::PipeParamsTile amdHaloLinearTile(
     return t;
 }
 
-// Strix Halo, a plain fp16 layer (no bias / epilogue / residual / scale, fp32
+// Strix Halo, a plain fp16 layer (no bias / activation / residual / scale, fp32
 // accumulation, K not split): two layers leave the cooperative schedule's
 // Fragments tiles. The prefix gate+up runs the lane schedule on PermuteN
 // weights (the returned pick); the action expert's gate+up runs the KN
@@ -2066,6 +2177,297 @@ inline uint32_t intelTileSplitCount(uint32_t M, uint32_t N, uint32_t K, const Li
 
 
 /////////////////////////////////////////////////////////////////////////////////////////
+// Xe3 (Panther Lake) coopmat path: linear-cm-xe3 on the local Mesa fork
+// (tests/linear-tune-intel-cm/10-cm4-heuristic.md)
+/////////////////////////////////////////////////////////////////////////////////////////
+
+// The fork's 2D block lowering of coopMatLoad (ANV_CMAT_BLOCK2D=1). The variable
+// goes to the process: the loader passes it to the driver, which reads it the
+// same way; vai reads it to know the fork runs the loads as 2D blocks.
+inline bool intelBlock2dDriver()
+{
+    static const bool on = [] {
+        const char* v = std::getenv("ANV_CMAT_BLOCK2D");
+        return v && std::strtol(v, nullptr, 10) != 0;
+    }();
+    return on;
+}
+
+// Xe3 with coopmat, the fork's 2D block loads, fp16 W, K in whole 16-k steps.
+// I is fp16, or fp32 that Linear casts to fp16 ahead of the product (xe3CastInput_):
+// the matrix engine takes fp16 only.
+inline bool useXe3Cm(eva::Device device, Dtype iDtype, Dtype wDtype, uint32_t K)
+{
+    return device.vendorID() == eva::VENDOR_ID::INTEL && device.architectureID() == eva::Architecture::INTEL_XE3 &&
+           ggmlCoopmatShape(device).valid() && intelBlock2dDriver() &&
+           (iDtype == Dtype::Fp16 || iDtype == Dtype::Fp32) && wDtype == Dtype::Fp16 && K % 16u == 0u;
+}
+
+// Pitch of W's k rows: N up to whole 32-output loads.
+inline uint32_t xe3WeightPitch(uint32_t N)
+{
+    return ROUNDUP(N, 32u);
+}
+
+// What xe3LinearPick() decides for a shape.
+struct Xe3Pick
+{
+    uint32_t sgM, sgN, uM, uN, kUnroll, split, order, prefetch;
+    uint32_t padI;   // activation rows want a pitch of K + padI (0: K)
+    uint32_t skew, smod;
+};
+
+// Register tiles uM x uN and their relative speed when nothing is wasted and
+// the GPU is full (the score's eff). searched: xe3LinearPick() tries the tile,
+// in this order. 1 x 4 comes only from the measured table; its eff is an
+// estimate between 1 x 2 and 2 x 2, not fitted.
+struct Xe3Tile
+{
+    uint32_t uM, uN;
+    double eff;
+    bool searched;
+};
+inline constexpr Xe3Tile xe3Tiles[] = {
+    { 6, 3, 1.00, true }, { 5, 4, 0.92, true },  { 6, 2, 0.92, true },  { 3, 4, 0.94, true }, { 4, 2, 0.89, true },
+    { 2, 2, 0.83, true }, { 2, 1, 0.715, true }, { 1, 2, 0.685, true }, { 1, 1, 0.60, true }, { 1, 4, 0.78, false },
+};
+inline constexpr double xe3ThreadsFull = 384.0;   // subgroups * split at which the GPU counts as full
+inline constexpr double xe3SplitCost = 0.95;      // score factor per doubling of split
+
+// A tile's eff, 0 for a tile the score does not know.
+inline double xe3TileEff(uint32_t uM, uint32_t uN)
+{
+    for (const Xe3Tile& t : xe3Tiles)
+        if (t.uM == uM && t.uN == uN)
+            return t.eff;
+    return 0.0;
+}
+
+// How well p fits an M x N output (tests/linear-tune-intel-cm/10-cm4-heuristic.md 1.2):
+//   fit     = eff[tile] * fill * sqrt(min(1, threads / 384)) * 0.95 ^ log2(split)
+//   fill    = M N / (rows x columns the workgroups cover)
+//   threads = subgroups * split
+// The shape-dependent part of xe3LinearPick()'s score, and the rerank score of
+// xe3LinearChoose().
+inline double xe3Fit(uint32_t M, uint32_t N, const Xe3Pick& p)
+{
+    const uint32_t tm = p.sgM * p.uM * 8u, tn = p.sgN * p.uN * 16u;   // workgroup tile
+    const uint32_t gm = CEIL_DIV(M, tm), gn = CEIL_DIV(N, tn);        // workgroups along M and N
+    const uint64_t threads = uint64_t(gm) * gn * p.sgM * p.sgN * p.split;
+    const double fill = double(M) * N / (double(gm) * tm * gn * tn);
+    return xe3TileEff(p.uM, p.uN) * fill * std::sqrt(std::min(1.0, double(threads) / xe3ThreadsFull)) *
+           std::pow(xe3SplitCost, std::log2(double(p.split)));
+}
+
+// The heuristic configuration for M x K x N (tests/linear-tune-intel-cm/10-cm4-heuristic.md,
+// cm4-heuristic.py): the searched tile and subgroup grid with the highest
+//   score = xe3Fit() * grid preference
+// padOk: the caller gives the activation rows a pitch of K + padI when padI
+// comes back non-zero; without it the k skew stands in where it helps.
+// glu: Linear's GLU in the store (Linear::xe3Glu()), which pairs B tiles j and
+// j + 1 of a subgroup: a candidate with one split needs an even uN. With a
+// split the reduce pass does the GLU, so those candidates stay as they are.
+inline Xe3Pick xe3LinearPick(uint32_t M, uint32_t K, uint32_t N, bool padOk, bool glu = false)
+{
+    constexpr uint64_t threadsSplit = 256;   // split-K doubles while subgroups * split is below this ...
+    constexpr uint32_t splitMinK = 512;      // ... and every split keeps at least this much K
+    constexpr uint32_t splitMax = 16;
+    constexpr double halfGrid = 0.95;    // score factor per axis with 2 subgroups instead of 4
+    constexpr double tileMinK = 16.0;    // a tile needs uM * uN <= K / 16
+    constexpr uint32_t longK = 8192;     // from here on I and W no longer fit the caches
+    constexpr double long54Gain = 1.2;   // 5 x 4 in 8 x 4 subgroups when K >= longK and no split is needed
+
+    auto ceilPow2 = [](uint32_t x) {
+        uint32_t p = 1;
+        while (p < x)
+            p <<= 1;
+        return p;
+    };
+    struct Grid
+    {
+        uint32_t sgM, sgN;
+        double f;
+    };
+
+    const uint32_t m8 = ROUNDUP(M, 8u), n16 = ROUNDUP(N, 16u);
+    double best = -1.0;
+    uint32_t bSm = 1, bSn = 1, bUm = 1, bUn = 1, bGm = 1, bGn = 1, bSplit = 1;
+    for (const Xe3Tile& t : xe3Tiles)
+    {
+        if (!t.searched || double(t.uM * t.uN) > std::max(1.0, K / tileMinK))
+            continue;
+        const bool long54 = t.uM == 5u && t.uN == 4u && K >= longK;
+        const Grid grids[] = {
+            { 8, 4, long54Gain }, { 4, 4, 1.0 }, { 4, 2, halfGrid }, { 2, 4, halfGrid }, { 2, 2, halfGrid * halfGrid }
+        };
+        uint32_t seen[5][2];
+        uint32_t seenCount = 0;
+        for (uint32_t g = long54 ? 0u : 1u; g < 5u; ++g)
+        {
+            // No more subgroups than the problem has tiles.
+            const uint32_t sm = std::min(grids[g].sgM, ceilPow2(CEIL_DIV(M, 8u * t.uM)));
+            const uint32_t sn = std::min(grids[g].sgN, ceilPow2(CEIL_DIV(N, 16u * t.uN)));
+            bool dup = false;
+            for (uint32_t i = 0; i < seenCount; ++i)
+                dup = dup || (seen[i][0] == sm && seen[i][1] == sn);
+            if (dup)
+                continue;
+            seen[seenCount][0] = sm;
+            seen[seenCount++][1] = sn;
+
+            const uint32_t tm = sm * t.uM * 8u, tn = sn * t.uN * 16u;    // workgroup tile
+            const uint32_t gm = CEIL_DIV(M, tm), gn = CEIL_DIV(N, tn);   // workgroups along M and N
+            if ((tm >= 2u * m8 && t.uM > 1u) || (tn >= 2u * n16 && t.uN > 1u))
+                continue;   // the tile alone is twice the problem
+            const uint64_t subgroups = uint64_t(gm) * gn * sm * sn;
+            uint32_t split = 1;
+            while (subgroups * split < threadsSplit && split < splitMax && K / (split * 2u) >= splitMinK)
+                split *= 2u;
+            if (grids[g].sgM == 8u && (split > 1u || sm < 8u))
+                continue;
+            if (glu && split == 1u && t.uN % 2u != 0u)
+                continue;   // the GLU store needs gate and up tiles in pairs
+            const double score =
+                grids[g].f * xe3Fit(M, N, { .sgM = sm, .sgN = sn, .uM = t.uM, .uN = t.uN, .split = split });
+            if (best < 0.0 || score > best * 1.0001)
+            {
+                best = score;
+                bSm = sm;
+                bSn = sn;
+                bUm = t.uM;
+                bUn = t.uN;
+                bGm = gm;
+                bGn = gn;
+                bSplit = split;
+            }
+        }
+    }
+
+    Xe3Pick p = {
+        .sgM = bSm,
+        .sgN = bSn,
+        .uM = bUm,
+        .uN = bUn,
+        .kUnroll = (K / bSplit >= 32u) ? 2u : 1u,
+        .split = bSplit,
+        .order = (bGm > 1u && bGn > 1u) ? 1u : 0u,
+        .prefetch = 1,   // prefetch and the split barrier: always (measured in the node, weights not cached)
+        .padI = 0,
+        .skew = 0,
+        .smod = 0
+    };
+    // Activation rows K apart collide in the cache when K is a large multiple
+    // of 2048: pad them, or skew k as a fallback.
+    if (K >= longK && K % 2048u == 0u && M >= 64u)
+    {
+        if (padOk)
+        {
+            p.padI = 64;
+            if (bSm == 8u)
+                p.kUnroll = 1;   // the long-K choice runs best with kUnroll 1
+        }
+        else if (K >= 16384u && bSm >= 2u && bSplit == 1u)
+        {
+            p.kUnroll = 1;
+            p.skew = (bSm >= 4u) ? 2u : 1u;
+            p.smod = (bSm >= 4u) ? 4u : 0u;
+        }
+    }
+    return p;
+}
+
+// A measured configuration of a nearby shape made to run M x K x N, or none
+// when the shape cannot use it (the revise step of linearTunePick()). It keeps
+// what was measured (tile, grid, k unroll, order, split) and changes only what
+// the new shape forces:
+//   - tile: one the score knows, within K (uM * uN <= K / 16)
+//   - grid: no more subgroups per axis than the shape has tiles (as xe3LinearPick())
+//   - none: the workgroup tile alone is twice the problem
+//   - split: halved until every split keeps 128 k (the sweeps' floor)
+//   - k unroll: 1 when a split holds fewer than 32 k
+//   - k skew: only where xe3LinearPick() would skew (I rows K apart alias)
+inline std::optional<Xe3Pick> xe3Revise(const LinearShape& s, Xe3Pick p)
+{
+    constexpr uint32_t splitMinK = 128;
+    constexpr uint32_t longK = 8192;   // as xe3LinearPick(): rows from here alias when K % 2048 == 0
+    const uint32_t M = s.M, K = s.K, N = s.N;
+
+    if (xe3TileEff(p.uM, p.uN) <= 0.0 || p.uM * p.uN > std::max(1u, K / 16u))
+        return std::nullopt;
+    p.sgM = std::min(p.sgM, std::bit_ceil(CEIL_DIV(M, 8u * p.uM)));
+    p.sgN = std::min(p.sgN, std::bit_ceil(CEIL_DIV(N, 16u * p.uN)));
+    const uint32_t tm = p.sgM * p.uM * 8u, tn = p.sgN * p.uN * 16u;
+    if ((tm >= 2u * ROUNDUP(M, 8u) && p.uM > 1u) || (tn >= 2u * ROUNDUP(N, 16u) && p.uN > 1u))
+        return std::nullopt;
+
+    while (p.split > 1u && K / p.split < splitMinK)
+        p.split /= 2u;
+    if (K / p.split < 32u)
+        p.kUnroll = 1;
+
+    const bool aliasing = K >= longK && K % 2048u == 0u && M >= 64u;
+    if (p.skew > 0u && !(aliasing && p.sgM >= 2u && p.split == 1u))
+        p.skew = p.smod = 0;
+    else if (p.skew > 0u && p.sgM < 4u)   // the grid shrank: xe3LinearPick()'s skew for 2 rows
+    {
+        p.skew = 1;
+        p.smod = 0;
+    }
+
+    p.prefetch = 1;   // as measured for the table, and as the node always runs
+    p.padI = 0;       // the Linear node keeps I rows K apart
+    return p;
+}
+
+// The configuration for M x K x N on the Linear node: the measured table
+// (linear-xe3-table.inc, written by tests/linear-tune-intel-cm/xe3-table.py)
+// by exact shape; a shape outside it takes xe3LinearPick(), or under
+// LinearTuneMiss::Neighbour (VAI_LINEAR_TUNE_MISS=neighbour) the measured
+// configurations of the nearest shapes, revised (xe3Revise) and reranked by
+// xe3Fit(). The reference use of LinearTuneTable (linear-tune-table.h).
+// glu (Linear::xe3Glu()) goes to the heuristic; the table has no GLU key: a GLU
+// shape's row is measured with the GLU, and prepare() still evens an odd uN.
+inline LinearTuneResult<Xe3Pick> xe3LinearChoose(
+    uint32_t M, uint32_t K, uint32_t N, bool glu = false, LinearTuneMiss miss = linearTuneMiss())
+{
+    static constexpr LinearTuneEntry<Xe3Pick> rows[] = {
+#include "linear-xe3-table.inc"
+    };
+    static const LinearTuneTable<Xe3Pick> table{ rows };
+    constexpr uint32_t neighbours = 4;
+
+    return linearTunePick(
+        table,
+        { .M = M, .K = K, .N = N },
+        miss,
+        neighbours,
+        xe3Revise,
+        [](const LinearShape& s, const Xe3Pick& p) { return xe3Fit(s.M, s.N, p); },
+        [glu](const LinearShape& s) { return xe3LinearPick(s.M, s.K, s.N, false, glu); });
+}
+
+// The pick as pipeline parameters. I rows are K apart here (no activation padding).
+inline Linear::PipeParamsXe3 xe3LinearTile(
+    uint32_t M, uint32_t N, uint32_t K, Dtype oDtype, uint32_t& splitCount, bool glu = false)
+{
+    const Xe3Pick k = xe3LinearChoose(M, K, N, glu).cfg;
+    splitCount = k.split;
+    return {
+        .wgSgM = k.sgM,
+        .wgSgN = k.sgN,
+        .uM = k.uM,
+        .uN = k.uN,
+        .kUnroll = k.kUnroll,
+        .order = k.order,
+        .pf = k.prefetch,
+        .skew = k.skew,
+        .smod = k.smod,
+        .oDtype = oDtype
+    };
+}
+
+
+/////////////////////////////////////////////////////////////////////////////////////////
 // Other vendors (Qualcomm, Apple, software, unknown): ggml's rules
 /////////////////////////////////////////////////////////////////////////////////////////
 
@@ -2138,6 +2540,7 @@ inline Linear::Linear(Config config)
     addSlot("in0", NodeSlot::input);
     addSlot("weight", NodeSlot::persistent);
     addSlot("partial", NodeSlot::temporary);   // assigned only when the reduce pass runs
+    addSlot("inputF16", NodeSlot::temporary);   // assigned only when Xe3 casts an fp32 I (xe3CastInput_)
 
     addSlot("bias", NodeSlot::persistent);
     if (config_.acceptResidual) addSlot("residual", NodeSlot::input);
@@ -2288,6 +2691,111 @@ inline void Linear::repackWeightAmd(WeightLayout layout)
     weight = packWeightAmd(weight, layout);
 }
 
+// The layout the "weight" slot holds on the Xe3 path, by its shape (see WeightLayout).
+inline Linear::WeightLayout Linear::weightLayoutXe3() const
+{
+    const auto& weight = (*this)["weight"];
+    const uint32_t N = config_.outDim, K = config_.inDim;
+    if (weight.isShapeOf(N, K))
+        return WeightLayout::Rows;
+    VAI_ASSERT(weight.isShapeOf(1u, K, xe3WeightPitch(N)));
+    return WeightLayout::KnPitch32;
+}
+
+// linear-pack-xe3: W [N, K] -> W'[K, ldn], one invocation per fp16 pair of W'
+// (a GLU's rows come already interleaved, permuteGluRows). Run once and waited
+// for, like packWeightIntel.
+inline Tensor Linear::packWeightXe3(const Tensor& source, WeightLayout target)
+{
+    VAI_ASSERT(target == WeightLayout::KnPitch32);
+    const uint32_t N = config_.outDim, K = config_.inDim, ldn = xe3WeightPitch(N);
+    Tensor packed({ 1u, K, ldn }, source.dtype());
+    packed.bindBuffer(bufferPool().requestBuffer(
+        eva::BUFFER_USAGE::STORAGE_BUFFER | eva::BUFFER_USAGE::TRANSFER_DST,
+        eva::MEMORY_PROPERTY::DEVICE_LOCAL,
+        packed.numBytes(),
+        packed.numBytes()));
+    const auto destination = packed.buffer();
+    auto pipe = pipelinePool().request("linear-pack-xe3", {});
+    auto set = gVaiDestSetPool(pipe.descSetLayout(0));
+    set.write({ destination, source.buffer() });   // 0 = W', 1 = W
+
+    const uint32_t groups = CEIL_DIV(K * (ldn / 2u), 256u), maxX = device().maxComputeWorkGroupCount()[0];
+    const uint32_t gy = CEIL_DIV(groups, maxX), gx = CEIL_DIV(groups, gy);
+    const uint32_t constants[] = { N, K, ldn };
+    auto cmd = device().newCommandBuffer(eva::queue_compute);
+    cmd.begin(eva::COMMAND_BUFFER_USAGE::ONE_TIME_SUBMIT)
+        .bindPipeline(pipe)
+        .bindDescSets({ set })
+        .setPushConstants(0, sizeof(constants), constants)
+        .dispatch(gx, gy, 1u)
+        .end();
+    device().queue() << cmd << eva::waiting;
+    return packed;
+}
+
+// The epilogue's constants (common/linear-store.h) for a kernel whose store
+// does it (storeInKernel_): bias, residual, scale and the activation, or the GLU's
+// activation. Without storeInKernel_ none: the kernel stores C as it is.
+inline void Linear::addStoreConstants(
+    eva::SpecializationConstant& spec, Dtype bDtype, uint32_t biasElems, uint32_t residualElems) const
+{
+    if (!storeInKernel_)
+        return;
+    spec.addConstant(eva::constant_id<SPEC_ID_HAS_BIAS>(hasBias() ? 1u : 0u));
+    spec.addConstant(eva::constant_id<SPEC_ID_BIAS_ELEMS>(biasElems));
+    spec.addConstant(eva::constant_id<SPEC_ID_TYPE_B>(bDtype == Dtype::None ? Dtype::Fp32 : bDtype));
+    spec.addConstant(eva::constant_id<SPEC_ID_HAS_RESIDUAL>(config_.acceptResidual ? 1u : 0u));
+    spec.addConstant(eva::constant_id<SPEC_ID_RESIDUAL_ELEMS>(residualElems));
+    spec.addConstant(eva::constant_id<SPEC_ID_RESIDUAL_ORDER>((uint32_t)config_.residualOrder));
+    spec.addConstant(eva::constant_id<SPEC_ID_SCALE_BITS>(std::bit_cast<uint32_t>(config_.scalarScale)));
+    spec.addConstant(eva::constant_id<SPEC_ID_ACT_TYPE>((uint32_t)config_.actType));
+}
+
+// linear-glu-rows: the GLU's [gate; up] rows into blocks of gluBlockFor() gate
+// rows then as many up rows (see gluBlock_), in a buffer from the net's pool
+// that the slot then holds. Run once, before any packing, and waited for.
+inline void Linear::permuteGluRows()
+{
+    Tensor& weight = (*this)["weight"];
+    const uint32_t N = config_.outDim, K = config_.inDim, G = gluBlockFor();
+    VAI_ASSERT(weight.isShapeOf(N, K) && (N / 2u) % G == 0u);
+    Tensor permuted({ N, K }, weight.dtype());
+    permuted.bindBuffer(bufferPool().requestBuffer(
+        eva::BUFFER_USAGE::STORAGE_BUFFER | eva::BUFFER_USAGE::TRANSFER_DST,
+        eva::MEMORY_PROPERTY::DEVICE_LOCAL,
+        permuted.numBytes(),
+        permuted.numBytes()));
+    auto pipe = pipelinePool().request("linear-glu-rows", { eva::constant_id<SPEC_ID_TYPE_W>(weight.dtype()) });
+    auto set = gVaiDestSetPool(pipe.descSetLayout(0));
+    set.write({ permuted.buffer(), weight.buffer() });   // 0 = W', 1 = W
+
+    const uint32_t groups = CEIL_DIV(N * K, 256u), maxX = device().maxComputeWorkGroupCount()[0];
+    const uint32_t gy = CEIL_DIV(groups, maxX), gx = CEIL_DIV(groups, gy);
+    const uint32_t constants[] = { N, K, G };
+    auto cmd = device().newCommandBuffer(eva::queue_compute);
+    cmd.begin(eva::COMMAND_BUFFER_USAGE::ONE_TIME_SUBMIT)
+        .bindPipeline(pipe)
+        .bindDescSets({ set })
+        .setPushConstants(0, sizeof(constants), constants)
+        .dispatch(gx, gy, 1u)
+        .end();
+    device().queue() << cmd << eva::waiting;
+    weight = permuted;
+    gluBlock_ = G;
+}
+
+// Puts the "weight" slot into `layout`, the one linear-cm-xe3 reads. The Rows
+// weight goes with the repack: nothing on this path asks for it again.
+inline void Linear::repackWeightXe3(WeightLayout layout)
+{
+    VAI_ASSERT(layout == WeightLayout::KnPitch32);
+    if (weightLayoutXe3() == layout)
+        return;
+    Tensor& weight = (*this)["weight"];
+    weight = packWeightXe3(weight, layout);
+}
+
 inline void Linear::prepare()
 {
     const Dtype oDtype = (oDtype_ == Dtype::None) ? oDefaultDtype() : oDtype_;
@@ -2308,6 +2816,7 @@ inline void Linear::prepare()
     uint32_t N = config_.outDim;
     uint32_t K = config_.inDim;
     VAI_ASSERT(inTen.shape().back() == K);
+    VAI_ASSERT(!config_.glu || (N % 2u == 0u && !config_.acceptResidual && config_.scalarScale == 1.0f));
 
     const Dtype iDtype = inTen.dtype();
     const AmdLinearDevice chip = amdLinearDevice(device());
@@ -2317,14 +2826,21 @@ inline void Linear::prepare()
     const Dtype wDtype =
         strix && weightLayoutAmd() != WeightLayout::Rows && rowWeight_.validShape() ? rowWeight_.dtype() : wTen.dtype();
     const bool amd = device().vendorID() == eva::VENDOR_ID::AMD;
-    const Dtype accDtype = (accDtype_ == Dtype::None) ? (amd ? Dtype::Fp32 : wDtype) : accDtype_;
+    const Dtype accDtype = (accDtype_ == Dtype::None) ? Dtype::Fp32 : accDtype_;
 
     const auto& inShape = inTen.shape();
     uint32_t M = outerSize(inShape);
-    intel_ = useIntelTile(device());
+    xe3_ = useXe3Cm(device(), iDtype, wDtype, K);
+    intel_ = !xe3_ && useIntelTile(device());
+    if (config_.glu && gluBlock_ == 0u)
+        permuteGluRows();   // before any packing: every layout below starts from these rows
+    gluSlabOk_ = wDtype == Dtype::Fp16 && plainOutput();
+    storeInKernel_ = false;
+    if (xe3_)
+        repackWeightXe3(WeightLayout::KnPitch32);
     if (intel_ && wTen.isShapeOf(N, K))
         packWeightIntel();
-    VAI_ASSERT(strix || (intel_ ? weightPackedIntel() : wTen.isShapeOf(N, K)));
+    VAI_ASSERT(strix || xe3_ || (intel_ ? weightPackedIntel() : wTen.isShapeOf(N, K)));
     if (strix && useSlabPath(M))
         repackWeightAmd(WeightLayout::Rows);
 
@@ -2361,6 +2877,7 @@ inline void Linear::prepare()
         const uint32_t wgN = (wDtype == Dtype::Fp16) ? 2u : 1u;   // fp16 W pairs N positions
         const bool     aligned = (K % 4 == 0);   // K_PER_ITER = 4 wide loads
 
+        storeInKernel_ = true;   // the slab kernel does the whole epilogue (and only a GLU it can take reaches it)
         const PipeParamsSlab p = { .M = M, .biasRepeat = biasElems, .residualRepeat = residualElems, .iDtype = iDtype };
         if (!pipeSlab || p != pipeParamsSlab)
         {
@@ -2378,11 +2895,12 @@ inline void Linear::prepare()
                 eva::constant_id<7>(residualElems),                   // residual repeat (0: covers O)
                 eva::constant_id<8>((uint32_t) config_.residualOrder),   // residualOrder
                 eva::constant_id<9>(bDtype),                          // typeB (bias)
+                eva::constant_id<10>(config_.glu ? 1u : 0u),          // glu
                 eva::constant_id<SPEC_ID_TYPE_O>(oDtype),     // typeO
                 eva::constant_id<SPEC_ID_TYPE_I>(iDtype),             // typeI
                 eva::constant_id<SPEC_ID_TYPE_W>(wDtype),             // typeW
                 eva::constant_id<SPEC_ID_ALIGNED>(aligned ? 1u : 0u), // aligned (K % 4 == 0)
-                eva::constant_id<SPEC_ID_EPILOGUE>((uint32_t) config_.epilogue)   // epilogue
+                eva::constant_id<SPEC_ID_ACT_TYPE>((uint32_t) config_.actType)   // actType
             }, {
                 .requiredSubgroupSize = sgSize,
             });
@@ -2394,31 +2912,108 @@ inline void Linear::prepare()
     }
     else
     {
-        if (intel_)
+        if (xe3_)
+        {
+            // The matrix engine takes fp16: an fp32 I is cast once per run, ahead of the product.
+            xe3CastInput_ = iDtype == Dtype::Fp32;
+            if (xe3CastInput_)
+            {
+                if (!pipeCast_)
+                {
+                    // clang-format off
+                    pipeCast_ = pipelinePool().request("cast", {
+                        eva::constant_id<SPEC_ID_TYPE_O>(Dtype::Fp16),   // typeO
+                        eva::constant_id<SPEC_ID_TYPE_I>(Dtype::Fp32)    // typeI
+                    });
+                    // clang-format on
+                    descSetCast_ = gVaiDestSetPool(pipeCast_.descSetLayout(0));
+                }
+                (*this)["inputF16"] = Tensor(inShape, Dtype::Fp16);
+            }
+
+            uint32_t pickedSplits = 1;
+            PipeParamsXe3 px = xe3LinearTile(M, N, K, oDtype, pickedSplits, xe3Glu());
+#ifndef VAI_NO_XE3_TUNE
+            if (xe3TuneSplits_ > 0u)
+            {
+                px = xe3Tune_;
+                px.oDtype = oDtype;
+                pickedSplits = xe3TuneSplits_;
+            }
+#endif
+
+            // Split-K: explicit splitSize, or the pick's count; spans of whole trips.
+            const uint32_t splits = (config_.splitSize > 0) ? CEIL_DIV(K, config_.splitSize) : pickedSplits;
+            splitSize = (splits > 1) ? ROUNDUP(CEIL_DIV(K, splits), 16u * px.kUnroll) : K;
+            splitCount = CEIL_DIV(K, splitSize);
+
+            // With one split the store does the epilogue. The GLU pairs B tiles j and j + 1 of
+            // one subgroup: an even uN. With a split the kernel writes partials for the reduce pass.
+            storeInKernel_ = storeAllowed_ && splitCount == 1u && (config_.glu ? xe3Glu() : !plainOutput());
+            px.store = storeInKernel_ ? 1u : 0u;
+            // Xe3 accumulates in fp32 even when setAccDtype(Fp16) asks otherwise: under the current
+            // driver (jay) fp16 accumulators get 128 GRF and loop-carried shuffles, and run slower.
+            px.accF16 = 0u;
+            if (storeInKernel_ && config_.glu && px.uN % 2u != 0u)
+                px.uN = (px.uN == 1u) ? 2u : px.uN - 1u;
+
+            if (!pipeTile || px != pipeParamsXe3_)
+            {
+                pipeParamsXe3_ = px;
+                // clang-format off
+                eva::SpecializationConstant spec{
+                    eva::constant_id<0>(16u * px.wgSgM * px.wgSgN),         // wgSize (= local_size_x)
+                    eva::constant_id<1>(px.wgSgM),                          // wgSgM
+                    eva::constant_id<2>(px.wgSgN),                          // wgSgN
+                    eva::constant_id<3>(px.uM),                             // uM
+                    eva::constant_id<4>(px.uN),                             // uN
+                    eva::constant_id<5>(px.kUnroll),                        // kUnroll
+                    eva::constant_id<6>(px.order),                          // order
+                    eva::constant_id<7>(px.pf),                             // pf
+                    eva::constant_id<8>(px.pf),                             // bar (with pf)
+                    eva::constant_id<9>(px.skew),                           // skew
+                    eva::constant_id<10>(px.smod),                          // smod
+                    eva::constant_id<15>(px.store && config_.glu ? 1u : 0u),   // glu
+                    eva::constant_id<16>(px.accF16),                        // accF16
+                    eva::constant_id<SPEC_ID_TYPE_O>(oDtype)                // typeO
+                };
+                // clang-format on
+                addStoreConstants(spec, bDtype, biasElems, residualElems);
+                pipeTile = pipelinePool().request("linear-cm-xe3", std::move(spec), { .requiredSubgroupSize = 16 });
+
+                if (!descSetTile)
+                    descSetTile = gVaiDestSetPool(pipeTile.descSetLayout(0));
+            }
+        }
+        else if (intel_)
         {
             const bool accF32 = (iDtype == Dtype::Fp32 && wDtype == Dtype::Fp32) || accDtype == Dtype::Fp32;
-            const PipeParamsIntel pi = intelTileParams(M, N, K, iDtype, accF32, device());
+            PipeParamsIntel pi = intelTileParams(M, N, K, iDtype, accF32, device());
 
             // Split-K: explicit splitSize, or the Intel rule; spans of whole 16-k trips.
             const uint32_t splits =
                 (config_.splitSize > 0) ? CEIL_DIV(K, config_.splitSize) : intelTileSplitCount(M, N, K, pi, device());
             splitSize = (splits > 1) ? ROUNDUP(CEIL_DIV(K, splits), 16u) : K;
             splitCount = CEIL_DIV(K, splitSize);
+            // With one split the store does the epilogue (the GLU: a lane's columns l, l + 16).
+            storeInKernel_ = pi.store =
+                storeAllowed_ && splitCount == 1u && (config_.glu ? gluBlock_ == 16u : !plainOutput());
 
             if (!pipeTile || pi != pipeParamsIntel)
             {
                 pipeParamsIntel = pi;
                 // clang-format off
-                pipeTile = pipelinePool().request("linear-tile-intel", {
+                eva::SpecializationConstant spec{
                     eva::constant_id<7>(pi.tileB),                          // tileB
                     eva::constant_id<10>(pi.bandTiles),                     // bandTiles
                     eva::constant_id<11>(pi.accDtype),                      // accType
+                    eva::constant_id<12>(pi.store && config_.glu ? 1u : 0u),   // glu
                     eva::constant_id<SPEC_ID_TYPE_O>(oDtype),       // typeO
                     eva::constant_id<SPEC_ID_TYPE_I>(iDtype),               // typeI
                     eva::constant_id<SPEC_ID_TYPE_W>(wDtype)        // typeW
-                }, {
-                    .requiredSubgroupSize = 16,
-                });
+                };
+                addStoreConstants(spec, bDtype, biasElems, residualElems);
+                pipeTile = pipelinePool().request("linear-tile-intel", std::move(spec), { .requiredSubgroupSize = 16 });
                 // clang-format on
 
                 if (!descSetTile)
@@ -2461,15 +3056,16 @@ inline void Linear::prepare()
                 if (chip == AmdLinearDevice::StrixHalo && plainOutput() && fp16Io && a.accType == Dtype::Fp32 &&
                     !config_.splitSize && splitCount == 1)
                     radv = amdHaloPlainTile(M, N, K, wTen, t, a, device());
-                // An unsplit cooperative tile applies the epilogue itself.
-                a.fused = !radv && splitCount == 1 && !plainOutput();
+                // An unsplit cooperative tile applies the activation itself.
+                a.fused =
+                    !radv && splitCount == 1 && !plainOutput() && !config_.glu;   // the GLU goes to the reduce pass
                 a.hasBias = hasBias();
                 a.hasResidual = config_.acceptResidual;
                 a.biasDtype = bDtype;
                 a.biasRepeat = biasElems;
                 a.residualRepeat = residualElems;
                 a.scaleBits = std::bit_cast<uint32_t>(config_.scalarScale);
-                a.epilogue = config_.epilogue;
+                a.actType = config_.actType;
                 a.residualOrder = config_.residualOrder;
                 a.loadWidth = amdStrixLoadWidth(K, t.wgK, splitSize);
                 // The schedule options need Fragments weights and whole k-blocks.
@@ -2484,7 +3080,7 @@ inline void Linear::prepare()
             const Dtype acc = t.tK && amd ? Dtype::Fp32 : cmAccDtype;
             const bool fullResidual =
                 splitCount == 1 && config_.acceptResidual && residualElems == 0 && !hasBias() &&
-                config_.epilogue == Epilogue::None && config_.scalarScale == 1.0f;
+                config_.actType == vai::ActType::None && config_.scalarScale == 1.0f;
             if (amd && !strix && t.tM == 16 && t.tN == 16 && t.tK == 16 && !config_.splitSize && acc == Dtype::Fp32 &&
                 fp16Io)
                 radv = amdLinearLaneTile(M, N, K, splitCount, device(), fullResidual);
@@ -2506,6 +3102,13 @@ inline void Linear::prepare()
                 t.rowMajor = CEIL_DIV(M, t.wgM);
             else
                 t = amdNavi48CmTile(M, N, K, splitSize, t, device());
+
+            // With one split the store of linear-tile and linear-cm does the epilogue (the GLU:
+            // a thread's adjacent columns); linear-cm-nv and linear-cm-amd leave it to the reduce pass.
+            t.store =
+                storeAllowed_ && splitCount == 1u && !t.lane && !t.strix && !t.kTailMasked &&
+                (config_.glu || !plainOutput());
+            storeInKernel_ = t.store;
 
             if (!pipeTile || t != pipeParamsTile)
             {
@@ -2584,7 +3187,7 @@ inline void Linear::prepare()
                             spec.addConstant(eva::constant_id<26>(N));   // specN
                             spec.addConstant(eva::constant_id<27>(K));   // specK
                         }
-                        spec.addConstant(eva::constant_id<SPEC_ID_EPILOGUE>(a.epilogue));   // epilogue
+                        spec.addConstant(eva::constant_id<SPEC_ID_ACT_TYPE>(a.actType));    // actType
                         spec.addConstant(eva::constant_id<SPEC_ID_TYPE_O>(oDtype));         // typeO
                         spec.addConstant(eva::constant_id<SPEC_ID_TYPE_I>(iDtype));         // typeI
                         spec.addConstant(eva::constant_id<SPEC_ID_TYPE_W>(wDtype));         // typeW
@@ -2602,7 +3205,7 @@ inline void Linear::prepare()
                     // NOTE (vs llama.cpp): ggml passes REQUIRE_FULL_SUBGROUPS_BIT
                     // here; eva doesn't expose it (see ggmlCoopmatShape).
                     // clang-format off
-                    pipeTile = pipelinePool().request(t.kTailMasked ? "linear-cm-nv" : "linear-cm", {
+                    eva::SpecializationConstant spec{
                         eva::constant_id<0>(t.wgSize),                       // wgSize (= local_size_x)
                         eva::constant_id<1>(t.sgSize),                       // sgSize (= device subgroup size)
                         eva::constant_id<2>(t.wgM),                          // wgM
@@ -2615,17 +3218,21 @@ inline void Linear::prepare()
                         eva::constant_id<9>(t.tK),                           // tK
                         eva::constant_id<11>(acc),                           // accType
                         eva::constant_id<12>(robust ? 1u : 0u),              // robustBufferAccess
+                        eva::constant_id<13>(t.store && config_.glu ? 1u : 0u),   // glu (linear-cm)
                         eva::constant_id<14>(t.rowMajor),                    // rowMajor (M-first: M tile count)
                         eva::constant_id<15>(uint32_t(t.prefetch)),          // prefetch
                         eva::constant_id<SPEC_ID_TYPE_O>(oDtype),    // typeO
                         eva::constant_id<SPEC_ID_TYPE_I>(iDtype),            // typeI
                         eva::constant_id<SPEC_ID_TYPE_W>(wDtype),    // typeW
                         eva::constant_id<SPEC_ID_ALIGNED>(loadCode)          // aligned (linear-cm-nv: load-width code)
-                    }, {
-                        .requiredSubgroupSize = t.sgSize != device().subgroupSize() ? t.sgSize : 0u,
-                        .robustBufferAccess = robust,
-                    });
+                    };
                     // clang-format on
+                    addStoreConstants(spec, bDtype, biasElems, residualElems);
+                    pipeTile = pipelinePool().request(
+                        t.kTailMasked ? "linear-cm-nv" : "linear-cm",
+                        std::move(spec),
+                        { .requiredSubgroupSize = t.sgSize != device().subgroupSize() ? t.sgSize : 0u,
+                          .robustBufferAccess = robust });
                 }
                 else   // scalar tile kernel
                 {
@@ -2640,7 +3247,7 @@ inline void Linear::prepare()
                     VAI_ASSERT(t.tN % 2 == 0);
 
                     // clang-format off
-                    pipeTile = pipelinePool().request("linear-tile", {
+                    eva::SpecializationConstant spec{
                         eva::constant_id<0>(t.wgSize),                                     // wgSize (= local_size_x)
                         eva::constant_id<1>(t.sgSize),                                     // sgSize
                         eva::constant_id<2>(t.wgM),                                        // wgM
@@ -2654,15 +3261,18 @@ inline void Linear::prepare()
                         eva::constant_id<10>(t.sgpNIter),                                  // sgpNIter
                         eva::constant_id<11>(stageF32 ? Dtype::Fp32 : accDtype),   // accType (fp32 over fp32 staging)
                         eva::constant_id<12>(robust ? 1u : 0u),                            // robustBufferAccess
+                        eva::constant_id<13>(t.store && config_.glu ? 1u : 0u),            // glu
                         eva::constant_id<SPEC_ID_TYPE_O>(oDtype),                  // typeO
                         eva::constant_id<SPEC_ID_TYPE_I>(iDtype),                          // typeI
                         eva::constant_id<SPEC_ID_TYPE_W>(wDtype),                  // typeW
                         eva::constant_id<SPEC_ID_ALIGNED>(aligned ? 1u : 0u)               // aligned
-                    }, {
-                        .requiredSubgroupSize = forceSg ? t.sgSize : 0u,
-                        .robustBufferAccess = robust,
-                    });
+                    };
                     // clang-format on
+                    addStoreConstants(spec, bDtype, biasElems, residualElems);
+                    pipeTile = pipelinePool().request(
+                        "linear-tile",
+                        std::move(spec),
+                        { .requiredSubgroupSize = forceSg ? t.sgSize : 0u, .robustBufferAccess = robust });
                 }
 
                 auto& set = (t.lane || t.strix) ? descSetAmd_ : descSetTile;
@@ -2671,7 +3281,9 @@ inline void Linear::prepare()
             }
         }
 
-        const PipeParamsReduce r = { .biasRepeat = biasElems, .residualRepeat = residualElems };
+        const PipeParamsReduce r = {
+            .biasRepeat = biasElems, .residualRepeat = residualElems, .gluBlock = config_.glu ? gluBlock_ : 0u
+        };
         if (needReducePass() && (!pipeReduce || r != pipeParamsReduce))
         {
             pipeParamsReduce = r;
@@ -2683,8 +3295,9 @@ inline void Linear::prepare()
                 eva::constant_id<3>(residualElems),                      // residual repeat (0: covers O)
                 eva::constant_id<4>((uint32_t) config_.residualOrder),   // residualOrder
                 eva::constant_id<5>(bDtype),                             // typeB (bias)
+                eva::constant_id<6>(r.gluBlock),                         // gluBlock
                 eva::constant_id<SPEC_ID_TYPE_O>(oDtype),        // typeO (O, P & residual)
-                eva::constant_id<SPEC_ID_EPILOGUE>((uint32_t) config_.epilogue)   // epilogue
+                eva::constant_id<SPEC_ID_ACT_TYPE>((uint32_t) config_.actType)   // actType
             });
             // clang-format on
 
@@ -2700,6 +3313,8 @@ inline void Linear::prepare()
 
     auto outShape = inShape;
     outShape.back() = N;
+    if (config_.glu)
+        outShape.back() = N / 2u;
     (*this)["out0"] = Tensor(outShape, oDtype);
 }
 
@@ -2716,7 +3331,7 @@ inline void Linear::run(eva::CommandBuffer cmdBuff)
 
     auto rBuf = config_.acceptResidual ? (*this)["residual"].buffer() : eva::Buffer();
 
-    // Slab path: bias / epilogue / the residual are fused in the kernel, so
+    // Slab path: bias / activation / the residual are fused in the kernel, so
     // neither the split-K partial buffer nor the reduce pass runs. M is baked
     // into the pipeline as a spec constant, so the push constants are just
     // {K, N} (the tile kernel below uses {M, N, K, splitSize}).
@@ -2747,9 +3362,17 @@ inline void Linear::run(eva::CommandBuffer cmdBuff)
         return;
     }
 
-    uint32_t constants[] = { M, N, K, splitSize };
+    // Xe3 adds the pitches of I's rows and W's k rows.
+    const uint32_t constants[] = { M, N, K, splitSize, K, xe3WeightPitch(N) };
+    const uint32_t constantsSize = xe3_ ? 6u * sizeof(uint32_t) : 4u * sizeof(uint32_t);
     uint32_t gx, gy;
-    if (intel_)
+    if (xe3_)
+    {
+        const uint32_t tilesM = CEIL_DIV(M, pipeParamsXe3_.tileM()), tilesN = CEIL_DIV(N, pipeParamsXe3_.tileN());
+        gx = pipeParamsXe3_.order == 0u ? tilesN : tilesM;
+        gy = pipeParamsXe3_.order == 0u ? tilesM : tilesN;
+    }
+    else if (intel_)
     {
         // One flat tile index (linear-tile-intel), folded into y past the x limit.
         const uint32_t bands = CEIL_DIV(CEIL_DIV(M, pipeParamsIntel.tileB), pipeParamsIntel.bandTiles);
@@ -2774,12 +3397,33 @@ inline void Linear::run(eva::CommandBuffer cmdBuff)
     // binds dst as a placeholder.
     const bool amdKernel = pipeParamsTile.lane || pipeParamsTile.strix;
     auto& set = amdKernel ? descSetAmd_ : descSetTile;
-    if (amdKernel)
+    if (xe3_)
+    {
+        // 3: linear-cm-xe3's row scale (Attention's Xe3 path only), 4 / 5: the epilogue's bias / residual.
+        if (xe3CastInput_)
+        {
+            // I fp32 -> fp16 into inputF16, which the product reads (one thread an element, folded into y).
+            const auto f16Buf = (*this)["inputF16"].buffer();
+            const uint32_t elems = M * K, groups = CEIL_DIV(elems, 64u);   // 64 = local_size_x of cast
+            const uint32_t gy = CEIL_DIV(groups, device().maxComputeWorkGroupCount()[0]), gx = CEIL_DIV(groups, gy);
+            descSetCast_.write({ f16Buf, inBuf });
+            cmdBuff.bindPipeline(pipeCast_)
+                .setPushConstants(0, sizeof(elems), &elems)
+                .bindDescSets({ descSetCast_ })
+                .dispatch(gx, gy)
+                .barrier(eva::SYNC_SCOPE::COMPUTE_WRITE / f16Buf / eva::SYNC_SCOPE::COMPUTE_READ);
+            inBuf = f16Buf;
+        }
+        set.write(
+            { dst, inBuf, wBuf, dst, hasBias() ? (*this)["bias"].buffer() : dst, config_.acceptResidual ? rBuf : dst });
+    }
+    // linear-cm-amd, linear-tile-intel, linear-tile, linear-cm: 3 / 4 the epilogue's bias / residual.
+    else if (amdKernel || intel_ || !pipeParamsTile.kTailMasked)
         set.write(
             { dst, inBuf, wBuf, hasBias() ? (*this)["bias"].buffer() : dst, config_.acceptResidual ? rBuf : dst });
-    else
+    else   // linear-cm-nv
         set.write({ dst, inBuf, wBuf });
-    cmdBuff.bindPipeline(pipeTile).bindDescSets({ set }).setPushConstants(0, sizeof(constants), constants);
+    cmdBuff.bindPipeline(pipeTile).bindDescSets({ set }).setPushConstants(0, constantsSize, constants);
     cmdBuff.dispatch(gx, gy, splitCount).barrier(eva::SYNC_SCOPE::COMPUTE_WRITE / dst / eva::SYNC_SCOPE::COMPUTE_READ);
     if (!reduce)
         return;
@@ -2788,12 +3432,17 @@ inline void Linear::run(eva::CommandBuffer cmdBuff)
     descSetReduce.write({ outBuf, dst, bBuf, rBuf });
     constexpr uint32_t reduceWgSize = 256;   // = local_size_x of linear-reduce
     constexpr uint32_t reduceBatch  = 4;     // elements folded per invocation
-    struct { uint32_t MN, splitCount, N; float scalarScale; } reduceConstants = { M * N, splitCount, N, config_.scalarScale };
+    const uint32_t outputs = config_.glu ? M * (N / 2u) : M * N;   // the GLU halves the output
+    struct
+    {
+        uint32_t MN, splitCount, N;
+        float scalarScale;
+    } reduceConstants = { outputs, splitCount, N, config_.scalarScale };
 
     cmdBuff.bindPipeline(pipeReduce)
         .bindDescSets({ descSetReduce })
         .setPushConstants(0, sizeof(reduceConstants), &reduceConstants)
-        .dispatch(CEIL_DIV(M * N, reduceWgSize * reduceBatch), 1, 1)
+        .dispatch(CEIL_DIV(outputs, reduceWgSize * reduceBatch), 1, 1)
         .barrier(eva::SYNC_SCOPE::COMPUTE_WRITE / outBuf / eva::SYNC_SCOPE::COMPUTE_READ);
 }
 

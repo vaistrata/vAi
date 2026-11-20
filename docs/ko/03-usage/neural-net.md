@@ -86,7 +86,7 @@ struct Model : vai::NeuralNet {
 
     explicit Model(const vai::NeuralNetConfig& cfg = {})
         : NeuralNet(cfg)
-        , relu({.epilogue = vai::Epilogue::Relu})
+        , relu({.actType = vai::ActType::Relu})
     {
         input("in0") - relu - output("out0");
     }
@@ -101,7 +101,7 @@ struct FeatureModel : vai::NeuralNet {
 
     explicit FeatureModel(const vai::NeuralNetConfig& cfg = {})
         : NeuralNet(cfg)
-        , relu({.epilogue = vai::Epilogue::Relu})
+        , relu({.actType = vai::ActType::Relu})
     {
         input("features") - relu - output("activated");
     }

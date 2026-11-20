@@ -175,13 +175,15 @@ jobs:
       # header of these directories can be.
       # The directories are the ones the configure above covers: a source of
       # python/, tests/ or benchmarks/ has no entry in the compile database.
+      # A .inc is a fragment included mid-statement (e.g. a generated table's
+      # rows) and does not parse on its own, so it is left out.
       # Exit codes: 0 clean, 1 a finding on a changed line or an unreadable file.
       - name: clang-tidy (changed lines)
         if: github.event_name == 'pull_request'
         run: |
           base=$(git merge-base "origin/$BASE_REF" HEAD)
           git diff -U0 "$base" -- vai models examples \
-              ':!vai/shaders' \
+              ':!vai/shaders' ':!*.inc' \
               ':!vai/utils/stb_image.h' ':!vai/utils/stb_image_write.h' ':!vai/utils/tiny-json.h' \
             | clang-tidy-diff.py -p1 -path build -j "$(nproc)" -quiet -warnings-as-errors='*'
 

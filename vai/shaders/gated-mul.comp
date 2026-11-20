@@ -1,9 +1,9 @@
 /*=============================================================================
  gated-mul.comp:
-     O[r, j] = epilogue( I[r, j] ) * I[r, H + j]   (GLU gating)
+     O[r, j] = activation( I[r, j] ) * I[r, H + j]   (GLU gating)
 
  One buffer holds both halves: row r spans 2H elements, the leading H of
- which take the activation. epilogue names the variant (silu: SwiGLU,
+ which take the activation. actType names the variant (silu: SwiGLU,
  gelu: GEGLU, relu: ReGLU, none: bilinear).
 
  - O (typeO) and I (typeI) are fp32 or fp16, accessed through same-binding
@@ -45,5 +45,5 @@ void main()
     uint row = e / H;
     uint src = row * 2u * H + (e - row * H);
 
-    writeO(e, applyEpilogue(readI(src)) * readI(src + H));
+    writeO(e, applyActivation(readI(src)) * readI(src + H));
 }

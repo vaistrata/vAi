@@ -56,7 +56,7 @@ private:
             .numQHeads = embedDim / headDim,
             .numKVHeads = 8,
             .ffnHiddenDim = 8192,
-            .ffnActivation = vai::Epilogue::Silu,
+            .ffnActType = vai::ActType::Silu,
             .ropeCfg = rope(32.0f),
         };
     }

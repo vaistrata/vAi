@@ -26,6 +26,16 @@ using VisionEncoder = vai::group::Transformer<vai::TransformerType::Classic>;
 using LanguageEncoder = vai::group::Transformer<vai::TransformerType::Default>;
 
 
+// A Gemma tower whose gated FFNs run the GLU inside their first projection
+// (GatedFeedForward::fuseGlu): no GatedMul pass on Xe3.
+constexpr vai::TransformerConfig gemmaFusedGlu(std::string_view variant)
+{
+    vai::TransformerConfig c = common::gemma(variant);
+    c.ffnFuseGlu = true;
+    return c;
+}
+
+
 /////////////////////////////////////////////////////////////////////////////////////////
 // ModelConfig - pi0.5 (3B VLA) - PaliGemma 3B and a Gemma 300M action expert
 /////////////////////////////////////////////////////////////////////////////////////////
@@ -39,8 +49,8 @@ struct ModelConfig
     uint32_t actionChunk = 50;        // actions one chunk carries
 
     VisionTransformerConfig visionTrf = common::so400m14(224);
-    vai::TransformerConfig languageTrf = common::gemma("2B");
-    vai::TransformerConfig actionTrf = common::gemma("300M");
+    vai::TransformerConfig languageTrf = gemmaFusedGlu("2B");
+    vai::TransformerConfig actionTrf = gemmaFusedGlu("300M");
 
     // Every camera the policy allows, the prompt and the action chunk: the
     // longest context the cache ever holds. The state rides in the prompt.

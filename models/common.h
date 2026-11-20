@@ -31,7 +31,7 @@ constexpr VisionTransformerConfig so400m14(uint32_t imageSize = 0)
             .numQHeads = 16,
             .numKVHeads = 16,
             .ffnHiddenDim = 4304,
-            .ffnActivation = vai::Epilogue::GeluTanh,
+            .ffnActType = vai::ActType::GeluTanh,
             .normEps = 1e-6f,
         },
         imageSize,
@@ -55,7 +55,7 @@ constexpr vai::TransformerConfig gemma(std::string_view variant)
         .numQHeads = 8,
         .numKVHeads = 1,
         .ffnHiddenDim = is2B ? 16384u : 4096u,
-        .ffnActivation = vai::Epilogue::GeluTanh,
+        .ffnActType = vai::ActType::GeluTanh,
         .normEps = 1e-6f,
         .ropeCfg = vai::RopeConfig{ .base = 10000.0f },
     };

@@ -22,7 +22,7 @@ layout(constant_id = 5) const bool alignM = false;
 layout(constant_id = 6) const bool alignN = false;
 layout(constant_id = 7) const bool alignK = false;
 layout(constant_id = 8) const bool shortcut = false;
-layout(constant_id = 12) const uint residualOrder = 0u;  // 0: after the epilogue, 1: before it
+layout(constant_id = 12) const uint residualOrder = 0u;  // 0: after the activation, 1: before it
 layout(constant_id = SPEC_ID_TYPE_CI) const uint CI_SPEC = 0u;
 layout(constant_id = SPEC_ID_TYPE_CO) const uint CO_SPEC = 0u;
 layout(constant_id = SPEC_ID_TYPE_HI) const uint HI_SPEC = 0u;
@@ -138,7 +138,7 @@ float finishOutput(uint channel, uint index, float value)
         : fma(value, readScale(channel), readBias(channel));
     if (shortcut && residualOrder == 1u)
         value += readResidual(index);
-    value = applyEpilogue(value);
+    value = applyActivation(value);
     if (shortcut && residualOrder == 0u)
         value += readResidual(index);
     return value;

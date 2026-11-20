@@ -9,7 +9,7 @@ namespace vai::node {
 /*=============================================================================
   Activation - Applies an element-wise activation.
   Input: in0 [any shape]
-  Output: epilogue(in0); optionally in-place
+  Output: activation(in0); optionally in-place
 
   The inPlace option aliases the output to the input and requires matching input
   and output dtypes. Otherwise, the output uses separate storage.
@@ -27,7 +27,7 @@ public:
     };
 
     struct Config {
-        vai::Epilogue epilogue = vai::Epilogue::None;
+        vai::ActType actType = vai::ActType::None;
         bool inPlace = false;
     } config_;
 
@@ -66,7 +66,7 @@ inline void Activation::prepare()
             eva::constant_id<0>(config_.inPlace ? 1u : 0u),      // inPlace
             eva::constant_id<SPEC_ID_TYPE_O>(oDtype),    // typeO
             eva::constant_id<SPEC_ID_TYPE_I>(iDtype),            // typeI
-            eva::constant_id<SPEC_ID_EPILOGUE>((uint32_t) config_.epilogue)   // epilogue
+            eva::constant_id<SPEC_ID_ACT_TYPE>((uint32_t) config_.actType)   // actType
         });
         // clang-format on
         if (!descSet)

@@ -1,0 +1,50 @@
+/*=============================================================================
+ linear-glu-rows.comp: reorders a GLU Linear's weight rows so that a kernel's
+     store finds a gate and its up in one thread (Linear::permuteGluRows,
+     once per weight, before any packing)
+
+     W [N = 2H, K]: the gate's H rows, then the up's H rows
+     W'[n, k] = W[src(n), k], blocks of 2G rows = G gate rows, G up rows:
+       src(2G b + w) = G b + w (w < G), H + G b + w - G (w >= G)
+
+ G (gluBlock) is the distance the kernel keeps between the two columns of a
+ pair: 16 on Intel (a lane's columns l and l + 16), 1 elsewhere (a thread's
+ adjacent columns). H % G == 0 (host-checked). One invocation per element,
+ fp32 or fp16 (copied as it is).
+
+ Dispatch (host): ceil(N * K / 256) workgroups, folded into (x, y) past the
+ x limit: index = (y * numX + x) * 256 + local.
+=============================================================================*/
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#include "common/spec_constants.h"
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(constant_id = SPEC_ID_TYPE_W) const uint typeW = 1;  // W (weight) dtype
+
+layout(set = 0, binding = 0) writeonly buffer D_BUF_F32 { float bufferD_f32[]; };
+layout(set = 0, binding = 0) writeonly buffer D_BUF_F16 { float16_t bufferD_f16[]; };
+layout(set = 0, binding = 1) readonly buffer W_BUF_F32 { float bufferW_f32[]; };
+layout(set = 0, binding = 1) readonly buffer W_BUF_F16 { float16_t bufferW_f16[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint N;          // rows (2H)
+    uint K;
+    uint gluBlock;   // G
+};
+
+void main()
+{
+    const uint e = (gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x) * 256u + gl_LocalInvocationID.x;
+    if (e >= N * K) return;
+
+    const uint n = e / K, k = e % K, H = N / 2u, G = gluBlock;
+    const uint b = n / (2u * G), w = n % (2u * G);
+    const uint src = (w < G) ? G * b + w : H + G * b + w - G;
+
+    if (typeW == DTYPE_F32) bufferD_f32[e] = bufferW_f32[src * K + k];
+    else                    bufferD_f16[e] = bufferW_f16[src * K + k];
+}

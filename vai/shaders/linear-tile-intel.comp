@@ -3,6 +3,17 @@
      OpenVINO's fully_connected_gpu_bf_tiled: one subgroup per workgroup, no
      shared memory, no barrier (tests/linear-tune-intel, variant 21)
 
+ Ported from openvinotoolkit/openvino at 66fbe0c (2026-10-29), under
+ src/plugins/intel_gpu/src/kernel_selector/:
+   - kernel:        cl_kernels/fully_connected_gpu_bf_tiled.cl
+   - kernel body:   cl_kernels/include/fully_connected_gpu_bf_tiled_common.cl
+   - host / tuning: kernels/fully_connected/fully_connected_kernel_bf_tiled.cpp
+                    kernels/fully_connected/fully_connected_kernel_bf_tiled.h
+ https://github.com/openvinotoolkit/openvino/blob/66fbe0ceaf5f1567e54f022425a6e4ff2164d9dc/src/plugins/intel_gpu/src/kernel_selector/cl_kernels/fully_connected_gpu_bf_tiled.cl
+ https://github.com/openvinotoolkit/openvino/blob/66fbe0ceaf5f1567e54f022425a6e4ff2164d9dc/src/plugins/intel_gpu/src/kernel_selector/cl_kernels/include/fully_connected_gpu_bf_tiled_common.cl
+ https://github.com/openvinotoolkit/openvino/blob/66fbe0ceaf5f1567e54f022425a6e4ff2164d9dc/src/plugins/intel_gpu/src/kernel_selector/kernels/fully_connected/fully_connected_kernel_bf_tiled.cpp
+ https://github.com/openvinotoolkit/openvino/blob/66fbe0ceaf5f1567e54f022425a6e4ff2164d9dc/src/plugins/intel_gpu/src/kernel_selector/kernels/fully_connected/fully_connected_kernel_bf_tiled.h
+
      O[m, n] = sum_k I[m, k] * W[n, k]
 
      M = flattened batch, N = outDim, K = inDim
@@ -31,7 +42,12 @@
 
  Split-K: workgroup z owns the K span [z * splitSize, min(K, (z + 1) *
  splitSize)), splitSize a multiple of 16, and writes its partials to P[z, M, N]
- on binding 0; linear-reduce.comp folds them and applies bias / epilogue.
+ on binding 0; linear-reduce.comp folds them and applies bias / activation.
+
+ glu (Linear's GLU, no split): W's rows come gate and up interleaved by 16
+ (linear-glu-rows, G = 16), so a lane's columns outF + l and outF + 16 + l
+ are the gate and the up of output outF / 2 + l; O is [M, N / 2]:
+   O[m, outF / 2 + l] = activation(C[m, outF + l]) * C[m, outF + 16 + l]
 =============================================================================*/
 #version 450
 #extension GL_GOOGLE_include_directive : require
@@ -49,6 +65,7 @@ layout(local_size_x = 16, local_size_y = 1, local_size_z = 1) in;
 layout(constant_id = 7)  const uint tileB     = 8;   // rows per subgroup
 layout(constant_id = 10) const uint bandTiles = 1;   // row tiles per band of the N-first order
 layout(constant_id = 11) const uint accType   = 1;   // accumulator dtype (0: fp32, 1: fp16)
+layout(constant_id = 12) const uint glu       = 0;   // 1: O = activation(gate) * up (see above)
 
 layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0;  // O (output) dtype
 layout(constant_id = SPEC_ID_TYPE_I) const uint typeI = 0;  // I (input) dtype
@@ -79,6 +96,11 @@ float     readI(uint i)  { return (typeI == DTYPE_F32) ? bufferI_f32[i] : float(
 float16_t readIh(uint i) { return (typeI == DTYPE_F32) ? float16_t(bufferI_f32[i]) : bufferI_f16[i]; }
 float     readW(uint i)  { return (typeW == DTYPE_F32) ? bufferW_f32[i] : float(bufferW_f16[i]); }
 void writeO(uint i, float v) { if (typeO == DTYPE_F32) bufferO_f32[i] = v; else bufferO_f16[i] = float16_t(v); }
+
+// The epilogue (bias / activation / scale / residual, the GLU) when K is not split.
+#define LINEAR_STORE_BIAS_BINDING 3
+#define LINEAR_STORE_RESIDUAL_BINDING 4
+#include "common/linear-store.h"
 
 // A lane's 4 weights of packed slot v (= (block * kPairs + pair) * 16 + lane),
 // [k][column group], in the accumulator's dtype: one 8 B load for fp16 W.
@@ -195,6 +217,20 @@ void main()
         }
     }
 
+    if (glu != 0u)
+    {
+        const uint H = N / 2u, c = outF / 2u + lane;
+        [[unroll]] for (uint bi = 0; bi < tileB; bi++)
+        {
+            const uint row = outB + bi;
+            const float gate = (accType == 0u) ? acc32[bi * 2u] : float(acc16[bi * 2u]);
+            const float up = (accType == 0u) ? acc32[bi * 2u + 1u] : float(acc16[bi * 2u + 1u]);
+            if (row < M && c < H)
+                writeO(row * H + c, linearStoreGlu(row, c, N, gate, up));
+        }
+        return;
+    }
+
     const uint zOff = gl_WorkGroupID.z * M * N;   // partials of split z (0 without splitting)
     [[unroll]] for (uint bi = 0; bi < tileB; bi++)
     {
@@ -203,7 +239,7 @@ void main()
         {
             const uint n = outF + fi * SIMD + lane;
             if (row < M && n < N)
-                writeO(zOff + row * N + n, (accType == 0u) ? acc32[bi * 2u + fi] : float(acc16[bi * 2u + fi]));
+                writeO(zOff + row * N + n, linearStore(row * N + n, (accType == 0u) ? acc32[bi * 2u + fi] : float(acc16[bi * 2u + fi])));
         }
     }
 }

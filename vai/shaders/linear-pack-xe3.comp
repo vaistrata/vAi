@@ -1,0 +1,37 @@
+/*=============================================================================
+ linear-pack-xe3.comp: transposes a Linear weight W [N, K] fp16 into k rows
+     of pitch ldn >= N (Linear::packWeightXe3, once per weight)
+
+     W'[k, n] = W[n, k] (n < N), 0 (N <= n < ldn)
+
+ linear-cm-xe3.comp reads W' as [K, N] rows with the VNNI block load. Written
+ as fp16 pairs (ldn even), one invocation per pair of W'.
+
+ Dispatch (host): ceil(K * ldn / 2 / 256) workgroups, folded into (x, y)
+ past the x limit: index = (y * numX + x) * 256 + local.
+=============================================================================*/
+#version 450
+#extension GL_EXT_shader_16bit_storage : require
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) writeonly buffer D_BUF { uint bufferD[]; };      // fp16 pairs
+layout(set = 0, binding = 1) readonly buffer W_BUF { uint16_t bufferW[]; };   // fp16 bits
+
+layout(push_constant) uniform PushConstants {
+    uint N;
+    uint K;
+    uint ldn;
+};
+
+void main()
+{
+    const uint e = (gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x) * 256u + gl_LocalInvocationID.x;
+    const uint rowPairs = ldn / 2u;
+    if (e >= K * rowPairs) return;
+
+    const uint k = e / rowPairs, n = (e % rowPairs) * 2u;
+    const uint lo = (n < N) ? uint(bufferW[n * K + k]) : 0u;
+    const uint hi = (n + 1u < N) ? uint(bufferW[(n + 1u) * K + k]) : 0u;
+    bufferD[e] = lo | (hi << 16);
+}

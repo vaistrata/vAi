@@ -30,7 +30,7 @@ class Pi0:
         self,
         config: Pi0Config | None = None,
         w_default_dtype: Dtype = Dtype.F16,
-        o_default_dtype: Dtype = Dtype.F32,
+        o_default_dtype: Dtype = Dtype.F16,
         device: Device | None = None,
         denoise_steps: int = 10,
         kv_cache_dtype: Dtype = Dtype.F16,

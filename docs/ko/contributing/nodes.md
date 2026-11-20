@@ -19,7 +19,7 @@ GPU 명령에는 실행할 커널, 커널이 읽고 쓸 버퍼, 처리할 데이
 | 슬롯 이름 | 그래프에서 연결할 입력과 출력 | 입력 `in0`, 출력 `out0` |
 | 형상 | 각 축의 의미와 지원 크기 | 입력과 출력의 형상이 같음 |
 | dtype | 지원하는 입력과 출력의 저장 형식 | FP32와 FP16 |
-| 설정 | `Node`를 만들 때 정할 값 | 활성화 함수 `epilogue`, 제자리 연산 `inPlace` |
+| 설정 | `Node`를 만들 때 정할 값 | 활성화 함수 `actType`, 제자리 연산 `inPlace` |
 
 축 수, 차원 크기, 정렬 조건에 제한이 있으면 함께 적습니다. 예를 들어 마지막 차원만 정규화하는 연산은 그 축과 가중치의 크기를 명시합니다.
 
@@ -27,7 +27,7 @@ GPU 명령에는 실행할 커널, 커널이 읽고 쓸 버퍼, 처리할 데이
 
 다음 코드는 ReLU를 선택한 `Node`를 모델의 멤버로 선언하는 작성 예시입니다. `inPlace`는 기본값인 `false`를 사용하도록 했습니다.
 ```cpp
-vai::node::Activation activation{{.epilogue = vai::Epilogue::Relu}};
+vai::node::Activation activation{{.actType = vai::ActType::Relu}};
 ```
 
 ## 2. 노드에서 텐서 준비하기
@@ -44,7 +44,7 @@ class Activation : public vai::Node
     // ... 파이프라인과 내부 상태
 public:
     struct Config {
-        vai::Epilogue epilogue = vai::Epilogue::None;
+        vai::ActType actType = vai::ActType::None;
         bool inPlace = false;
     } config_;
 
@@ -126,7 +126,7 @@ void main()
     if (i >= N) return;
 
     float x = (inPlace != 0u) ? readO(i) : readI(i);
-    writeO(i, applyEpilogue(x));
+    writeO(i, applyActivation(x));
 }
 ```
 
@@ -137,7 +137,7 @@ uint i = gl_GlobalInvocationID.x;
 if (i >= N) return;
 ```
 
-커널은 기본 경로인 `readI()`로 입력을 읽고, `applyEpilogue()`로 계산한 뒤 `writeO()`로 출력에 씁니다. ReLU를 선택하면 `applyEpilogue(x)`는 `max(x, 0.0)`을 계산합니다. 버퍼를 읽고 쓰는 함수는 dtype에 맞는 저장 형식을 사용하면 됩니다.
+커널은 기본 경로인 `readI()`로 입력을 읽고, `applyActivation()`로 계산한 뒤 `writeO()`로 출력에 씁니다. ReLU를 선택하면 `applyActivation(x)`는 `max(x, 0.0)`을 계산합니다. 버퍼를 읽고 쓰는 함수는 dtype에 맞는 저장 형식을 사용하면 됩니다.
 
 여러 스레드가 같은 출력 위치를 쓰는 연산은 쓰기 충돌을 처리해야 합니다. `Activation`은 각 스레드가 서로 다른 출력 원소를 계산합니다. 따라서 충돌을 처리할 필요가 없지만 `Argmax` 커널의 경우에는 여러 스레드가 하나의 출력값을 함께 계산합니다. 여러 스레드가 같은 출력 위치에 쓰면 결과가 덮어써질 수 있습니다. 이를 막으려면 각 스레드의 중간 결과를 모아 한 스레드가 최종 값을 쓰도록 구성해야 합니다. 같은 작업 그룹에서 중간 결과를 공유할 때는 필요한 값이 모두 준비된 후 읽도록 커널 안에서 동기화시킵니다. `Argmax`는 이를 피하기 위해 중간 결과를 합친 뒤, 작업 그룹의 0번 스레드만 해당 행의 결과 `outIdx[row]`에 씁니다.
 
@@ -181,7 +181,7 @@ if (!pipe || p != pipeParams)
         eva::constant_id<0>(config_.inPlace ? 1u : 0u),
         eva::constant_id<SPEC_ID_TYPE_O>(oDtype),
         eva::constant_id<SPEC_ID_TYPE_I>(iDtype),
-        eva::constant_id<SPEC_ID_EPILOGUE>((uint32_t) config_.epilogue)
+        eva::constant_id<SPEC_ID_ACT_TYPE>((uint32_t) config_.actType)
     });
     if (!descSet)
         descSet = gVaiDestSetPool(pipe.descSetLayout(0));
@@ -216,7 +216,7 @@ layout(set = 0, binding = 1) buffer I_BUF_F16 { float16_t bufferI_f16[]; };
 | `constant_id<0>(...)` | `constant_id = 0`: 제자리 연산 여부 |
 | `constant_id<SPEC_ID_TYPE_O>(...)` | `constant_id = SPEC_ID_TYPE_O`: 출력 dtype |
 | `constant_id<SPEC_ID_TYPE_I>(...)` | `constant_id = SPEC_ID_TYPE_I`: 입력 dtype |
-| `constant_id<SPEC_ID_EPILOGUE>(...)` | `common/activation.h`의 `epilogue`: 활성화 함수 |
+| `constant_id<SPEC_ID_ACT_TYPE>(...)` | `common/activation.h`의 `actType`: 활성화 함수 |
 | 푸시 상수의 `uint32_t N` | `PushConstants`의 `uint N` |
 
 dtype 상수는 [common/spec_constants.h](../../../vai/shaders/common/spec_constants.h)의 공용 ID와 값을 사용합니다. `activation.comp`는 같은 연결 번호에 FP32와 FP16 버퍼를 선언하고, dtype 상수로 사용할 쪽을 선택합니다. 이 방식을 사용하면 C++에서 버퍼를 연결하는 순서를 유지할 수 있습니다. 활성화 함수를 선택하는 상수는 `common/activation.h`가 선언합니다. 커널에서는 같은 ID를 다시 선언하지 않습니다.
@@ -346,7 +346,7 @@ add_dependencies(${PROJECT_NAME} experimental-yolox-shaders)
 /*=============================================================================
   Activation - Applies an element-wise activation.
   Input: in0 [any shape]
-  Output: epilogue(in0); optionally in-place
+  Output: activation(in0); optionally in-place
 
   // ... 지원 조건과 동작 설명
 =============================================================================*/
@@ -358,7 +358,7 @@ add_dependencies(${PROJECT_NAME} experimental-yolox-shaders)
 ```glsl
 /*=============================================================================
  activation.comp:
-     O[i] = epilogue(I[i])     (element-wise; epilogue via spec constant)
+     O[i] = activation(I[i])     (element-wise; activation via spec constant)
 
  // ... 옵션 설명
  - O (typeO) and I (typeI) are fp32 or fp16, accessed through same-binding

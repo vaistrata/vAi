@@ -30,7 +30,7 @@ layout(constant_id = 8) const bool alignK = true;
 layout(constant_id = 9) const bool packedLayout = false;
 layout(constant_id = 10) const bool directOutput = false;
 layout(constant_id = 11) const bool shortcut = false;
-layout(constant_id = 12) const uint residualOrder = 0u;  // 0: after the epilogue, 1: before it
+layout(constant_id = 12) const uint residualOrder = 0u;  // 0: after the activation, 1: before it
 layout(constant_id = SPEC_ID_TYPE_CI) const uint CI_SPEC = 0u;
 layout(constant_id = SPEC_ID_TYPE_CO) const uint CO_SPEC = 0u;
 layout(constant_id = SPEC_ID_TYPE_HI) const uint HI_SPEC = 0u;
@@ -159,7 +159,7 @@ vec4 applyOutput(uint m, uint base, uint count, vec4 value)
     const vec4 residual = shortcut ? readResidual4(base, count) : vec4(0.0);
     if (shortcut && residualOrder == 1u)
         value += residual;
-    value = applyEpilogue(value);
+    value = applyActivation(value);
     if (shortcut && residualOrder == 0u)
         value += residual;
     return value;
@@ -641,7 +641,7 @@ void packedWriteFragmentDirect32(
                 : fma(acc[element], scaleValues[element], biasValues[element]);
             if (shortcut && residualOrder == 1u)
                 value += residualValues[element];
-            value = applyEpilogue(value);
+            value = applyActivation(value);
             if (shortcut && residualOrder == 0u)
                 value += residualValues[element];
             acc[element] = value;

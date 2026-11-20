@@ -280,7 +280,7 @@ struct NeuralNetConfig
 
     // Fallback dtype for layer outputs. A layer's input dtype is whatever its
     // producer wrote; Dtype::None is not allowed.
-    Dtype oDefaultDtype = Dtype::Fp32;
+    Dtype oDefaultDtype = Dtype::Fp16;
 };
 
 
