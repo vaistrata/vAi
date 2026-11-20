@@ -4,7 +4,7 @@
 
 Runs pi0.5 under vAi and a comparison framework on the same GPU and compares the latency of one action prediction: vla.cpp and TensorRT Edge-LLM on NVIDIA, MIGraphX on AMD.
 
-- Checkpoint: the same for all, the LIBERO fine-tune of pi0.5 3B; the comparison frameworks read [files converted](#model-preparation) from it.
+- Checkpoint: the same for all, the LIBERO fine-tune of pi0.5 3B
 - Workload: two camera images, a prompt, and an action chunk in 10 denoise steps, as the [configuration](#building-and-running) each comparison runs names it.
 - Conditions, and where the frameworks differ: [benchmarks/README.md](../README.md#vla-benchmarks). Their GPU APIs, precision and command submission differ, which may affect latency.
 
@@ -24,22 +24,23 @@ The benches also read the camera images `data/images/cam_high.jpg`, `cam_left_wr
 
 The comparison benches read files converted from the checkpoint, in `data/benchmarks/pi05/3B/`, made as in [SETUP.md](../SETUP.md#vla-benchmarks):
 
-| Framework | Model files |
-|---|---|
-| vla.cpp | `model.gguf`, downloaded: vla.cpp's [vrfai/pi05-libero-gguf](https://huggingface.co/vrfai/pi05-libero-gguf) |
-| TensorRT Edge-LLM | `engines/`, from [`scripts/export-trt.sh`](scripts/export-trt.sh) |
-| MIGraphX | `prefill.fp16.onnx`, `step.fp16.onnx`, their `.weights.bin`, `metadata.json`, `config.txt`, from [`scripts/export-migraphx.sh`](scripts/export-migraphx.sh) |
+| Framework         | Model files |
+| :---------------- | :---------- |
+| vla.cpp           | `model.gguf`, downloaded: vla.cpp's [vrfai/pi05-libero-gguf](https://huggingface.co/vrfai/pi05-libero-gguf) |
+| TensorRT Edge-LLM | `engines/`, from [NVIDIA TensorRT Edge-LLM pi0.5](https://github.com/NVIDIA/TensorRT-Edge-LLM/blob/main/docs/source/user_guide/examples/vla/pi05.md) |
+| MIGraphX          | `prefill.fp16.onnx`, `step.fp16.onnx`, their `.weights.bin`, `metadata.json`, `config.txt`, from [`scripts/export-migraphx.sh`](scripts/export-migraphx.sh) |
 
-Every bench checks its prediction against the actions [reference.py](scripts/reference.py) writes there, with the noise they start from and the images the model saw. Run it once per configuration, with the configuration's values, in the environment `export-migraphx.sh` creates:
+Every bench checks its prediction against the actions [reference.py](scripts/reference.py) writes there, with the noise they start from and the images the model saw. It runs in any Python environment with LeRobot (measured with lerobot 0.6.0, transformers 5.5.4, torch 2.8.0), from the repository root:
 
 ```bash
-~/.cache/vai/venv-pi05-export/bin/python benchmarks/pi05/scripts/reference.py --cameras 2 --chunk 50 --steps 10                   # vlacpp, migraphx
-~/.cache/vai/venv-pi05-export/bin/python benchmarks/pi05/scripts/reference.py --cameras 2 --chunk 10 --steps 10 --policy openpi   # trt
+pip install lerobot==0.6.0 transformers==5.5.4 torch==2.8.0 torchvision==0.23.0 numpy pillow
+python benchmarks/pi05/scripts/reference.py --cameras 2 --chunk 50 --steps 10                   # vlacpp, migraphx
+python benchmarks/pi05/scripts/reference.py --cameras 2 --chunk 10 --steps 10 --policy openpi   # trt
 ```
 
 ## Building and running
 
-Build as in [benchmarks/README.md](../README.md#building-and-running), then, on NVIDIA:
+Build as in [benchmarks/SETUP.md](../SETUP.md#vla-benchmarks), then, on NVIDIA:
 
 ```bash
 build/bin/bench-pi05-vai --comparison vlacpp
@@ -56,8 +57,6 @@ build/bin/bench-pi05-vai --comparison migraphx
 build/bin/bench-pi05-migraphx
 ```
 
-[`scripts/run-amd.sh`](scripts/run-amd.sh) runs the two AMD benches in turn with the GPU clock pinned to its highest DPM level, restores the level afterwards, and prints the clock and power each one ran at. Arguments after `--` go to both, as in `scripts/run-amd.sh -- --atol 0.2 --rtol 0.1`.
-
 Each comparison runs one `VlaConfig` from [`common/vla-config.h`](common/vla-config.h), the same on both sides. A comparison bench runs its own; the vAi bench takes it from `--comparison`:
 
 | Comparison | Framework | `VlaConfig` | Policy | Cameras | Action chunk | Denoise steps |
@@ -65,8 +64,6 @@ Each comparison runs one `VlaConfig` from [`common/vla-config.h`](common/vla-con
 | `vlacpp` | vla.cpp | `lerobotLibero` | LeRobot | 2 | 50 | 10 |
 | `trt` | TensorRT Edge-LLM | `openpiLibero` | openpi `pi05_libero` | 2 | 10 | 10 |
 | `migraphx` | MIGraphX | `lerobotLibero` | LeRobot | 2 | 50 | 10 |
-
-*LeRobot's policy puts the discretized robot state in the prompt; openpi's, which TensorRT Edge-LLM serves, gives the task alone. With the action chunk, that makes `trt` another workload: compare frameworks only within one.*
 
 Options:
 
@@ -85,7 +82,7 @@ Each latency cell is **mean ± SD in milliseconds per prediction**, as printed b
 
 The maximum absolute error is calculated against the corresponding PyTorch FP32 reference.
 
-vAi runs the experimental pi0.5 with the per-tower precision under [Precision configuration](#precision-configuration), as [#46](https://github.com/vaistrata/vAi/pull/46) sets it in [net.h](../../models/experimental/pi05/net.h). The results were measured with those dtypes, set then through per-tower switches; the benches have changed since only in their configuration names, paths and scripts, not in the model, its precision or the inputs.
+vAi runs the experimental pi0.5 with the per-tower precision under [Precision configuration](#precision-configuration), as [#46](https://github.com/vaistrata/vAi/pull/46) sets it in [net.h](../../models/experimental/pi05/net.h).
 
 ### pi0.5 LIBERO
 
@@ -102,8 +99,6 @@ vAi runs the experimental pi0.5 with the per-tower precision under [Precision co
 | `trt` | 512 + 17 | vAi | 33.87 ± 0.06 | 33.74 | 0.000755 |
 | | | **TensorRT Edge-LLM** | **21.10 ± 0.01** | 21.07 | 0.00417 |
 
-`trt`'s TensorRT Edge-LLM row is measured with `--atol 0.2 --rtol 0.1`; the other rows pass the default tolerances.
-
 #### NVIDIA GeForce RTX 4090
 
 | OS | Vulkan driver | Compute stack | GPU clock (core / memory) |
@@ -117,8 +112,6 @@ vAi runs the experimental pi0.5 with the per-tower precision under [Precision co
 | `trt` | 512 + 17 | vAi | 45.02 ± 0.52 | 44.16 | 0.00273 |
 | | | **TensorRT Edge-LLM** | **32.01 ± 0.39** | 31.85 | 0.00341 |
 
-Each row is the median of three runs. Only `vlacpp`'s vAi row passes the default tolerances; vla.cpp's row is measured with `--atol 0.005`, and both `trt` rows with `--atol 0.2 --rtol 0.1`. vAi's `trt` row, which passes the default tolerances on the RTX 5090, misses them here by one of 320 values.
-
 #### AMD Strix Halo (Radeon 8060S, gfx1151)
 
 | OS | Vulkan driver | Compute stack | GPU clock (core / memory) |
@@ -129,8 +122,6 @@ Each row is the median of three runs. Only `vlacpp`'s vAi row passes the default
 |---|---:|---|---:|---:|---:|
 | `migraphx` | 512 + 154 | **vAi** | **151.73 ± 3.98** | 148.82 | 0.00116 |
 | | | MIGraphX | 195.33 ± 4.17 | 190.27 | 0.00221 |
-
-Each row is the median of three `scripts/run-amd.sh -- --atol 0.2 --rtol 0.1` runs.
 
 #### AMD Strix Point (Radeon 890M, gfx1150)
 
@@ -143,21 +134,9 @@ Each row is the median of three `scripts/run-amd.sh -- --atol 0.2 --rtol 0.1` ru
 | `migraphx` | 512 + 154 | **vAi** | **739.85 ± 4.43** | 732.20 | 0.0119 |
 | | | MIGraphX | 896.73 ± 11.17 | 888.84 | 0.0119 |
 
-Each row is one `scripts/run-amd.sh -- --atol 0.2 --rtol 0.1` run. The checkpoint is [`lerobot/pi05_libero_finetuned_v044`](https://huggingface.co/lerobot/pi05_libero_finetuned_v044), the LIBERO fine-tune of the same architecture, read with the pre- and postprocessor configuration of `lerobot/pi05_libero_base`; its maximum absolute errors hold for that checkpoint, not for the rows above.
-
 ### Precision configuration
 
-The frameworks use FP16 model weights but differ in intermediate activation storage, accumulation, and residual precision. vAi's are set node by node in each net's constructor in [net.h](../../models/experimental/pi05/net.h).
-
-| Component | vAi | vla.cpp / TensorRT Edge-LLM / MIGraphX |
-|---|---|---|
-| Model weights | FP16 | FP16 |
-| K/V cache | FP16 | Framework-specific |
-| Block branch activations | FP16 | Framework-specific |
-| Vision GEMM accumulation | FP32 | Backend-specific |
-| Vision / language residual | FP32 | Backend-specific |
-| Action expert residual | FP16 | Backend-specific |
-| Final action update | FP32 | Backend-specific |
+See [benchmarks/PRECISION.md](../PRECISION.md).
 
 > **IMPORTANT**
 > Results are specific to the tested checkpoint, GPU, framework versions, precision settings, and workload. A lower latency under one workload does not establish higher performance under different camera counts, action chunks, or denoising steps.

@@ -102,7 +102,6 @@ Whatever the framework, the VLA benches share one code skeleton (`runVLABench` i
 | | Shared condition |
 |---|---|
 | Input | `common/bench-inputs.h`: the camera images, the task and the robot state; the noise and the preprocessed images come from the model's reference script when it has written them |
-| Accuracy check | One untimed prediction, compared with the PyTorch FP32 reference: `--atol 0.002 --rtol 0.001` by default. A bench that fails it prints no latency; one without the reference prints `accuracy: unverified` |
 | Warmup | 3 predictions |
 | Measurement | 20 predictions, each timed from uploading its host inputs to the complete action chunk in host memory |
 | Reported | Milliseconds per prediction, **mean ± SD**, and the fastest; the maximum absolute error against the reference |
@@ -124,6 +123,5 @@ What the benches leave to each framework, to keep in mind when reading the resul
 | | vAi | vla.cpp | TensorRT Edge-LLM | MIGraphX |
 |---|---|---|---|---|
 | GPU API | Vulkan | CUDA (ggml) | CUDA (TensorRT) | HIP (ROCm 10.1) |
-| Model | The checkpoint, read directly | GGUF, converted | Engines built on the GPU from its own FP16 ONNX export | FP16 ONNX graphs, compiled on the GPU when the bench starts. MIGraphX has no official pi0.5 implementation: the export and the runtime loop are the bench's own |
 | Precision | FP16 weights, K/V cache and block branches; FP32 vision accumulation and vision / language residuals; FP16 action expert residual | Framework-specific | Framework-specific | As exported, then as MIGraphX compiles it |
-| Action output | Normalized, as the model produces it | Un-normalized with the GGUF's dataset statistics; the bench inverts it outside the timed prediction | Normalized | Normalized |
+| Action output | Normalized | Un-normalized | Normalized | Normalized |

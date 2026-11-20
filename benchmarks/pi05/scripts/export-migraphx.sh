@@ -5,7 +5,7 @@
 #   1. creates the Python environment export-onnx.py checks for (lerobot 0.6.0,
 #      transformers 5.5.4, torch 2.8.0 for the CPU, onnx 1.19.0) in
 #      ${XDG_CACHE_HOME:-~/.cache}/vai/venv-pi05-export, once; reference.py
-#      runs in the same one
+#      can run in it too
 #   2. runs migraphx/export-onnx.py in it: FP16 prefill and step graphs, their
 #      constants folded, into data/benchmarks/pi05/3B/, where the bench
 #      reads them next to reference.py's files
