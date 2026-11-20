@@ -1406,6 +1406,29 @@ inline AmdHaloPick amdHaloPick(
     if (!accF16 && io16 && M == 666u && K == 16384u && N == 2048u)
         return AmdHaloPick{ 48, 128, 64, 48, 64, 128, 1, 0, 64, interleave };
 
+    // ACT (one 3x480x640 camera: 302 encoder tokens, 100-action chunk) on fp32 activations,
+    // measured in the full forward: unsplit tiles that fuse the epilogue, except the K 3200
+    // down projections, which keep a split.
+    if (!accF16 && !io16 && (M == 100u || M == 300u || M == 302u) && (K == 512u || K == 3200u))
+    {
+        if (M == 302u && K == 512u && N == 1536u)
+            return AmdHaloPick{ 48, 128, 128, 48, 16, 256, 1, 0, 32, stream };   // encoder q, k, v
+        if ((M == 302u || M == 300u) && K == 512u && N == 512u)
+            return AmdHaloPick{ 16, 128, 128, 16, 16, 256, 1, 0, 32, stream };   // encoder o, image projection
+        if (M == 302u && K == 512u && N == 3200u)
+            return AmdHaloPick{ 32, 64, 32, 32, 32, 64, 1, 0, 32, stream };   // encoder FFN up
+        if (M == 302u && K == 3200u && N == 512u)
+            return AmdHaloPick{ 16, 128, 128, 16, 32, 128, 2, 0, 32, stream };   // encoder FFN down
+        if (M == 302u && K == 512u && N == 1024u)
+            return AmdHaloPick{ 48, 32, 32, 48, 32, 64, 1, 0, 64, prefetch };   // decoder k, v
+        if (M == 100u && K == 512u && N == 512u)
+            return AmdHaloPick{ 16, 16, 128, 16, 16, 64, 1, 0, 64, prefetchVec };   // decoder o
+        if (M == 100u && K == 512u && N == 3200u)
+            return AmdHaloPick{ 64, 128, 64, 32, 32, 256, 1, 8, 32, prefetch };   // decoder FFN up
+        if (M == 100u && K == 3200u && N == 512u)
+            return AmdHaloPick{ 16, 64, 128, 16, 32, 64, 4, 0, 32, stream };   // decoder FFN down
+    }
+
     if (M >= 32u && M <= 64u)
     {
         if (K == 1024u && N == 8192u)
