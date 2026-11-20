@@ -2949,7 +2949,9 @@ inline void Linear::prepare()
             // one subgroup: an even uN. With a split the kernel writes partials for the reduce pass.
             storeInKernel_ = storeAllowed_ && splitCount == 1u && (config_.glu ? xe3Glu() : !plainOutput());
             px.store = storeInKernel_ ? 1u : 0u;
-            px.accF16 = accDtype == Dtype::Fp16 ? 1u : 0u;
+            // Xe3 accumulates in fp32 even when setAccDtype(Fp16) asks otherwise: under the current
+            // driver (jay) fp16 accumulators get 128 GRF and loop-carried shuffles, and run slower.
+            px.accF16 = 0u;
             if (storeInKernel_ && config_.glu && px.uN % 2u != 0u)
                 px.uN = (px.uN == 1u) ? 2u : px.uN - 1u;
 
