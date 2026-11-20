@@ -848,8 +848,8 @@ Source: [`vai/nodes/nearest-upsample.h`](../../vai/nodes/nearest-upsample.h)
 
 **Signature**
 
-- Input: in0 [C, H, W]
-- Output: out0 [C, H*scale, W*scale]
+- Input: in0 [..., C, H, W]
+- Output: out0 [..., C, H*scale, W*scale]
 
 **Slots**
 

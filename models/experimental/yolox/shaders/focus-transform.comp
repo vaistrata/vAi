@@ -1,0 +1,54 @@
+/*=============================================================================
+ One-time YOLOX Focus-convolution weight transform.
+ [Co, 4*Ci, 3, 3] -> packed cooperative-matrix [Co, Ci, 6, 6].
+ Bindings: packed O=0, checkpoint I=1.
+=============================================================================*/
+#version 460
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_16bit_storage : require
+
+layout(local_size_x = 128) in;
+
+layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_F16 { float16_t bufferO_f16[]; };
+layout(set = 0, binding = 1) restrict readonly buffer I_BUF_F16 { float16_t bufferI_f16[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint hi; uint wi; uint ho; uint wo; uint ci; uint co;
+    uint n; uint splitCount; uint kernel; uint stride;
+    uint batch;             // vai::node::PushConstants' images; one here
+} pc;
+
+void main()
+{
+    const uint index = gl_GlobalInvocationID.x;
+    const uint rawK = pc.ci * 9u;
+    const uint K = ((rawK + 15u) / 16u) * 16u;
+    const uint M = ((pc.co + 15u) / 16u) * 16u;
+    if (index >= M * K)
+        return;
+
+    const uint tileIndex = index >> 8u;
+    const uint elementInTile = index & 255u;
+    const uint row = elementInTile >> 4u;
+    const uint col = elementInTile & 15u;
+    const uint kTiles = K >> 4u;
+    const uint m = (tileIndex / kTiles) * 16u + row;
+    const uint k = (tileIndex % kTiles) * 16u + col;
+
+    if (m >= pc.co || k >= rawK)
+    {
+        bufferO_f16[index] = float16_t(0.0);
+        return;
+    }
+
+    const uint inputChannels = pc.ci / 4u;
+    const uint inputChannel = k / 36u;
+    const uint tap6 = k - inputChannel * 36u;
+    const uint kh6 = tap6 / 6u;
+    const uint kw6 = tap6 - kh6 * 6u;
+    const uint focusPatch = (kh6 & 1u) + 2u * (kw6 & 1u);
+    const uint sourceChannel = focusPatch * inputChannels + inputChannel;
+    const uint sourceTap = (kh6 >> 1u) * 3u + (kw6 >> 1u);
+    const uint sourceIndex = (m * pc.ci + sourceChannel) * 9u + sourceTap;
+    bufferO_f16[index] = bufferI_f16[sourceIndex];
+}

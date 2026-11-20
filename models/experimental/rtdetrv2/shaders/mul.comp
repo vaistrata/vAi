@@ -1,0 +1,59 @@
+/*=============================================================================
+ mul.comp:
+     O = I0 * I1   (element-wise, with right-aligned broadcasting)
+
+ - O (typeO) and I0 / I1 (typeI, shared) are fp32 or fp16, accessed through
+   same-binding buffer aliases. Dispatch (host): dispatch2(N) -- one thread
+   per output element. rank == 0 keeps the same-shape direct indexing path.
+=============================================================================*/
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_shader_16bit_storage : require
+#include "common/spec_constants.h"
+
+layout(local_size_x = 64) in;
+
+layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0;  // O (output) dtype
+layout(constant_id = SPEC_ID_TYPE_I) const uint typeI = 0;  // I0 and I1 dtype (shared)
+
+layout(set = 0, binding = 0) buffer O_BUF_F32  { float bufferO_f32[];  };
+layout(set = 0, binding = 0) buffer O_BUF_F16  { float16_t bufferO_f16[];  };
+//////////////////////////////////////////////////////////////////////////////
+layout(set = 0, binding = 1) buffer I0_BUF_F32 { float bufferI0_f32[]; };
+layout(set = 0, binding = 1) buffer I0_BUF_F16 { float16_t bufferI0_f16[]; };
+//////////////////////////////////////////////////////////////////////////////
+layout(set = 0, binding = 2) buffer I1_BUF_F32 { float bufferI1_f32[]; };
+layout(set = 0, binding = 2) buffer I1_BUF_F16 { float16_t bufferI1_f16[]; };
+
+// Packed triples per axis: output stride, I0 stride, I1 stride (in elements).
+// A broadcast input axis has stride 0. Scalar uint storage avoids vec3 padding.
+layout(set = 0, binding = 3) readonly buffer META { uint strides[]; };
+
+layout(push_constant) uniform PushConstants { uint N; uint rank; };
+
+float readI0(uint i) { return (typeI == 0u) ? bufferI0_f32[i] : float(bufferI0_f16[i]); }
+float readI1(uint i) { return (typeI == 0u) ? bufferI1_f32[i] : float(bufferI1_f16[i]); }
+void writeO(uint i, float v) { if (typeO == 0u) bufferO_f32[i] = v; else bufferO_f16[i] = float16_t(v); }
+
+void main()
+{
+    uint e = gl_GlobalInvocationID.x;
+    if (e >= N) return;
+
+    uint i0 = e, i1 = e;
+    if (rank != 0u)
+    {
+        i0 = 0u;
+        i1 = 0u;
+        uint remaining = e;
+        for (uint axis = 0u; axis < rank; ++axis)
+        {
+            uint outStride = strides[3u * axis];
+            uint coord = remaining / outStride;
+            remaining %= outStride;
+            i0 += coord * strides[3u * axis + 1u];
+            i1 += coord * strides[3u * axis + 2u];
+        }
+    }
+    writeO(e, readI0(i0) * readI1(i1));
+}

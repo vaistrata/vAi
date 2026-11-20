@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -79,9 +80,9 @@ inline std::vector<Detection> applyNms(std::vector<Detection> detections, float 
 }
 
 
-inline std::vector<Detection> postprocess(const std::vector<float>& rawData, const vai::utils::ImageGeometry& geometry,
-                                          float confThreshold, float iouThreshold,
-                                          uint32_t numClasses = NUM_COCO_CLASSES)
+inline std::vector<Detection> postprocess(
+    std::span<const float> rawData, const vai::utils::ImageGeometry& geometry, float confThreshold, float iouThreshold,
+    uint32_t numClasses = NUM_COCO_CLASSES)
 {
     const uint32_t channels = 5u + numClasses;
     if (geometry.scaleX <= 0.0f || numClasses == 0u || rawData.size() % channels != 0u)
@@ -133,6 +134,21 @@ inline std::vector<Detection> postprocess(const std::vector<float>& rawData, con
         detection.y2 = std::clamp((detection.y2 - geometry.padY) / geometry.scaleY, 0.0f, h);
     }
     return detections;
+}
+
+inline std::vector<std::vector<Detection>> postprocessBatch(
+    std::span<const float> raw, std::span<const vai::utils::ImageGeometry> images, float confThreshold,
+    float iouThreshold, uint32_t numClasses = NUM_COCO_CLASSES)
+{
+    if (images.empty() || raw.empty() || raw.size() % images.size())
+        throw std::invalid_argument("invalid batched YOLOX output");
+    const size_t stride = raw.size() / images.size();
+    std::vector<std::vector<Detection>> result;
+    result.reserve(images.size());
+    for (size_t b = 0; b < images.size(); ++b)
+        result.push_back(
+            postprocess(raw.subspan(b * stride, stride), images[b], confThreshold, iouThreshold, numClasses));
+    return result;
 }
 
 }   // namespace model::experimental::yolox
