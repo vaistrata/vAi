@@ -1,0 +1,143 @@
+/*=============================================================================
+ topk-block.comp:
+ Select each 512-element block's largest K entries with stable 4-bit radix sort.
+ Input: FP32 or FP16 [M, N]. Dispatch: (ceil(N / 512), M).
+ Output: candidate pairs [M, groups, K], or values/indices [M, K]
+ when groups == 1. Each pair stores (value bits, row-local index).
+=============================================================================*/
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_ballot : require
+#include "common/spec_constants.h"
+
+layout(local_size_x = 512) in;
+layout(constant_id = 0) const uint K = 1;
+layout(constant_id = SPEC_ID_TYPE_I) const uint typeI = 0;
+
+layout(set = 0, binding = 0) writeonly buffer O_BUF_U32 { uint bufferO_u32[]; };
+layout(set = 0, binding = 0) writeonly buffer O_BUF_U16 { uint16_t bufferO_u16[]; };
+layout(set = 0, binding = 1) readonly buffer I_BUF_U32 { uint bufferI_u32[]; };
+layout(set = 0, binding = 1) readonly buffer I_BUF_U16 { uint16_t bufferI_u16[]; };
+layout(set = 0, binding = 2) writeonly buffer IDX_BUF_U32 { uint bufferIdx_u32[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint N;
+    uint groups;
+};
+
+const uvec2 TOPK_PADDING = uvec2(0xff800000u, 0xffffffffu);
+shared uvec2 items[512];
+shared uint counts[512];
+shared uint radixSums[32];
+
+// Ordered numeric key only; original bits and index travel unchanged. Signed
+// zeros share a key; NaNs have key zero and sort after every numeric value.
+uint topkKey(uvec2 value)
+{
+    if (value.y == 0xffffffffu) return 0;
+    uint sign = typeI == 1u ? 0x8000u : 0x80000000u;
+    uint mask = typeI == 1u ? 0xffffu : 0xffffffffu;
+    uint inf = typeI == 1u ? 0x7c00u : 0x7f800000u;
+    uint bits = value.x, magnitude = bits & (sign - 1u);
+    if (magnitude > inf) return 0;
+    if (magnitude == 0) bits = 0;
+    return (bits & sign) != 0 ? (~bits & mask) : (bits ^ sign);
+}
+
+void main()
+{
+    uint lane = gl_SubgroupInvocationID, subgroup = gl_SubgroupID;
+    // Use subgroup order for both the logical input and the prefix scan; Vulkan
+    // need not map LocalInvocationID to contiguous subgroup lanes.
+    uint tid = subgroup * gl_SubgroupSize + lane;
+    uint group = gl_WorkGroupID.x, row = gl_WorkGroupID.y;
+    uint index = group * 512 + tid;
+    uvec2 value = TOPK_PADDING;
+    if (index < N)
+    {
+        uint offset = row * N + index;
+        uint bits = typeI == 0u ? bufferI_u32[offset] : uint(bufferI_u16[offset]);
+        value = uvec2(bits, index);
+    }
+    uint keyBits = typeI == 1u ? 16u : 32u;
+    if (gl_SubgroupSize >= 16)
+    {
+        uint bins = 16 * gl_NumSubgroups;
+        for (uint shift = 0; shift < keyBits; shift += 4)
+        {
+            uint digit = (topkKey(value) >> shift) & 15u;
+            uvec4 activeMask = subgroupBallot(true);
+            uvec4 b0 = subgroupBallot((digit & 1u) != 0);
+            uvec4 b1 = subgroupBallot((digit & 2u) != 0);
+            uvec4 b2 = subgroupBallot((digit & 4u) != 0);
+            uvec4 b3 = subgroupBallot((digit & 8u) != 0);
+            uvec4 same = activeMask & ((digit & 1u) != 0 ? b0 : ~b0)
+                & ((digit & 2u) != 0 ? b1 : ~b1) & ((digit & 4u) != 0 ? b2 : ~b2)
+                & ((digit & 8u) != 0 ? b3 : ~b3);
+            uint within = subgroupBallotExclusiveBitCount(same);
+            if (lane < 16)
+            {
+                uvec4 bucket = activeMask & ((lane & 1u) != 0 ? b0 : ~b0)
+                    & ((lane & 2u) != 0 ? b1 : ~b1) & ((lane & 4u) != 0 ? b2 : ~b2)
+                    & ((lane & 8u) != 0 ? b3 : ~b3);
+                counts[(15 - lane) * gl_NumSubgroups + subgroup] = subgroupBallotBitCount(bucket);
+            }
+            barrier();
+            // Exclusive scan of digit-major counts: higher digit first, then
+            // subgroup and lane. Stability retains the original index order.
+            uint count = tid < bins ? counts[tid] : 0;
+            uint offset = subgroupExclusiveAdd(count), total = subgroupAdd(count);
+            if (subgroupElect()) radixSums[subgroup] = total;
+            barrier();
+            for (uint s = 0; s < subgroup; ++s) offset += radixSums[s];
+            if (tid < bins) counts[tid] = offset;
+            barrier();
+            uint position = counts[(15 - digit) * gl_NumSubgroups + subgroup] + within;
+            items[position] = value;
+            barrier();
+            value = items[tid];
+            barrier(); // Finish reads before the next scatter reuses items[].
+        }
+    }
+    else
+    {
+        // Smaller subgroups cannot fill 16 bucket counts per subgroup in the
+        // fixed scratch space. Retain a stable binary radix fallback.
+        for (uint bit = 0; bit < keyBits; ++bit)
+        {
+            uint one = (topkKey(value) >> bit) & 1u;
+            uint before = subgroupExclusiveAdd(one), total = subgroupAdd(one);
+            if (subgroupElect()) counts[subgroup] = total;
+            barrier();
+            uint allOnes = 0;
+            for (uint s = 0; s < gl_NumSubgroups; ++s)
+            {
+                if (s < subgroup) before += counts[s];
+                allOnes += counts[s];
+            }
+            uint position = one != 0 ? before : allOnes + tid - before;
+            items[position] = value;
+            barrier();
+            value = items[tid];
+            barrier();
+        }
+    }
+    if (tid < K)
+    {
+        if (groups == 1)
+        {
+            if (typeI == 0u) bufferO_u32[row * K + tid] = value.x;
+            else bufferO_u16[row * K + tid] = uint16_t(value.x);
+            bufferIdx_u32[row * K + tid] = value.y;
+        }
+        else
+        {
+            uint outIndex = ((row * groups + group) * K + tid) * 2;
+            bufferO_u32[outIndex] = value.x;
+            bufferO_u32[outIndex + 1] = value.y;
+        }
+    }
+}
