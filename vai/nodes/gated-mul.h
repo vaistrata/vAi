@@ -15,7 +15,7 @@ namespace vai::node {
   single Linear over the concatenated weights, so the leading half is whatever
   that concatenation put first. It is the activated one.
 
-  activation names the GLU variant — silu: SwiGLU, gelu: GEGLU, relu: ReGLU,
+  actType names the GLU variant — silu: SwiGLU, gelu: GEGLU, relu: ReGLU,
   none: bilinear.
 =============================================================================*/
 class GatedMul : public vai::Node
@@ -31,7 +31,7 @@ public:
     };
 
     struct Config {
-        vai::Epilogue activation = vai::Epilogue::Silu;
+        vai::ActType actType = vai::ActType::Silu;
     } config_;
 
     GatedMul();
@@ -68,7 +68,7 @@ inline void GatedMul::prepare()
         pipe = pipelinePool().request("gated-mul", {
             eva::constant_id<SPEC_ID_TYPE_O>(oDtype),                  // typeO
             eva::constant_id<SPEC_ID_TYPE_I>(iDtype),                          // typeI
-            eva::constant_id<SPEC_ID_EPILOGUE>((uint32_t) config_.activation)  // epilogue
+            eva::constant_id<SPEC_ID_ACT_TYPE>((uint32_t) config_.actType)  // actType
         });
         // clang-format on
         if (!descSet)

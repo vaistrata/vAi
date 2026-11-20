@@ -98,11 +98,16 @@ inline void TypeCast::run(eva::CommandBuffer cmdBuff)
         uint32_t N;
     } constants = { N };
 
+    // One thread per element; workgroups past the x limit fold into y (cast.comp re-linearizes).
+    constexpr uint32_t wgSize = 64;   // = local_size_x of cast
+    const uint32_t groups = CEIL_DIV(N, wgSize);
+    const uint32_t gy = CEIL_DIV(groups, device().maxComputeWorkGroupCount()[0]), gx = CEIL_DIV(groups, gy);
+
     cmdBuff
         .bindPipeline(pipe)
         .setPushConstants(0, sizeof(constants), &constants)
         .bindDescSets({descSet})
-        .dispatch2(N)
+        .dispatch(gx, gy)
         .barrier(eva::SYNC_SCOPE::COMPUTE_WRITE / (*this)["out0"].buffer() / eva::SYNC_SCOPE::COMPUTE_READ);
 }
 

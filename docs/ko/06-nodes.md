@@ -46,7 +46,7 @@ Applies an element-wise activation.
 **시그니처**
 
 - 입력: in0 [any shape]
-- 출력: epilogue(in0); optionally in-place
+- 출력: activation(in0); optionally in-place
 
 **슬롯**
 
@@ -59,7 +59,7 @@ Applies an element-wise activation.
 
 | 필드 | 타입 | 기본값 | 설명 |
 |---|---|---|---|
-| `epilogue` | `vai::Epilogue` | `vai::Epilogue::None` |  |
+| `actType` | `vai::ActType` | `vai::ActType::None` |  |
 | `inPlace` | `bool` | `false` |  |
 
 **동작 및 제약**
@@ -325,16 +325,16 @@ Off, every input is required, so a recording that cannot supply one drops this n
 | `kernelSize` | `uint32_t` | — |  |
 | `stride` | `uint32_t` | — |  |
 | `acceptResidual` | `bool` | `false` | input "residual" |
-| `residualOrder` | `vai::ResidualOrder` | `vai::ResidualOrder::AfterEpilogue` |  |
-| `epilogue` | `vai::Epilogue` | `vai::Epilogue::None` |  |
+| `residualOrder` | `vai::ResidualOrder` | `vai::ResidualOrder::AfterActivation` |  |
+| `actType` | `vai::ActType` | `vai::ActType::None` |  |
 
 **동작 및 제약**
 
 The "scale" and "bias" slots always exist; each applies only when the weight
 loader filled it. Odd kernels use symmetric same-padding, so each spatial
 output size is ceil(inputSize / stride).
-acceptResidual opens the "residual" input (input dtype), added after the epilogue
-or, with ResidualOrder::BeforeEpilogue, before it.
+acceptResidual opens the "residual" input (input dtype), added after the activation
+or, with ResidualOrder::BeforeActivation, before it.
 The axes ahead of Ci are a batch of images. The plan is one image's; every
 dispatch stacks the images on its z axis, and each kernel offsets its buffers
 to its image.
@@ -521,7 +521,7 @@ element-wise multiply with one operand activated (GLU gating)
 
 | 필드 | 타입 | 기본값 | 설명 |
 |---|---|---|---|
-| `activation` | `vai::Epilogue` | `vai::Epilogue::Silu` |  |
+| `actType` | `vai::ActType` | `vai::ActType::Silu` |  |
 
 **동작 및 제약**
 
@@ -547,7 +547,7 @@ group normalization over a CHW feature map
 **시그니처**
 
 - 입력: in0 [..., C, H, W], optional residual [..., C, H, W]
-- 출력: epilogue(scale[c] * (in0 - μ[g(c)]) * rsqrt(σ²[g(c)] + eps) + shift[c]) + residual
+- 출력: activation(scale[c] * (in0 - μ[g(c)]) * rsqrt(σ²[g(c)] + eps) + shift[c]) + residual
 
 **슬롯**
 
@@ -565,8 +565,8 @@ group normalization over a CHW feature map
 | `eps` | `float` | `1e-5f` |  |
 | `coeffsAsInputs` | `bool` | `false` | scale / shift are inputs, not parameters |
 | `acceptResidual` | `bool` | `false` | input "residual" |
-| `residualOrder` | `vai::ResidualOrder` | `vai::ResidualOrder::AfterEpilogue` |  |
-| `epilogue` | `vai::Epilogue` | `vai::Epilogue::None` |  |
+| `residualOrder` | `vai::ResidualOrder` | `vai::ResidualOrder::AfterActivation` |  |
+| `actType` | `vai::ActType` | `vai::ActType::None` |  |
 
 **동작 및 제약**
 
@@ -574,7 +574,7 @@ The channel axis is third from the end; the axes before it are independent
 samples. scale / shift [C] are parameters, or inputs under coeffsAsInputs
 (e.g. AdaGN's timestep modulation); shift applies when present, filled by
 the loader or wired. acceptResidual opens the "residual" input (input
-dtype), added after the epilogue or, with ResidualOrder::BeforeEpilogue,
+dtype), added after the activation or, with ResidualOrder::BeforeActivation,
 before it. The channels split into `groups` consecutive groups; each group's statistics
 are computed at run time over its C/groups channels and all of their spatial
 positions (unlike BatchNorm, which reads μ/σ² trained offline). One
@@ -749,9 +749,9 @@ O = I · Wᵀ, split between two output decompositions
 | `inDim` | `uint32_t` | — |  |
 | `outDim` | `uint32_t` | — |  |
 | `acceptResidual` | `bool` | `false` | input "residual" |
-| `residualOrder` | `vai::ResidualOrder` | `vai::ResidualOrder::AfterEpilogue` |  |
-| `epilogue` | `vai::Epilogue` | `vai::Epilogue::None` |  |
-| `scalarScale` | `float` | `1.0f` | s, right after the epilogue |
+| `residualOrder` | `vai::ResidualOrder` | `vai::ResidualOrder::AfterActivation` |  |
+| `actType` | `vai::ActType` | `vai::ActType::None` |  |
+| `scalarScale` | `float` | `1.0f` | s, right after the activation |
 | `splitSize` | `uint32_t` | `0` | split-K: K length per split (0: the vendor's count per shape) |
 
 **동작 및 제약**
@@ -760,7 +760,7 @@ vai naming: O [M, N], I [M, K] (M = flattened batch), W [N, K]
 (N = outDim, K = inDim).
 
 - slab (M <= 8, linear-slab): a workgroup owns wgN whole columns of O,
-so K is split across its threads and reduced; bias / epilogue are fused
+so K is split across its threads and reduced; bias / activation are fused
 in-kernel. See useSlabPath().
 - tile (M > 8): a workgroup owns a wgM x wgN tile. Two kernels share the
 frame, chosen per device in selectLinearTile(): scalar
@@ -778,12 +778,12 @@ change selects a different tile, the pipeline is re-requested from the pool.
 
 Split-K (splitSize option; 0 selects the vendor's rule per shape)
 accumulates partials P[splitCount, M, N] (oDtype) in a temporary buffer
-and folds them in a second pass (linear-reduce); bias / epilogue / the
+and folds them in a second pass (linear-reduce); bias / activation / the
 residual live in that reduce pass, so requesting them without splitting still
 runs the reduce as a plain epilogue pass (splitCount = 1).
 
-O = s · epilogue(I · Wᵀ + bias) + R      residualOrder AfterEpilogue
-O = s · epilogue(I · Wᵀ + bias + R)      residualOrder BeforeEpilogue
+O = s · activation(I · Wᵀ + bias) + R      residualOrder AfterActivation
+O = s · activation(I · Wᵀ + bias + R)      residualOrder BeforeActivation
 
 s is Config::scalarScale (e.g. dt of an Euler step x + dt · v), 1 by default.
 

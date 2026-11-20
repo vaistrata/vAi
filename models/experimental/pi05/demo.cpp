@@ -109,8 +109,6 @@ int main()
     // clang-format off
     pi05::Net net({
         .wDefaultDtype = Dtype::Fp16,
-        // PI05_O16=1: fp16 activations (the Xe3 coopmat Linear and attention take fp16 inputs only)
-        .oDefaultDtype = (std::getenv("PI05_O16") && std::atoi(std::getenv("PI05_O16"))) ? Dtype::Fp16 : Dtype::Fp32,
     }, modelCfg);
     // clang-format on
 

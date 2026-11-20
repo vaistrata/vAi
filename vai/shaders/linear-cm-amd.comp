@@ -28,7 +28,7 @@
      the operands swapped; N and K baked in as specN / specK). `schedule`
      picks the load order on Fragments, groupM the dispatch order, `aligned`
      the K-tail masking, and `fused` applies linear-reduce.comp's epilogue
-     here (bias / epilogue / residual / scale; K not split).
+     here (bias / activation / residual / scale; K not split).
 
  Split-K, unless fused: workgroup z owns the K span [z * splitSize,
  min(K, (z + 1) * splitSize)) and writes its partials to P[z, M, N] on
@@ -65,12 +65,12 @@ layout(constant_id = 12) const uint robustBufferAccess  = 0;    // robust buffer
 layout(constant_id = 13) const uint groupM   = 0;    // dispatch order (0: N tiles fastest, g: groups of g M tiles fastest)
 
 layout(constant_id = 14) const uint weightLayout = 0;   // LAYOUT_* below
-layout(constant_id = 15) const uint fused         = 0;   // 1: apply bias / epilogue / residual / scale here (splitSize == K)
+layout(constant_id = 15) const uint fused         = 0;   // 1: apply bias / activation / residual / scale here (splitSize == K)
 layout(constant_id = 16) const uint hasBias       = 0;   // 1: bias at binding 3 (typeB)
 layout(constant_id = 17) const uint biasElems     = 0;   // 0: the bias covers O; else it repeats every biasElems
 layout(constant_id = 18) const uint hasResidual   = 0;   // 1: residual at binding 4 (O dtype)
 layout(constant_id = 19) const uint residualElems = 0;   // 0: the residual covers O; else it repeats every residualElems
-layout(constant_id = 20) const uint residualOrder = 0;   // 0: added after the epilogue, 1: before it
+layout(constant_id = 20) const uint residualOrder = 0;   // 0: added after the activation, 1: before it
 layout(constant_id = 21) const uint scaleBits     = 0x3f800000u;   // scalar scale as float bits (1.0)
 
 layout(constant_id = 22) const uint schedule      = 0;   // SCHEDULE_* bits below (Fragments weights, aligned == 1)
@@ -187,7 +187,7 @@ float epi(uint i, float v)
         r = (typeO == DTYPE_F32) ? bufferR_f32[ri] : float(bufferR_f16[ri]);
     }
     const float s = uintBitsToFloat(scaleBits);
-    return (residualOrder == 1u) ? s * applyEpilogue(v + r) : s * applyEpilogue(v) + r;
+    return (residualOrder == 1u) ? s * applyActivation(v + r) : s * applyActivation(v) + r;
 }
 
 const uint inputVectorLds = schedule & (SCHEDULE_VECTOR_INPUT | SCHEDULE_INPUT_STREAM);
@@ -745,7 +745,7 @@ void cooperativeGemm()
                     if (residualOrder == 1u) v = v + rv;
                     const float sc = uintBitsToFloat(scaleBits);
                     [[unroll]] for (uint e = 0; e < v.length(); e++)
-                        v[e] = sc * applyEpilogue(v[e]);
+                        v[e] = sc * applyActivation(v[e]);
                     if (residualOrder == 0u) v = v + rv;
                     if (typeO == DTYPE_F32)
                         coopMatStore(v, bufferO_f32, zOff + m * matrixN() + n, matrixN(), gl_CooperativeMatrixLayoutColumnMajor);

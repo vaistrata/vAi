@@ -21,7 +21,7 @@ inline vai::node::Convolution::Config baseConv(uint32_t inChannels, uint32_t out
         .kernelSize = kernelSize,
         .stride = stride,
         .acceptResidual = acceptResidual,
-        .epilogue = vai::Epilogue::Silu,
+        .actType = vai::ActType::Silu,
     };
 }
 

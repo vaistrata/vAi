@@ -120,7 +120,7 @@ float finishOutput(uint channel, float value)
     value = hasScale == 0u
         ? value + readBias(channel)
         : fma(value, readScale(channel), readBias(channel));
-    return applyEpilogue(value);
+    return applyActivation(value);
 }
 
 void main()

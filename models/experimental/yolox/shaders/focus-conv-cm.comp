@@ -95,7 +95,7 @@ float finishOutput(uint channel, float value)
     value = hasScale == 0u
         ? value + readBias(channel)
         : fma(value, readScale(channel), readBias(channel));
-    return applyEpilogue(value);
+    return applyActivation(value);
 }
 
 void fillB(uint panelBase, uint rawK, uint N, uint Hi, uint Wi, uint Wo, uint Ci, uint nBase)

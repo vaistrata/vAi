@@ -33,7 +33,7 @@ struct GatedFeedForward : public vai::NodeGroup
         uint32_t inDim;
         uint32_t hiddenDim;
         uint32_t outDim;
-        vai::Epilogue activation = vai::Epilogue::Silu;   // the GLU variant
+        vai::ActType actType = vai::ActType::Silu;   // the GLU variant
         bool acceptResidual = false;   // open "residual" and fold its addend into the output projection
         bool fuseGlu = false;          // the gating inside gateValue (Linear::Config::glu), no gatedMul node
     };
@@ -42,9 +42,9 @@ struct GatedFeedForward : public vai::NodeGroup
     : gateValue({
         .inDim = config.inDim,
         .outDim = 2 * config.hiddenDim,
-        .glu = config.fuseGlu,
-        .gluActivation = config.activation})
-    , gatedMul({config.activation})
+        .actType = config.fuseGlu ? config.actType : vai::ActType::None,   // fused: the gate's
+        .glu = config.fuseGlu})
+    , gatedMul({config.actType})
     , out({
         .inDim = config.hiddenDim,
         .outDim = config.outDim,

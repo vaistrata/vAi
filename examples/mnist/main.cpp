@@ -46,7 +46,7 @@ struct ConvBlock : public vai::NodeGroup {
           .outChannels = outChannels,
           .kernelSize = kernelSize,
           .stride = 1,
-          .epilogue = vai::Epilogue::Relu,
+          .actType = vai::ActType::Relu,
       })
     , maxpool({ .kernelSize = 2, .stride = 2 })
     {

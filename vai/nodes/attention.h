@@ -1507,7 +1507,7 @@ inline void Attention::run(eva::CommandBuffer cmdBuff)
                 { S,
                   (padQ ? Qp : Q)(row0 * qPitch * 2u, uint64_t(rows) * qPitch * 2u),
                   kSrc(uint64_t(g0) * kRows * Dh16 * 2u, uint64_t(products) * kRows * Dh16 * 2u),
-                  L });
+                  L, L, L });   // 4 / 5: Linear's bias / residual, unread here
             grid(xe3QkPick_, M, xe3KeyRows_, gx, gy);
             cmdBuff.bindPipeline(pipeXe3Qk_)
                 .bindDescSets({ descSetXe3Qk_[chunk] })
@@ -1534,7 +1534,7 @@ inline void Attention::run(eva::CommandBuffer cmdBuff)
                 M, Dh, xe3KeyRows_, xe3KeyRows_, xe3KeyRows_, ldv, Tq_, Hq, h0, Hkv, g0, M, xe3KeyRows_
             };
             descSetXe3Pv_[chunk].write(
-                { O, P, Vp(uint64_t(g0) * xe3KeyRows_ * ldv * 2u, uint64_t(products) * xe3KeyRows_ * ldv * 2u), L });
+                { O, P, Vp(uint64_t(g0) * xe3KeyRows_ * ldv * 2u, uint64_t(products) * xe3KeyRows_ * ldv * 2u), L, L, L });
             grid(xe3PvPick_, M, Dh, gx, gy);
             cmdBuff.bindPipeline(pipeXe3Pv_)
                 .bindDescSets({ descSetXe3Pv_[chunk] })

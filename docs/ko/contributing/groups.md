@@ -37,13 +37,13 @@ struct Config {
     uint32_t inDim;
     uint32_t hiddenDim;
     uint32_t outDim;
-    vai::Epilogue activation = vai::Epilogue::None;
+    vai::ActType actType = vai::ActType::None;
     bool acceptResidual = false;
 };
 ```
 
 `inDim`, `hiddenDim`, `outDim`은 생성할 `Linear` `Node`의 크기를 정합니다.
-`activation`은 첫 `Linear`가 적용할 활성화 함수입니다. 기본값 `None`은 활성화 함수를 적용하지 않습니다.
+`actType`은 첫 `Linear`가 적용할 활성화 함수입니다. 기본값 `None`은 활성화 함수를 적용하지 않습니다.
 그룹이 값을 중복해서 정하지 않도록, 공통 값은 한 번 받아 필요한 구성요소에 전달합니다.
 
 구성의 차이는 다음 기준으로 표현합니다.
@@ -129,7 +129,7 @@ struct FeedForward : public vai::NodeGroup
     // ... 2절의 Config
 
     FeedForward(Config config)
-    : fc1({ .inDim = config.inDim, .outDim = config.hiddenDim, .epilogue = config.activation })
+    : fc1({ .inDim = config.inDim, .outDim = config.hiddenDim, .actType = config.actType })
     , fc2({ .inDim = config.hiddenDim, .outDim = config.outDim, .acceptResidual = config.acceptResidual })
     {
         // ... 4절의 연결과 5절의 슬롯 공개

@@ -1,18 +1,18 @@
 // =============================================================================
 // common/activation.h:
-//     Activation epilogue — the `epilogue` spec constant and helper
+//     Activation — the `actType` spec constant and helper
 //     functions, shared across compute shaders.
 //
-// - Declares `epilogue` at SPEC_ID_EPILOGUE (reserved): an including shader
+// - Declares `actType` at SPEC_ID_ACT_TYPE (reserved): an including shader
 //   must not reuse that spec constant ID for any other purpose.
-//   epilogue : 0 none, 1 relu, 2 gelu, 3 gelu (tanh), 4 silu, 5 sigmoid
+//   actType : 0 none, 1 relu, 2 gelu, 3 gelu (tanh), 4 silu, 5 sigmoid
 // =============================================================================
 #ifndef VAI_COMMON_ACTIVATION_H
 #define VAI_COMMON_ACTIVATION_H
 #include "spec_constants.h"
 
 // clang-format off
-layout(constant_id = SPEC_ID_EPILOGUE) const uint epilogue = 0;   // 0: none, 1: relu, 2: gelu, 3: gelu (tanh), 4: silu, 5: sigmoid
+layout(constant_id = SPEC_ID_ACT_TYPE) const uint actType = 0;   // 0: none, 1: relu, 2: gelu, 3: gelu (tanh), 4: silu, 5: sigmoid
 // clang-format on
 
 // GLSL has no erf: Abramowitz-Stegun 7.1.26, within 1.5e-7 of it.
@@ -45,27 +45,27 @@ vec4 silu(vec4 x)      { return x / (vec4(1.0) + exp(-x)); }
 float sigmoid(float x) { return 1.0 / (1.0 + exp(-x)); }
 vec4 sigmoid(vec4 x)   { return vec4(1.0) / (vec4(1.0) + exp(-x)); }
 
-float applyEpilogue(float x)
+float applyActivation(float x)
 {
     // clang-format off
-    return (epilogue == 0) ? x :
-           (epilogue == 1) ? max(x, 0.0) :
-           (epilogue == 2) ? gelu(x) :
-           (epilogue == 3) ? geluTanh(x) :
-           (epilogue == 4) ? silu(x) :
-           (epilogue == 5) ? sigmoid(x) : x;
+    return (actType == 0) ? x :
+           (actType == 1) ? max(x, 0.0) :
+           (actType == 2) ? gelu(x) :
+           (actType == 3) ? geluTanh(x) :
+           (actType == 4) ? silu(x) :
+           (actType == 5) ? sigmoid(x) : x;
     // clang-format on
 }
 
-vec4 applyEpilogue(vec4 x)
+vec4 applyActivation(vec4 x)
 {
     // clang-format off
-    return (epilogue == 0) ? x :
-           (epilogue == 1) ? max(x, vec4(0.0)) :
-           (epilogue == 2) ? gelu(x) :
-           (epilogue == 3) ? geluTanh(x) :
-           (epilogue == 4) ? silu(x) :
-           (epilogue == 5) ? sigmoid(x) : x;
+    return (actType == 0) ? x :
+           (actType == 1) ? max(x, vec4(0.0)) :
+           (actType == 2) ? gelu(x) :
+           (actType == 3) ? geluTanh(x) :
+           (actType == 4) ? silu(x) :
+           (actType == 5) ? sigmoid(x) : x;
     // clang-format on
 }
 

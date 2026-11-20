@@ -71,8 +71,9 @@
  gate 16 b + w for w < 16, up 16 b + w - 16 above), so a subgroup's B tiles j and
  j + 1 (j even; uN even, n0 a multiple of 32) give one lane the gate and the
  up of the same output. O is [M, H]:
-   O[m, 16 b + l] = epilogue(C[m, 32 b + l]) * C[m, 32 b + 16 + l]
- No split, batch, oPerm or oScale with it (host-checked).
+   O[m, 16 b + l] = activation(C[m, 32 b + l]) * C[m, 32 b + 16 + l]
+ No split, batch, oPerm or oScale with it (host-checked): a shape that runs a
+ split writes partials as usual and linear-reduce does the GLU.
 =============================================================================*/
 #version 450
 #extension GL_GOOGLE_include_directive : require
@@ -82,7 +83,6 @@
 #extension GL_KHR_cooperative_matrix : require
 #extension GL_KHR_memory_scope_semantics : require
 #extension GL_KHR_shader_subgroup_basic : require
-#include "common/activation.h"
 #include "common/spec_constants.h"
 
 layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;   // = wgSize (same SpecId)
@@ -102,7 +102,8 @@ layout(constant_id = 11) const uint oPerm  = 0;     // 1: O rows go out token-ma
 layout(constant_id = 12) const uint batch  = 0;     // 1: workgroup z is one of several products, not a K split
 layout(constant_id = 13) const uint oScale = 0;     // 1: O row m of product z is scaled by L[z * M + m]
 layout(constant_id = 14) const uint wNk    = 0;     // 1: W is [N, ldnW >= K] rows, loaded transposed (keys as they lie)
-layout(constant_id = 15) const uint glu    = 0;     // 1: O = epilogue(gate) * up, gate and up interleaved by 16 in W
+layout(constant_id = 15) const uint glu    = 0;     // 1: O = activation(gate) * up, gate and up interleaved by 16 in W
+layout(constant_id = 16) const uint accF16 = 0;     // 1: accumulate in fp16 (Xe2 and later DPAS take an hf accumulator)
 layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0;  // O (output) dtype
 
 layout(set = 0, binding = 0) writeonly buffer O_BUF_F32 { float bufferO_f32[]; };
@@ -131,10 +132,16 @@ layout(push_constant) uniform PushConstants {
 
 void writeO(uint i, float v) { if (typeO == DTYPE_F32) bufferO_f32[i] = v; else bufferO_f16[i] = float16_t(v); }
 
+// The epilogue (bias / activation / scale / residual, the GLU) when K is not split.
+#define LINEAR_STORE_BIAS_BINDING 4
+#define LINEAR_STORE_RESIDUAL_BINDING 5
+#include "common/linear-store.h"
+
 const uint TM = 8, TN = 16, TK = 16;
 #define MAT_A coopmat<float16_t, gl_ScopeSubgroup, TM, TK, gl_MatrixUseA>
 #define MAT_B coopmat<float16_t, gl_ScopeSubgroup, TK, TN, gl_MatrixUseB>
 #define MAT_C coopmat<float, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator>
+#define MAT_C16 coopmat<float16_t, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator>
 
 const uint SG_TILE_M = uM * TM, SG_TILE_N = uN * TN;
 const uint WG_TILE_M = wgSgM * SG_TILE_M, WG_TILE_N = wgSgN * SG_TILE_N;
@@ -156,9 +163,16 @@ void main()
     const uint iRow0 = (batch == 0u) ? 0u : gl_WorkGroupID.z * iBatch;   // the product's first row of I, of W
     const uint wRow0 = (batch == 0u) ? 0u : gl_WorkGroupID.z * wBatch;
 
+    // Both accumulator dtypes are declared and accF16 picks one; the dead array vanishes at ISA compilation.
     MAT_C acc[uM * uN];
+    MAT_C16 acc16[uM * uN];
     [[unroll]] for (uint t = 0; t < uM * uN; t++)
-        acc[t] = MAT_C(0.0);
+    {
+        if (accF16 == 0u) acc[t] = MAT_C(0.0);
+        else              acc16[t] = MAT_C16(0.0);
+    }
+    // Element r of accumulator tile t, as float.
+    #define ACC(t, r) ((accF16 == 0u) ? acc[t][r] : MAT_C(acc16[t])[r])
 
     // One 16-k step: every B tile, every A tile, then the DPAS B tile outer.
     #define STEP(kb)                                                                                \
@@ -174,7 +188,8 @@ void main()
             coopMatLoad(a[i], bufferI, (iRow0 + m0 + i * TM) * ldkI + (kb), ldkI, gl_CooperativeMatrixLayoutRowMajor); \
         [[unroll]] for (uint j = 0; j < uN; j++)                                                    \
             [[unroll]] for (uint i = 0; i < uM; i++)                                                \
-                acc[i * uN + j] = coopMatMulAdd(a[i], b[j], acc[i * uN + j]);                       \
+                if (accF16 == 0u) acc[i * uN + j] = coopMatMulAdd(a[i], b[j], acc[i * uN + j]);     \
+                else              acc16[i * uN + j] = coopMatMulAdd(a[i], b[j], acc16[i * uN + j]); \
     }
 
     const uint CHUNK = TK * kUnroll;
@@ -249,7 +264,7 @@ void main()
                 {
                     const uint m = m0 + i * TM + r;
                     if (m < M && c < H)
-                        writeO(m * H + c, applyEpilogue(acc[i * uN + 2u * p][r]) * acc[i * uN + 2u * p + 1u][r]);
+                        writeO(m * H + c, linearStoreGlu(m, c, N, ACC(i * uN + 2u * p, r), ACC(i * uN + 2u * p + 1u, r)));
                 }
             }
         return;
@@ -268,7 +283,8 @@ void main()
                 if (m < M && n < N)
                     writeO((oPerm == 0u) ? zOff + m * N + n
                                          : (((oG / oHkv) * oTq + m % oTq) * oHq + (oG % oHkv) * (oHq / oHkv) + oH0 + m / oTq) * N + n,
-                           (oScale == 0u) ? acc[i * uN + j][r] : acc[i * uN + j][r] * bufferL[gl_WorkGroupID.z * M + m]);
+                           (oScale == 0u) ? linearStore(m * N + n, ACC(i * uN + j, r))   // the identity unless Linear's epilogue is on
+                                          : ACC(i * uN + j, r) * bufferL[gl_WorkGroupID.z * M + m]);
             }
         }
 }

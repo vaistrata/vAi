@@ -28,7 +28,7 @@ void bindNeuralNet(nb::module_& m)
                 new (self) vai::NeuralNet(config);
             },
             nb::arg("w_default_dtype")       = vai::Dtype::Fp16,
-            nb::arg("o_default_dtype")       = vai::Dtype::Fp32,
+            nb::arg("o_default_dtype")       = vai::Dtype::Fp16,
             nb::arg("upload_chunk_size_mib") = vai::detail::kDefaultUploadChunkMiB,
             nb::arg("buffer_pool_log_level") = 0u,
             nb::arg("device")                = nb::none(),

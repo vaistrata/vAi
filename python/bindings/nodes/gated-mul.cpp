@@ -10,7 +10,7 @@ static void bindGatedMul(nb::module_& m)
                                   "GatedMulNode",
                                   "Gated FFN tail: out0 [..., H] = act(gate) * up, where gate and up are "
                                   "the first and second halves of in0 [..., 2H].",
-                                  field("activation", &C::activation));
+                                  field("act_type", &C::activation));
 }
 PYVAI_NODE_BINDING(bindGatedMul);
 

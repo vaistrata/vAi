@@ -3,8 +3,8 @@
      activation epilogue fused in
      (ported from the ggml/llama.cpp Vulkan mul_mat_split_k_reduce kernel)
 
-     O[m, n] = s * epilogue( sum_z P[z, m, n] + B[m, n] ) + R[m, n]    residualOrder 0
-     O[m, n] = s * epilogue( sum_z P[z, m, n] + B[m, n] + R[m, n] )    residualOrder 1
+     O[m, n] = s * activation( sum_z P[z, m, n] + B[m, n] ) + R[m, n]    residualOrder 0
+     O[m, n] = s * activation( sum_z P[z, m, n] + B[m, n] + R[m, n] )    residualOrder 1
 
      P [splitCount, M, N] partial sums and O [M, N] are typeO. The bias B
      (typeB) is [N] or [M, N]; the residual R (typeO)
@@ -16,7 +16,7 @@
  gluBlock = G > 0 (Linear's GLU, when its kernel does not do it in the
  store): P's N = 2H columns hold gate and up in blocks of 2G (linear-glu-rows),
  the bias is in the weight's original order (gate H, then up H), and
-     O[m, c] = epilogue(gate) * up,  O [M, H],  MN = M * H
+     O[m, c] = activation(gate) * up,  O [M, H],  MN = M * H
      gate = sum_z P[z, m, 2G (c / G) + c % G] + B[m, c]
      up   = sum_z P[z, m, 2G (c / G) + c % G + G] + B[m, H + c]
  No residual or scale with it (host-checked).
@@ -36,7 +36,7 @@ layout(constant_id = 0) const uint hasBias = 0;        // 1: bias[N] or bias[M, 
 layout(constant_id = 1) const uint biasElems = 0;      // 0 covers O; else the bias block repeats
 layout(constant_id = 2) const uint hasResidual = 0;    // 1: residual[M, N]
 layout(constant_id = 3) const uint residualElems = 0;  // 0: the residual covers O; else it repeats
-layout(constant_id = 4) const uint residualOrder = 0;  // 0: after the epilogue, 1: before it
+layout(constant_id = 4) const uint residualOrder = 0;  // 0: after the activation, 1: before it
 layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0;  // O, P and residual dtype
 layout(constant_id = 5) const uint typeB = 0;          // bias dtype
 layout(constant_id = 6) const uint gluBlock = 0;       // > 0: GLU over gate / up blocks of this many columns
@@ -83,9 +83,9 @@ void writeO4(uint i4, vec4 v)  { if (typeO == DTYPE_F32) bufferO_4f32[i4] = v; e
 
 uint M2N() { return MN * 2u; }   // gluBlock: P's elements per split (M * 2H)
 
-vec4 applyEpilogue4(vec4 v)
+vec4 applyActivation4(vec4 v)
 {
-    return vec4(applyEpilogue(v.x), applyEpilogue(v.y), applyEpilogue(v.z), applyEpilogue(v.w));
+    return vec4(applyActivation(v.x), applyActivation(v.y), applyActivation(v.z), applyActivation(v.w));
 }
 
 void main()
@@ -112,7 +112,7 @@ void main()
                 gate += readP(i * M2N() + g);
                 up += readP(i * M2N() + g + G);
             }
-            writeO(e, applyEpilogue(gate) * up);
+            writeO(e, applyActivation(gate) * up);
         }
         return;
     }
@@ -126,8 +126,8 @@ void main()
             result += readP4((i * MN + idx) / 4);
 
         const vec4 r = readR4(idx);
-        writeO4(idx / 4, (residualOrder == 1u) ? scalarScale * applyEpilogue4(result + r)
-                                               : scalarScale * applyEpilogue4(result) + r);
+        writeO4(idx / 4, (residualOrder == 1u) ? scalarScale * applyActivation4(result + r)
+                                               : scalarScale * applyActivation4(result) + r);
     }
     else
     {
@@ -141,8 +141,8 @@ void main()
                     result += readP(i * MN + idx + j);
 
                 const float r = readR(idx + j);
-                writeO(idx + j, (residualOrder == 1u) ? scalarScale * applyEpilogue(result + r)
-                                                      : scalarScale * applyEpilogue(result) + r);
+                writeO(idx + j, (residualOrder == 1u) ? scalarScale * applyActivation(result + r)
+                                                      : scalarScale * applyActivation(result) + r);
             }
         }
     }

@@ -35,7 +35,7 @@ class YOLOX:
         conf_threshold: float = 0.25,
         iou_threshold: float = 0.45,
         w_default_dtype: Dtype = Dtype.F16,
-        o_default_dtype: Dtype = Dtype.F32,
+        o_default_dtype: Dtype = Dtype.F16,
         device: Device | None = None,
     ):
         if o_default_dtype != Dtype.F32:

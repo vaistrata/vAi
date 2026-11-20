@@ -47,7 +47,7 @@ class _ReluNet(pyvai.NeuralNet):
     """A real kernel with its own output buffer (no aliasing)."""
     def __init__(self):
         super().__init__()
-        self.act = nodes.ActivationNode(epilogue=pyvai.Epilogue.RELU)
+        self.act = nodes.ActivationNode(act_type=pyvai.ActType.RELU)
         self.input("in0") - self.act - self.output("out0")
 
 
@@ -65,7 +65,7 @@ class _TwoOutNet(pyvai.NeuralNet):
     def __init__(self):
         super().__init__()
         self.id = nodes.IdentityNode()
-        self.act = nodes.ActivationNode(epilogue=pyvai.Epilogue.RELU)
+        self.act = nodes.ActivationNode(act_type=pyvai.ActType.RELU)
         self.input("in0") - self.id - self.output("same")
         self.id - self.act - self.output("relu")
 
@@ -129,7 +129,7 @@ def test_no_leaks_at_interpreter_exit(tmp_path):
         "import numpy as np, pyvai\n"
         "from pyvai import nodes\n"
         "net = pyvai.NeuralNet()\n"
-        "net.input('in0') - nodes.ActivationNode(epilogue=pyvai.Epilogue.RELU)"
+        "net.input('in0') - nodes.ActivationNode(act_type=pyvai.ActType.RELU)"
         " - net.output('out0')\n"
         "out = net(pyvai.Tensor.from_numpy(np.arange(4, dtype=np.float32)))\n"
         "view = out.reshape([2, 2]); view.to_numpy()\n"
