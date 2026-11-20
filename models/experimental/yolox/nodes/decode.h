@@ -14,8 +14,8 @@ namespace model::experimental::yolox::node {
 =============================================================================*/
 class Decode : public vai::Node
 {
-    eva::ComputePipeline pipe;
-    eva::DescriptorSet descSet;
+    eva::ComputePipeline pipe_;
+    eva::DescriptorSet descSet_;
 
 public:
     struct PipeParams
@@ -37,7 +37,7 @@ public:
     void run(eva::CommandBuffer cmdBuff) override;
 
 private:
-    PipeParams pipeParams;
+    PipeParams pipeParams_;
 };
 
 inline Decode::Decode(Config config)
@@ -78,10 +78,10 @@ inline void Decode::prepare()
     }
     VAI_ASSERT(batch && batch <= device().maxComputeWorkGroupCount()[2]);
     const PipeParams p = { .iDtype = first.dtype(), .batched = batch > 1 };
-    if (!pipe || p != pipeParams)
+    if (!pipe_ || p != pipeParams_)
     {
-        pipeParams = p;
-        pipe = pipelinePool().request(
+        pipeParams_ = p;
+        pipe_ = pipelinePool().request(
             EXPERIMENTAL_YOLOX_SHADER_OUTPUT_DIR,
             "decode",
             {
@@ -91,8 +91,8 @@ inline void Decode::prepare()
                 eva::constant_id<SPEC_ID_TYPE_I>(p.iDtype),
                 eva::constant_id<SPEC_ID_TYPE_O>(oDtype),
             });
-        if (!descSet)
-            descSet = vai::gVaiDestSetPool(pipe.descSetLayout(0));
+        if (!descSet_)
+            descSet_ = vai::gVaiDestSetPool(pipe_.descSetLayout(0));
     }
 
     std::vector<uint32_t> outShape;
@@ -105,7 +105,7 @@ inline void Decode::prepare()
 inline void Decode::run(eva::CommandBuffer cmdBuff)
 {
     vai::Tensor& outTen = (*this)["out0"];
-    descSet.write({
+    descSet_.write({
         (*this)["regobj_p3"].buffer(),
         (*this)["cls_p3"].buffer(),
         (*this)["regobj_p4"].buffer(),
@@ -115,8 +115,8 @@ inline void Decode::run(eva::CommandBuffer cmdBuff)
         outTen.buffer(),
     });
 
-    cmdBuff.bindPipeline(pipe)
-        .bindDescSets({ descSet })
+    cmdBuff.bindPipeline(pipe_)
+        .bindDescSets({ descSet_ })
         .dispatch2(
             outTen.shape()[outTen.shape().size() - 2] * outTen.shape().back(), 1u, vai::outerSize(outTen.shape(), 2))
         .barrier(eva::SYNC_SCOPE::COMPUTE_WRITE / outTen.buffer() / eva::SYNC_SCOPE::COMPUTE_READ);

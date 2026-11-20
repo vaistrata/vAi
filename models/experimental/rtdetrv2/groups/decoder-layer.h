@@ -17,7 +17,7 @@ struct DecoderLayerConfig
 {
     uint32_t ffnHiddenDim;
     float normEps;
-    MSDeformableAttnConfig crossCfg;
+    MSDeformableAttentionConfig crossCfg;
 };
 
 /////////////////////////////////////////////////////////////////////////////////////////

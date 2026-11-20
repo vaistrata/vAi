@@ -5,16 +5,15 @@
 
 namespace model::experimental::rtdetrv2::node {
 
+/*=============================================================================
+  Add - element-wise addition for residual connections
+  Input: in0, in1 [same shape]
+  Output: in0 + in1
 
-/////////////////////////////////////////////////////////////////////////////////////////
-// Add - element-wise addition for residual connections
-// Input: in0, in1 [same shape]
-// Output: in0 + in1
-//
-// Inputs must have identical shapes and dtypes.
-// With constantIn1, assign in1 before inference; it is uploaded and retained
-// as a persistent tensor instead of receiving a graph connection.
-/////////////////////////////////////////////////////////////////////////////////////////
+  Inputs must have identical shapes and dtypes.
+  With constantIn1, assign in1 before inference; it is uploaded and retained
+  as a persistent tensor instead of receiving a graph connection.
+=============================================================================*/
 class Add : public vai::Node
 {
     eva::ComputePipeline pipe_;

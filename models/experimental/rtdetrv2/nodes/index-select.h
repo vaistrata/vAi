@@ -6,16 +6,16 @@
 
 namespace model::experimental::rtdetrv2::node {
 
-/////////////////////////////////////////////////////////////////////////////////////////
-// IndexSelect - Select rows along the leading axis
-// Input:  in0     [N, d1, ..., dn] (rank >= 1, contiguous fp32 or fp16)
-//         indices [K]             (raw uint32 indices, in 4-byte slots)
-// Output: out0    [K, d1, ..., dn] (same dtype as in0)
-//
-// Copies whole rows in index order, preserving duplicates and the input dtype.
-// Indices use fp32 storage as in TopK; read with getData<uint32_t>().
-// N and K must be positive. Out-of-range indices produce zero-filled rows.
-/////////////////////////////////////////////////////////////////////////////////////////
+/*=============================================================================
+  IndexSelect - Select rows along the leading axis
+  Input:  in0     [N, d1, ..., dn] (rank >= 1, contiguous fp32 or fp16)
+          indices [K]             (raw uint32 indices, in 4-byte slots)
+  Output: out0    [K, d1, ..., dn] (same dtype as in0)
+
+  Copies whole rows in index order, preserving duplicates and the input dtype.
+  Indices use fp32 storage as in TopK; read with getData<uint32_t>().
+  N and K must be positive. Out-of-range indices produce zero-filled rows.
+=============================================================================*/
 class IndexSelect : public vai::Node
 {
     eva::ComputePipeline pipe_;

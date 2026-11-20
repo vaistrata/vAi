@@ -5,11 +5,11 @@
 
 namespace model::experimental::rtdetrv2::node {
 
-/////////////////////////////////////////////////////////////////////////////////////////
-// BoxRefine - Refine normalized boxes with predicted logit-space deltas
-// Input:  boxes [Q, 4], delta [Q, 4] (fp32)
-// Output: out0 [Q, 4] (fp32), sigmoid(delta + inverse_sigmoid(boxes))
-/////////////////////////////////////////////////////////////////////////////////////////
+/*=============================================================================
+  BoxRefine - Refine normalized boxes with predicted logit-space deltas
+  Input:  boxes [Q, 4], delta [Q, 4] (fp32)
+  Output: out0 [Q, 4] (fp32), sigmoid(delta + inverse_sigmoid(boxes))
+=============================================================================*/
 class BoxRefine : public vai::Node
 {
     eva::ComputePipeline pipe_;

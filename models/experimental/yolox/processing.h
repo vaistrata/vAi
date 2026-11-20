@@ -7,10 +7,10 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <vector>
-#include <span>
 
 namespace model::experimental::yolox {
 

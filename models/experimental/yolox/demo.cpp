@@ -1,6 +1,6 @@
 /*=============================================================================
   Written by   phg9296@vaistrata.com
-  Task         YOLOX — detects objects in one image and reports timings.
+  Task         YOLOX — detects objects in a batch of images and reports timings.
   Assets       data/images/dog.jpg
                  from  github.com/Megvii-BaseDetection/YOLOX/tree/main/assets
 =============================================================================*/

@@ -8,14 +8,14 @@
 namespace model::experimental::rtdetrv2::group {
 
 /////////////////////////////////////////////////////////////////////////////////////////
-// ResidualBlock - ResNet-vd basic or bottleneck block with a ReLU residual sum
+// ResNetVdBlock - ResNet-vd basic or bottleneck block with a ReLU residual sum
 // Input:  in0  [Ci, H, W]
 // Output: out0 [Co, H / stride, W / stride] (even spatial sizes when stride is 2)
 // Co is baseChannels for a basic block and 4 * baseChannels for a bottleneck block.
 // The first block of each stage projects the shortcut, using average pooling
 // before the projection when downsampling.
 /////////////////////////////////////////////////////////////////////////////////////////
-struct ResidualBlock : public vai::NodeGroup
+struct ResNetVdBlock : public vai::NodeGroup
 {
     vai::node::Identity input;
     std::vector<vai::node::Convolution> main;
@@ -31,7 +31,7 @@ struct ResidualBlock : public vai::NodeGroup
         bool shortcut;
     };
 
-    ResidualBlock(Config config)
+    ResNetVdBlock(Config config)
     {
         const uint32_t outChannels = config.baseChannels * (config.bottleneck ? 4 : 1);
         if (config.bottleneck)

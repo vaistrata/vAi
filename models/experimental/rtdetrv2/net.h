@@ -3,19 +3,21 @@
   Model        RT-DETRv2 (S / M / L / X)
 =============================================================================*/
 
-#ifndef EXPERIMENTAL_RTDETRV2_MODEL_H
-#define EXPERIMENTAL_RTDETRV2_MODEL_H
+#ifndef EXPERIMENTAL_RTDETRV2_NET_H
+#define EXPERIMENTAL_RTDETRV2_NET_H
 
-#include "groups/resnet-vd.h"
 #include "groups/decoder-layer.h"
 #include "groups/decoder.h"
 #include "groups/encoder-layer.h"
 #include "groups/hybrid-encoder.h"
 #include "groups/query-selection.h"
+#include "groups/resnet-vd.h"
 #include "vai/nodes/concat.h"
 #include "vai/nodes/convolution.h"
 #include "vai/nodes/permute.h"
 #include "vai/nodes/reshape.h"
+#include <cstdint>
+#include <iterator>
 
 namespace model::experimental::rtdetrv2 {
 
@@ -24,8 +26,8 @@ namespace model::experimental::rtdetrv2 {
 /////////////////////////////////////////////////////////////////////////////////////////
 struct ModelConfig
 {
-    const char* name;   // checkpoint folder under data/rtdetrv2/ckpts/
-    group::ResNetvdConfig backboneCfg;
+    const char* variant;
+    group::ResNetVdConfig backboneCfg;
     group::EncoderLayerConfig encoderLayerCfg{};
     group::DecoderLayerConfig decoderLayerCfg = {
         .ffnHiddenDim = 1024,
@@ -43,38 +45,38 @@ struct ModelConfig
     uint32_t numClasses = 80;
     float expansion = 0.5f;
 
-    static constexpr ModelConfig S()   // ResNet18 — PekingU/rtdetr_v2_r18vd
+    static constexpr ModelConfig small()   // ResNet18 — PekingU/rtdetr_v2_r18vd
     {
         return {
-            .name = "small",
+            .variant = "small",
             .backboneCfg = { .stageDepths = { 2, 2, 2, 2 }, .bottleneck = false },
             .decoderLayers = 3,
         };
     }
 
-    static constexpr ModelConfig M()   // ResNet34 — PekingU/rtdetr_v2_r34vd
+    static constexpr ModelConfig medium()   // ResNet34 — PekingU/rtdetr_v2_r34vd
     {
         return {
-            .name = "medium",
+            .variant = "medium",
             .backboneCfg = { .stageDepths = { 3, 4, 6, 3 }, .bottleneck = false },
             .decoderLayers = 4,
         };
     }
 
-    static constexpr ModelConfig L()   // ResNet50 — PekingU/rtdetr_v2_r50vd
+    static constexpr ModelConfig large()   // ResNet50 — PekingU/rtdetr_v2_r50vd
     {
         return {
-            .name = "large",
+            .variant = "large",
             .backboneCfg = { .stageDepths = { 3, 4, 6, 3 }, .bottleneck = true },
             .decoderLayers = 6,
             .expansion = 1.f,
         };
     }
 
-    static constexpr ModelConfig X()   // ResNet101 — PekingU/rtdetr_v2_r101vd
+    static constexpr ModelConfig xlarge()   // ResNet101 — PekingU/rtdetr_v2_r101vd
     {
         return {
-            .name = "xlarge",
+            .variant = "xlarge",
             .backboneCfg = { .stageDepths = { 3, 4, 23, 3 }, .bottleneck = true },
             .encoderLayerCfg = { .embedDim = 384, .headDim = 48, .ffnHiddenDim = 2048 },
             .decoderLayers = 6,
@@ -84,15 +86,15 @@ struct ModelConfig
 };
 
 /////////////////////////////////////////////////////////////////////////////////////////
-// Model - RT-DETRv2 object detection
+// Net - RT-DETRv2 object detection
 // Input:  in0 [3, 640, 640], contiguous CHW in oDefaultDtype (FP32 or FP16)
 // Output: pred_logits [300, 80], pred_boxes [300, 4] (both FP32)
 // Boxes use normalized center-x, center-y, width, height coordinates.
 /////////////////////////////////////////////////////////////////////////////////////////
-struct Model : public vai::NeuralNet
+struct Net : public vai::NeuralNet
 {
-    ModelConfig cfg;
-    group::ResNetvd backbone;
+    ModelConfig modelCfg;
+    group::ResNetVd backbone;
     group::HybridEncoder encoder;
     vai::node::Convolution proj0, proj1, proj2;
     vai::node::Permute tokenPermute0, tokenPermute1, tokenPermute2;
@@ -101,51 +103,51 @@ struct Model : public vai::NeuralNet
     group::QuerySelection querySelection;
     group::Decoder decoder;
 
-    Model(const vai::NeuralNetConfig& netCfg, const ModelConfig& modelCfg)
+    Net(const vai::NeuralNetConfig& netCfg, const ModelConfig& modelCfg)
     : NeuralNet(netCfg)
-    , cfg(modelCfg)
-    , backbone(cfg.backboneCfg)
+    , modelCfg(modelCfg)
+    , backbone(modelCfg.backboneCfg)
     , encoder(
-          { .inChannels = { cfg.backboneCfg.outChannels(1),
-                            cfg.backboneCfg.outChannels(2),
-                            cfg.backboneCfg.outChannels(3) },
-            .layerCfg = cfg.encoderLayerCfg,
-            .expansion = cfg.expansion })
-    , proj0({ .inChannels = cfg.encoderLayerCfg.embedDim,
-              .outChannels = cfg.decoderLayerCfg.crossCfg.inDim,
+          { .inChannels = { modelCfg.backboneCfg.outChannels(1),
+                            modelCfg.backboneCfg.outChannels(2),
+                            modelCfg.backboneCfg.outChannels(3) },
+            .layerCfg = modelCfg.encoderLayerCfg,
+            .expansion = modelCfg.expansion })
+    , proj0({ .inChannels = modelCfg.encoderLayerCfg.embedDim,
+              .outChannels = modelCfg.decoderLayerCfg.crossCfg.inDim,
               .kernelSize = 1,
               .stride = 1 })
-    , proj1({ .inChannels = cfg.encoderLayerCfg.embedDim,
-              .outChannels = cfg.decoderLayerCfg.crossCfg.inDim,
+    , proj1({ .inChannels = modelCfg.encoderLayerCfg.embedDim,
+              .outChannels = modelCfg.decoderLayerCfg.crossCfg.inDim,
               .kernelSize = 1,
               .stride = 1 })
-    , proj2({ .inChannels = cfg.encoderLayerCfg.embedDim,
-              .outChannels = cfg.decoderLayerCfg.crossCfg.inDim,
+    , proj2({ .inChannels = modelCfg.encoderLayerCfg.embedDim,
+              .outChannels = modelCfg.decoderLayerCfg.crossCfg.inDim,
               .kernelSize = 1,
               .stride = 1 })
     , tokenPermute0({ 1, 2, 0 })
     , tokenPermute1({ 1, 2, 0 })
     , tokenPermute2({ 1, 2, 0 })
-    , tokenShape0({ -1, cfg.decoderLayerCfg.crossCfg.inDim })
-    , tokenShape1({ -1, cfg.decoderLayerCfg.crossCfg.inDim })
-    , tokenShape2({ -1, cfg.decoderLayerCfg.crossCfg.inDim })
-    , memory({ .axis = 0, .inputCount = uint32_t(std::size(cfg.decoderLayerCfg.crossCfg.featureShapes)) })
+    , tokenShape0({ -1, modelCfg.decoderLayerCfg.crossCfg.inDim })
+    , tokenShape1({ -1, modelCfg.decoderLayerCfg.crossCfg.inDim })
+    , tokenShape2({ -1, modelCfg.decoderLayerCfg.crossCfg.inDim })
+    , memory({ .axis = 0, .inputCount = uint32_t(std::size(modelCfg.decoderLayerCfg.crossCfg.featureShapes)) })
     , querySelection(
-          { .embedDim = cfg.decoderLayerCfg.crossCfg.inDim,
-            .numQueries = cfg.numQueries,
-            .numClasses = cfg.numClasses,
-            .normEps = cfg.decoderLayerCfg.normEps,
-            .featureShapes = { { cfg.decoderLayerCfg.crossCfg.featureShapes[0][0],
-                                 cfg.decoderLayerCfg.crossCfg.featureShapes[0][1] },
-                               { cfg.decoderLayerCfg.crossCfg.featureShapes[1][0],
-                                 cfg.decoderLayerCfg.crossCfg.featureShapes[1][1] },
-                               { cfg.decoderLayerCfg.crossCfg.featureShapes[2][0],
-                                 cfg.decoderLayerCfg.crossCfg.featureShapes[2][1] } } })
+          { .embedDim = modelCfg.decoderLayerCfg.crossCfg.inDim,
+            .numQueries = modelCfg.numQueries,
+            .numClasses = modelCfg.numClasses,
+            .normEps = modelCfg.decoderLayerCfg.normEps,
+            .featureShapes = { { modelCfg.decoderLayerCfg.crossCfg.featureShapes[0][0],
+                                 modelCfg.decoderLayerCfg.crossCfg.featureShapes[0][1] },
+                               { modelCfg.decoderLayerCfg.crossCfg.featureShapes[1][0],
+                                 modelCfg.decoderLayerCfg.crossCfg.featureShapes[1][1] },
+                               { modelCfg.decoderLayerCfg.crossCfg.featureShapes[2][0],
+                                 modelCfg.decoderLayerCfg.crossCfg.featureShapes[2][1] } } })
     , decoder(
-          { .numLayers = cfg.decoderLayers,
-            .numClasses = cfg.numClasses,
-            .positionHiddenDim = cfg.positionHiddenDim,
-            .layerCfg = cfg.decoderLayerCfg })
+          { .numLayers = modelCfg.decoderLayers,
+            .numClasses = modelCfg.numClasses,
+            .positionHiddenDim = modelCfg.positionHiddenDim,
+            .layerCfg = modelCfg.decoderLayerCfg })
     {
         input("in0") - backbone;
         // [D, H, W] -> [H, W, D] -> [H * W, D], then stack P3/P4/P5.
@@ -183,4 +185,4 @@ struct Model : public vai::NeuralNet
 
 }   // namespace model::experimental::rtdetrv2
 
-#endif   // EXPERIMENTAL_RTDETRV2_MODEL_H
+#endif   // EXPERIMENTAL_RTDETRV2_NET_H

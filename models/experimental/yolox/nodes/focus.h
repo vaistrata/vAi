@@ -7,12 +7,9 @@ namespace model::experimental::yolox::node {
 
 /*=============================================================================
   Focus - YOLOX Focus folded into its stem Conv-BN-SiLU.
-  Input : in0  [..., Ci, 2H, 2W]
-  Params: weight [Co, 4Ci, 3, 3], official Megvii BatchNorm tensors [Co]
+  Input:  in0  [..., Ci, 2H, 2W]
+  Params: weight [Co, 4Ci, 3, 3], scale [Co], bias [Co]
   Output: out0 [..., Co, H, W]
-
-  It preserves the standard convolution parameter-slot/weight-loader contract,
-  while its prepare/run implementation and shaders remain model-local.
 =============================================================================*/
 class Focus : public vai::Node
 {

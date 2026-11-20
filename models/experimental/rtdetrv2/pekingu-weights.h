@@ -1,7 +1,7 @@
 /*=============================================================================
   Written by   phg9296@vaistrata.com
   Checkpoint   Each tier reads every *.safetensors file in
-               data/rtdetrv2/ckpts/<ModelConfig::name>/.
+               data/ckpts/rtdetrv2/pekingu/<variant>/.
                Download model.safetensors from the matching Hugging Face repo:
                  small     PekingU/rtdetr_v2_r18vd
                  medium    PekingU/rtdetr_v2_r34vd
@@ -16,7 +16,7 @@
 #ifndef EXPERIMENTAL_RTDETRV2_PEKINGU_WEIGHTS_H
 #define EXPERIMENTAL_RTDETRV2_PEKINGU_WEIGHTS_H
 
-#include "model.h"
+#include "net.h"
 #include "vai/engine/weights.h"
 #include <cmath>
 #include <iterator>
@@ -78,7 +78,7 @@ inline void loadRepVGG(vai::node::Convolution& node, const vai::Checkpoint& ckpt
 // Weight loading - maps Hugging Face RTDetrV2ForObjectDetection keys to model members
 // Only the final decoder classification head is needed for inference.
 /////////////////////////////////////////////////////////////////////////////////////////
-inline void loadWeights(Model& model, const vai::Checkpoint& ckpt)
+inline void loadWeights(Net& net, const vai::Checkpoint& ckpt)
 {
     // Keep convolution weights unchanged and apply BatchNorm through scale/bias slots.
     auto loadConv = [&](vai::node::Convolution& node, const std::string& weightKey, const std::string& normKey) {
@@ -140,15 +140,15 @@ inline void loadWeights(Model& model, const vai::Checkpoint& ckpt)
     };
 
     // ResNet-vd stem, residual branches, and projected shortcuts.
-    auto& backbone = model.backbone;
+    auto& backbone = net.backbone;
     const std::string root = "model.backbone.model";
     loadConv(backbone.stem0, root + ".embedder.embedder.0.convolution", root + ".embedder.embedder.0.normalization");
     loadConv(backbone.stem1, root + ".embedder.embedder.1.convolution", root + ".embedder.embedder.1.normalization");
     loadConv(backbone.stem2, root + ".embedder.embedder.2.convolution", root + ".embedder.embedder.2.normalization");
     size_t blockIndex = 0;
-    for (uint32_t stage = 0; stage < std::size(model.cfg.backboneCfg.stageDepths); ++stage)
+    for (uint32_t stage = 0; stage < std::size(net.modelCfg.backboneCfg.stageDepths); ++stage)
     {
-        for (uint32_t i = 0; i < model.cfg.backboneCfg.stageDepths[stage]; ++i)
+        for (uint32_t i = 0; i < net.modelCfg.backboneCfg.stageDepths[stage]; ++i)
         {
             auto key = root + ".encoder.stages." + std::to_string(stage) + ".layers." + std::to_string(i);
             auto& block = backbone.blocks[blockIndex++];
@@ -166,7 +166,7 @@ inline void loadWeights(Model& model, const vai::Checkpoint& ckpt)
     }
 
     // Hybrid encoder input projections, coarse-scale attention, and FPN/PAN blocks.
-    auto& encoder = model.encoder;
+    auto& encoder = net.encoder;
     loadConv(encoder.proj0, "model.encoder_input_proj.0.0", "model.encoder_input_proj.0.1");
     loadConv(encoder.proj1, "model.encoder_input_proj.1.0", "model.encoder_input_proj.1.1");
     loadConv(encoder.proj2, "model.encoder_input_proj.2.0", "model.encoder_input_proj.2.1");
@@ -189,11 +189,11 @@ inline void loadWeights(Model& model, const vai::Checkpoint& ckpt)
     loadCSP(encoder.pan1, "model.encoder.pan_blocks.1");
 
     // Model-level pyramid projections adapt the hybrid encoder outputs for the decoder.
-    loadConv(model.proj0, "model.decoder_input_proj.0.0", "model.decoder_input_proj.0.1");
-    loadConv(model.proj1, "model.decoder_input_proj.1.0", "model.decoder_input_proj.1.1");
-    loadConv(model.proj2, "model.decoder_input_proj.2.0", "model.decoder_input_proj.2.1");
+    loadConv(net.proj0, "model.decoder_input_proj.0.0", "model.decoder_input_proj.0.1");
+    loadConv(net.proj1, "model.decoder_input_proj.1.0", "model.decoder_input_proj.1.1");
+    loadConv(net.proj2, "model.decoder_input_proj.2.0", "model.decoder_input_proj.2.1");
     // Encoder heads used for initial query selection.
-    auto& querySelection = model.querySelection;
+    auto& querySelection = net.querySelection;
     loadLinear(querySelection.proj, "model.enc_output.0");
     loadNorm(querySelection.norm, "model.enc_output.1");
     loadLinear(querySelection.classHead, "model.enc_score_head");
@@ -201,7 +201,7 @@ inline void loadWeights(Model& model, const vai::Checkpoint& ckpt)
     loadLinear(querySelection.bbox1, "model.enc_bbox_head.layers.1");
     loadLinear(querySelection.bbox2, "model.enc_bbox_head.layers.2");
     // Position heads use the same checkpoint keys; box heads are specific to each stage.
-    auto& decoder = model.decoder;
+    auto& decoder = net.decoder;
     auto& values = decoder.valueProjection;
     loadLinear(values, "model.decoder.layers.0.encoder_attn.value_proj");
     for (size_t i = 1; i < decoder.blocks.size(); ++i)
@@ -244,12 +244,11 @@ inline void loadWeights(Model& model, const vai::Checkpoint& ckpt)
 
 }   // namespace model::experimental::rtdetrv2::pekingu
 
-// loadWeights<"pekingu">(model) - composes the path in Checkpoint and loads it.
 template <>
-inline void loadWeights<"pekingu", model::experimental::rtdetrv2::Model>(model::experimental::rtdetrv2::Model& model)
+inline void loadWeights<"pekingu", model::experimental::rtdetrv2::Net>(model::experimental::rtdetrv2::Net& net)
 {
-    std::string dir = std::string(VAI_DATA_DIR "/rtdetrv2/ckpts/") + model.cfg.name;
-    model::experimental::rtdetrv2::pekingu::loadWeights(model, vai::Checkpoint(dir));
+    const std::string dir = std::string(VAI_DATA_DIR "/ckpts/rtdetrv2/pekingu/") + net.modelCfg.variant;
+    model::experimental::rtdetrv2::pekingu::loadWeights(net, vai::Checkpoint(dir));
 }
 
 #endif   // EXPERIMENTAL_RTDETRV2_PEKINGU_WEIGHTS_H
