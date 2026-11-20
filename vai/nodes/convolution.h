@@ -128,6 +128,19 @@ inline bool enableCM(const eva::Device& device, const ConvolutionCaps& caps)
     return device.supportsCooperativeMatrix() && caps.hasCM;
 }
 
+// The convolution kernels fix their cooperative matrices at 16x16x16, so a matrix unit counts only
+// when the device offers that shape (Intel Xe2 and later offer 8x16x16 alone and take the scalar
+// kernels; on them the 16-row tiles came out right in rows 0-7 only).
+inline ConvolutionCaps convolutionCaps(const eva::Device& device)
+{
+    const bool acc16 = supportsCMShape(device, Dtype::Fp16, Dtype::Fp16);
+    const bool acc32 = supportsCMShape(device, Dtype::Fp16, Dtype::Fp32);
+    return {
+        .hasCM = hasCooperativeMatrixUnit(device.vendorID(), device.architectureID()) && (acc16 || acc32),
+        .accFP16 = acc16,
+    };
+}
+
 // Selects the accumulator inside an already established FP16 CM branch.
 inline Dtype selectAccType(const eva::Device& device, const ConvolutionCaps& caps)
 {
@@ -6063,11 +6076,7 @@ inline void Convolution::prepareTensorStorage(const Workload& workload)
 inline void Convolution::prepare()
 {
     const eva::Device currentDevice = device();
-    const uint32_t vendorId = currentDevice.vendorID();
-    const ConvolutionCaps caps{
-        .hasCM = hasCooperativeMatrixUnit(vendorId, currentDevice.architectureID()),
-        .accFP16 = supportsCMShape(currentDevice, Dtype::Fp16, Dtype::Fp16),
-    };
+    const ConvolutionCaps caps = convolutionCaps(currentDevice);
     const Workload workload = makeWorkload();
     validateInputs(workload);
 

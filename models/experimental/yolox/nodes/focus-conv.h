@@ -116,10 +116,7 @@ inline vai::node::Workload FocusConv::makeFocusWorkload() const
 inline FocusConv::Plan FocusConv::selectPlan(const vai::node::Workload& workload) const
 {
     const eva::Device currentDevice = device();
-    const vai::node::ConvolutionCaps caps{
-        .hasCM = vai::node::hasCooperativeMatrixUnit(currentDevice.vendorID(), currentDevice.architectureID()),
-        .accFP16 = vai::node::supportsCMShape(currentDevice, vai::Dtype::Fp16, vai::Dtype::Fp16),
-    };
+    const vai::node::ConvolutionCaps caps = vai::node::convolutionCaps(currentDevice);
 
     Plan plan;
     plan.cooperativeMatrix = workload.wDtype == vai::Dtype::Fp16 && vai::node::enableCM(currentDevice, caps);
