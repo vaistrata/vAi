@@ -23,7 +23,7 @@
 | [LayerNorm](#layernorm) | layer normalization over the feature axis, single kernel | `layer-norm.comp` |
 | [Linear](#linear) | O = I · Wᵀ, split between two output decompositions | `linear-pack-intel.comp`, `linear-preshuffle.comp`, `linear-pack-xe3.comp`, `linear-glu-rows.comp`, `linear-slab.comp`, `cast.comp`, `linear-cm-xe3.comp`, `linear-tile-intel.comp`, `linear-cm-amd.comp`, `linear-cm-nv.comp`, `linear-cm.comp`, `linear-tile.comp`, `linear-reduce.comp` |
 | [Mul](#mul) | Element-wise multiplication | `mul.comp` |
-| [NearestUpsample](#nearestupsample) | Replicates CHW pixels by an integer scale factor. | `upsample.comp` |
+| [NearestUpsample](#nearestupsample) | Replicates spatial pixels by an integer scale factor. | `upsample.comp` |
 | [Permute](#permute) | Permutes the axes of a tensor of any rank. | `permute.comp` |
 | [Pool2d](#pool2d) | 2D pooling with a square kernel (MaxPool2d, AvgPool2d) | `pool2d.comp` |
 | [Reshape](#reshape) | Reshape tensor to specified dimensions | — |
@@ -874,14 +874,14 @@ Inputs must have identical shapes and dtypes.
 
 ## NearestUpsample
 
-Replicates CHW pixels by an integer scale factor.
+Replicates spatial pixels by an integer scale factor.
 
 소스: [`vai/nodes/nearest-upsample.h`](../../vai/nodes/nearest-upsample.h)
 
 **시그니처**
 
-- 입력: in0 [C, H, W]
-- 출력: out0 [C, H*scale, W*scale]
+- 입력: in0 [..., C, H, W]
+- 출력: out0 [..., C, H*scale, W*scale]
 
 **슬롯**
 
