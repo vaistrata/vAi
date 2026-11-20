@@ -70,9 +70,7 @@ Precision was verified through the following steps:
 
 1. Examined tensor dtypes in the ONNX model exported using the official tools.
 2. Inspected the layer implementations and selected kernels in `layers.json` from the built TensorRT engine.
-3. Collected GPU kernels loaded during inference using CUPTI.
-4. Analyzed SASS matrix multiplication instructions (`HMMA.*.F16`, `HMMA.*.F32`) to identify computation precision.
-5. Used `nsys` to identify the kernels actually executed and cross-checked them against the analysis results.
+3. Used `nsys` to identify the kernels actually executed and cross-checked them against the analysis results.
 
 This process distinguished the dtypes defined in the model graph from the computation precision of the GPU kernels actually executed.
 
