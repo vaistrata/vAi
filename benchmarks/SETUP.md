@@ -5,10 +5,15 @@ What the benches compare, and how, is in [README.md](README.md). The vAi benches
 | Benches | Framework | Installation | Model conversion |
 |---|---|---|---|
 | [LLM](#llm-benchmarks) | [llama.cpp](#llamacpp) | [setup-llamacpp.sh](#installation) | [GGUF](#model-conversion) |
+| [VLA](#vla-benchmarks) | [vla.cpp](#vlacpp) | [setup-vlacpp.sh](#installation-1) | [GGUF](#model-download) |
+| [VLA](#vla-benchmarks) | [TensorRT Edge-LLM](#tensorrt-edge-llm) | [setup-trt-edge-llm.sh](#installation-2) | [TensorRT engines](#model-conversion-1) |
+| [VLA](#vla-benchmarks) | [MIGraphX](#migraphx) | [setup-migraphx.sh](#installation-3) | [FP16 ONNX bundle](#model-conversion-2) |
 
 Each framework's setup script installs a pinned release into a user cache outside the repo (`~/.cache/vai/`), where CMake finds it with no extra flags. It installs nothing system-wide: install the **Prerequisites** in the framework's section first. `--uninstall` removes what it installed, and `--help` lists its paths and options. To use your own build of the pinned release instead, point the variable in the `Found by (CMake)` column of the README's Requirements at it.
 
 The vAi sources need GCC 14+ or Clang 18+. Where the default compiler is older, name one when configuring, e.g. `-DCMAKE_CXX_COMPILER=g++-14`.
+
+The shaders need a recent `glslc`. Ubuntu 24.04's (shaderc 2023.8) fails to optimize `linear-cm-amd.comp` ("Cooperative matrix type must be B Type"); the LunarG Vulkan SDK's, or conda-forge's `shaderc` (2026.4 works), builds it. Name it when configuring, e.g. `-DVulkan_GLSLC_EXECUTABLE=<prefix>/bin/glslc`.
 
 > [!WARNING]
 > WSL cannot be benched: its Vulkan runs through a D3D12 translation layer (Mesa dzn). Use a native Windows build.
@@ -153,4 +158,117 @@ python3 -m venv .venv-llamacpp-convert                                   # Windo
 mkdir -p data/benchmarks/<model>/<size>   # Windows: New-Item -ItemType Directory -Force data\benchmarks\<model>\<size>
 # Windows: the same command with .venv-llamacpp-convert\Scripts\python and step 1's $CONVERT
 .venv-llamacpp-convert/bin/python $CONVERT/convert_hf_to_gguf.py data/ckpts/<model>/<source>/<size> --outtype f16 --outfile data/benchmarks/<model>/<size>/model.gguf
+```
+
+## VLA benchmarks
+
+### vla.cpp
+
+#### Installation
+
+**Prerequisites**
+
+- git, CMake 3.22+ and a C++17 compiler
+- CUDA 12 or 13 (`nvcc`; `CUDA_HOME` where it is not on `PATH`)
+- Network access on the first run: vla.cpp fetches its llama.cpp when it configures
+
+[setup-vlacpp.sh](scripts/setup-vlacpp.sh) installs vla.cpp `v0.4.0` as shared libraries on its CUDA backend (it has no Vulkan backend for pi0.5) and links it at `~/.cache/vai/vla.cpp`, where CMake reads `vla_ROOT`. It keeps the clone, and the llama.cpp fetched into its `_deps/`, in `~/.cache/vai/vla.cpp-v0.4.0-src`; only the build trees go after the install.
+
+It builds for one CUDA architecture, the SM without its dot (86 RTX 30, 89 RTX 40, 90 H100, 120 RTX 50), as vla.cpp's README passes it in `CMAKE_CUDA_ARCHITECTURES`. The script asks for it, offering the one `nvidia-smi` reports for GPU `GPU_INDEX` (default 0); `--cuda-arch` or `CUDA_ARCH` answers it up front, and without a terminal the GPU's own is taken. A later run with another architecture rebuilds.
+
+**Linux**
+
+```bash
+./benchmarks/scripts/setup-vlacpp.sh                  # asks for the architecture; clone + CUDA build + install + link, ~20 min
+./benchmarks/scripts/setup-vlacpp.sh --cuda-arch 89   # without asking
+./benchmarks/scripts/setup-vlacpp.sh --keep-build     # keep the build trees too, for a faster rebuild
+./benchmarks/scripts/setup-vlacpp.sh --uninstall
+```
+
+**Windows**: not supported; the VLA comparison benches run on Linux only.
+
+#### Model download
+
+The bench reads `data/benchmarks/pi05/<size>/model.gguf` and loads it in FP16 through its own runtime config, `pi05/vla.cpp/runtime.json`. vla.cpp's pi0.5 GGUFs, converted by vla.cpp, can be downloaded as its [model list](https://github.com/VinRobotics/vla.cpp/blob/v0.4.0/docs/MODELS.md) gives them. The results use the LIBERO one, [vrfai/pi05-libero-gguf](https://huggingface.co/vrfai/pi05-libero-gguf) (`pi05-libero.gguf`, converted from `lerobot/pi05_libero_base`):
+
+```bash
+hf download vrfai/pi05-libero-gguf pi05-libero.gguf --local-dir data/benchmarks/pi05/3B
+mv data/benchmarks/pi05/3B/pi05-libero.gguf data/benchmarks/pi05/3B/model.gguf
+```
+
+### TensorRT Edge-LLM
+
+#### Installation
+
+**Prerequisites**
+
+- git, CMake and a CUDA-compatible C++17 compiler
+- Python 3 with its venv module (Ubuntu: `python3-venv`)
+- CUDA 12 or 13 (`nvcc`; `CUDA_HOME` where it is not on `PATH`)
+- A TensorRT C++ SDK built for that CUDA, with its plugins and ONNX parser (`TRT_PACKAGE_DIR` for an extracted SDK, default `/usr`)
+
+From NVIDIA's CUDA apt repository, pin every package to one release, `libnvinfer-safe-headers-dev` included: left unpinned, apt picks the newest release for it, and the install fails on its dependencies. The results were measured with TensorRT 10.16.1:
+
+```bash
+V=10.16.1.11-1+cuda13.2
+sudo apt-get install libnvinfer-dev=$V libnvinfer-headers-dev=$V libnvinfer-safe-headers-dev=$V libnvinfer10=$V \
+    libnvinfer-plugin-dev=$V libnvinfer-headers-plugin-dev=$V libnvinfer-plugin10=$V \
+    libnvonnxparsers-dev=$V libnvonnxparsers10=$V
+```
+
+[setup-trt-edge-llm.sh](scripts/setup-trt-edge-llm.sh) installs TensorRT Edge-LLM `v0.11.1`: its C++ libraries, the experimental pi0.5 runtime the bench runs and the policy tools (`pi05_policy_build`), with its CuTe DSL kernels for the SM of GPU `GPU_INDEX` (default 0; `--cuda-arch` or `CUDA_ARCH` names another, and a later run with another SM rebuilds). It links the install at `~/.cache/vai/TensorRT-Edge-LLM`, where CMake reads `TensorRTEdgeLLM_ROOT`, and keeps the clone with its submodules in `~/.cache/vai/TensorRT-Edge-LLM-v0.11.1-src`.
+
+**Linux**
+
+```bash
+./benchmarks/scripts/setup-trt-edge-llm.sh                  # clone + CuTe DSL kernels + build + install + link
+./benchmarks/scripts/setup-trt-edge-llm.sh --cuda-arch 120  # another SM than GPU 0's
+./benchmarks/scripts/setup-trt-edge-llm.sh --keep-build     # keep the build tree too, for a faster rebuild
+./benchmarks/scripts/setup-trt-edge-llm.sh --uninstall
+```
+
+**Windows**: not supported; the VLA comparison benches run on Linux only.
+
+#### Model conversion
+
+The bench reads TensorRT engines from `data/benchmarks/pi05/<size>/engines/`, built on the GPU that runs them. Build them with Edge-LLM's official exporter and builder, as its [pi0.5 guide](https://github.com/NVIDIA/TensorRT-Edge-LLM/blob/v0.11.1/docs/source/user_guide/examples/vla/pi05.md) describes. The results use FP16 engines for the `pi05_libero` policy configuration, from `lerobot/pi05_libero_base`.
+
+### MIGraphX
+
+#### Installation
+
+**Prerequisites**
+
+- Linux x86_64 with the amdgpu kernel driver of a GPU that ROCm 10.1 supports
+- `curl`, `dpkg-deb`, `tar` and `sha256sum`
+- A system ROCm, for the HIP headers the bench builds with (`ROCM_PATH`, default `/opt/rocm`)
+
+[setup-migraphx.sh](scripts/setup-migraphx.sh) installs MIGraphX `2.18.0` from AMD's prebuilt files, with no build: its Ubuntu 24.04 packages and, from the ROCm `10.1.0` tarball of the GPU (`--arch`, default the first one), only the runtime MIGraphX loads. It unpacks them without apt or root, links the install at `~/.cache/vai/migraphx`, where CMake reads `migraphx_DIR` ahead of the MIGraphX a system ROCm carries, and keeps the downloads, about 2 GB, in `~/.cache/vai/migraphx-2.18.0-download`. The bench then runs on ROCm 10.1 whichever ROCm the system has.
+
+**Linux**
+
+```bash
+./benchmarks/scripts/setup-migraphx.sh                  # download + verify + unpack + link
+./benchmarks/scripts/setup-migraphx.sh --arch gfx1151   # name the GPU
+./benchmarks/scripts/setup-migraphx.sh --uninstall
+```
+
+**Windows**: not supported; the VLA comparison benches run on Linux only.
+
+#### Model conversion
+
+Each checkpoint is exported to an FP16 ONNX bundle in `data/benchmarks/pi05/<size>/`: prefill and one denoise step as two static graphs, which the bench compiles on its GPU when it starts. MIGraphX has no model-specific exporter ([MIGraphX](https://github.com/ROCm/AMDMIGraphX) · [ONNX export in PyTorch](https://docs.pytorch.org/docs/stable/onnx.html)): it parses an ONNX graph, and a PyTorch model reaches it through `torch.onnx.export`.
+
+> [!NOTE]
+> Neither MIGraphX nor LeRobot provides a pi0.5 implementation or export for MIGraphX. The ONNX export and the MIGraphX runtime the bench uses are this repo's own: [pi05/migraphx/export-onnx.py](pi05/migraphx/export-onnx.py), and the prefill-then-steps loop in `pi05/migraphx/net.h`. The MIGraphX results measure that implementation, not an official one.
+
+`export-onnx.py` exports LeRobot's pi0.5 policy, checks the split against LeRobot's own `sample_actions` in FP32, and writes the graphs in FP16. [pi05/scripts/export-migraphx.sh](pi05/scripts/export-migraphx.sh) runs it in two steps.
+
+**1. Setup**: the Python environment the export checks for (lerobot 0.6.0, transformers 5.5.4, torch 2.8.0 for the CPU, onnx 1.19.0), created in `~/.cache/vai/venv-pi05-export` on the script's first run. The script also finds a C++23 compiler for the export's input helper (g++ 14 or Clang 18; `CXX` names another).
+
+**2. Convert**: once the checkpoint folder holds the files the model's README lists ([pi0.5](pi05/README.md#model-preparation)). The script never overwrites a bundle: remove its files to export again.
+
+```bash
+./benchmarks/pi05/scripts/export-migraphx.sh                            # constants folded, for the default MLIR GEMM path
+./benchmarks/pi05/scripts/export-migraphx.sh -- --no-constant-folding   # for the hipBLASLt GEMM path
 ```
