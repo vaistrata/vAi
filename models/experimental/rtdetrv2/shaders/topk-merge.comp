@@ -1,0 +1,107 @@
+/*=============================================================================
+ topk-merge.comp:
+ Merge two sorted candidate lists, keeping their largest K entries.
+ Input: candidate pairs [M, groups, K].
+ Dispatch: (ceil(2 * K / 64), ceil(groups / 2), M).
+ Output: pairs [M, ceil(groups / 2), K], or values/indices [M, K]
+ on the final pass. Each pair stores (value bits, row-local index).
+=============================================================================*/
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#include "common/spec_constants.h"
+
+layout(local_size_x = 64) in;
+
+layout(constant_id = 0) const uint K = 1;
+layout(constant_id = SPEC_ID_TYPE_I) const uint typeI = 0;
+
+// Intermediate output: interleaved (value bits, index). Final output: value bits.
+layout(set = 0, binding = 0) writeonly buffer O_BUF_U32 { uint bufferO_u32[]; };
+layout(set = 0, binding = 0) writeonly buffer O_BUF_U16 { uint16_t bufferO_u16[]; };
+layout(set = 0, binding = 1) readonly buffer I_BUF_2U32 { uvec2 bufferI_2u32[]; };
+layout(set = 0, binding = 2) writeonly buffer IDX_BUF_U32 { uint bufferIdx_u32[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint groups;
+};
+
+// Pair: (unaltered input value bits, row-local uint32 index).
+// FP16 bits occupy the low 16 bits of the first word; the upper bits are zero.
+// Invalid entries are below EVERY real entry, even NaNs and -infinity.
+const uvec2 TOPK_PADDING = uvec2(0xff800000u, 0xffffffffu);
+
+bool topkBetter(uvec2 a, uvec2 b)
+{
+    if (a.y == 0xffffffffu) return false;
+    if (b.y == 0xffffffffu) return true;
+    // Keep FP16 comparisons in FP16; original value bits still travel unchanged.
+    if (typeI == 1u)
+    {
+        float16_t x = unpackFloat2x16(a.x).x;
+        float16_t y = unpackFloat2x16(b.x).x;
+        bool nx = isnan(x), ny = isnan(y);
+        if (nx != ny) return !nx;
+        if (nx) return a.y < b.y;
+        return x > y || (x == y && a.y < b.y);
+    }
+    float x = uintBitsToFloat(a.x);
+    float y = uintBitsToFloat(b.x);
+    bool nx = isnan(x), ny = isnan(y);
+    if (nx != ny) return !nx;
+    if (nx) return a.y < b.y;
+    // FP32 comparisons may flush subnormals to zero. Distinct nonzero
+    // encodings that compare equal still need their exact numeric order.
+    // Signed zeros remain tied; flipping/inverting the sign maps all other
+    // finite encodings into ascending unsigned order.
+    if (x == y && a.x != b.x &&
+        ((a.x | b.x) & 0x7fffffffu) != 0u)
+    {
+        uint ka = (a.x & 0x80000000u) != 0u ? ~a.x : a.x ^ 0x80000000u;
+        uint kb = (b.x & 0x80000000u) != 0u ? ~b.x : b.x ^ 0x80000000u;
+        return ka > kb;
+    }
+    return x > y || (x == y && a.y < b.y);
+}
+
+void main()
+{
+    uint i = gl_GlobalInvocationID.x, pair = gl_GlobalInvocationID.y;
+    uint row = gl_GlobalInvocationID.z, nextGroups = (groups + 1) / 2;
+    if (i >= 2 * K || pair >= nextGroups) return;
+    uint side = i / K, j = i % K, group = pair * 2 + side;
+    if (group >= groups) return;
+    uint rowBase = row * groups * K;
+    uvec2 value = bufferI_2u32[rowBase + group * K + j];
+    uint other = pair * 2 + (1 - side), lo = 0, hi = other < groups ? K : 0;
+    // rank = own-list rank + number of other-list entries preceding this one.
+    // Identical padding goes left first, avoiding competing output writes.
+    while (lo < hi)
+    {
+        uint mid = (lo + hi) / 2;
+        uvec2 candidate = bufferI_2u32[rowBase + other * K + mid];
+        if (topkBetter(candidate, value) || (side == 1 && all(equal(candidate, value))))
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    uint rank = j + lo;
+    if (rank < K)
+    {
+        if (nextGroups == 1)
+        {
+            if (typeI == 0u)
+                bufferO_u32[row * K + rank] = value.x;
+            else
+                bufferO_u16[row * K + rank] = uint16_t(value.x);
+            bufferIdx_u32[row * K + rank] = value.y;
+        }
+        else
+        {
+            uint outIndex = ((row * nextGroups + pair) * K + rank) * 2;
+            bufferO_u32[outIndex] = value.x;
+            bufferO_u32[outIndex + 1] = value.y;
+        }
+    }
+}

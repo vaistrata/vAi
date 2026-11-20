@@ -1,0 +1,27 @@
+/*=============================================================================
+ query-score.comp:
+ Reduce class logits [N, C] to one maximum score per candidate [N], all FP32.
+ One invocation handles one candidate. Dispatch: dispatch2(N).
+=============================================================================*/
+#version 450
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) writeonly buffer O_BUF_F32 { float scores[]; };
+layout(set = 0, binding = 1) readonly buffer I_BUF_F32 { float logits[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint N;
+    uint C;
+};
+
+void main()
+{
+    uint row = gl_GlobalInvocationID.x;
+    if (row >= N) return;
+
+    float score = -3.402823466e38;
+    for (uint c = 0; c < C; c++)
+        score = max(score, logits[row * C + c]);
+    scores[row] = score;
+}
