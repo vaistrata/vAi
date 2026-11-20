@@ -1,0 +1,72 @@
+/*=============================================================================
+ quantize.comp: an activation as int8 blocks, an fp16 scale per 32
+
+     I [M, K] (typeI) -> inQuant [M, K]: int8 quants, four per int32 word,
+                         then an fp16 scale per block of 32, in the one buffer
+                         (quantize_io.h), as a quantized weight is laid out
+
+ A block is 32 consecutive elements of a row (K % 32 == 0, so a block never
+ crosses rows). Eight threads share a block, a vec4 each: the block's absmax
+ comes from a clustered subgroup max, d = absmax / 127, and each quant is
+ roundEven(x * (1 / d)). Quants are packed with shifts and masks, so the
+ pipeline needs no shaderInt8.
+ - Subgroup size >= 8 (host): a block's eight threads are one cluster.
+ - 128 threads = 16 blocks per workgroup; dispatch (ceil(numBlocks / 16), 1, 1).
+   A count past the X-grid limit folds into z (as linear-slab) and main()
+   re-linearizes.
+=============================================================================*/
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_clustered : require
+#include "common/spec_constants.h"
+#include "common/quantize_io.h"
+
+layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
+
+layout(constant_id = SPEC_ID_TYPE_I) const uint typeI = 0;   // I (input) dtype
+
+layout(set = 0, binding = 0) readonly buffer I_BUF_4F32 { vec4 bufferI_4f32[]; };
+layout(set = 0, binding = 0) readonly buffer I_BUF_4F16 { f16vec4 bufferI_4f16[]; };
+layout(set = 0, binding = 1) writeonly buffer IN_QUANT_BUF { int bufferInQuant[]; };
+layout(set = 0, binding = 1) writeonly buffer IN_SCALE_BUF { float16_t bufferInScale[]; };   // the same buffer: its scales follow the quants
+
+layout(push_constant) uniform PushConstants {
+    uint numBlocks;   // M * K / 32
+};
+
+vec4 readI4(uint i4) { return (typeI == DTYPE_F32) ? bufferI_4f32[i4] : vec4(bufferI_4f16[i4]); }
+
+// Four integral values in [-127, 127] into one word, the lowest first.
+int pack4(vec4 q)
+{
+    const ivec4 c = ivec4(q);
+    return (c.x & 0xFF) | ((c.y & 0xFF) << 8) | ((c.z & 0xFF) << 16) | (c.w << 24);
+}
+
+void main()
+{
+    // x + numWG.x * z re-linearizes the z-split grid (identity when gz == 1).
+    const uint wg    = gl_WorkGroupID.x + gl_NumWorkGroups.x * gl_WorkGroupID.z;
+    const uint tid   = gl_LocalInvocationID.x;
+    const uint block = wg * (gl_WorkGroupSize.x / 8u) + tid / 8u;
+    const uint lane  = tid & 7u;
+
+    // A block's eight threads leave together, so the clusters below stay whole.
+    if (block >= numBlocks)
+        return;
+
+    const vec4 x = readI4(block * 8u + lane);
+    const vec4 a = abs(x);
+    const float amax = subgroupClusteredMax(max(max(a.x, a.y), max(a.z, a.w)), 8);
+    // precise: d and 1 / d stay as written. Folded into 127 / amax, a quant near a
+    // tie would depend on the driver.
+    precise float d  = amax / 127.0;
+    precise float id = (d != 0.0) ? 1.0 / d : 0.0;   // amax 0: every quant 0 either way
+
+    const vec4 q = roundEven(x * id);
+    bufferInQuant[block * 8u + lane] = pack4(q);
+    if (lane == 0u)
+        bufferInScale[SCALE_INDEX_Q8(numBlocks, QUANTIZE_BLOCK, block * QUANTIZE_BLOCK)] = float16_t(d);   // inQuant as numBlocks rows of one block
+}

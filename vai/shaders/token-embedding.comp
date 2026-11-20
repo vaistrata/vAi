@@ -4,7 +4,8 @@
        O[n, d] = scale * W[tokenIds[n], d]                          (hasPosEmbed = 0)
        O[n, d] = scale * W[tokenIds[n], d] + posW[kvCacheCount + n, d]  (= 1)
 
- - W        : [V, D]
+ - W        : [V, D], float (typeW) or Qint8 (quantize, quantize_io.h),
+              dequantized as read
  - posW     : [M, D]   (only read when hasPosEmbed = 1)
  - tokenIds : [..., T] (raw uint32; the leading axes are more sequences)
  - O        : [..., T, D]
@@ -16,13 +17,16 @@
 #extension GL_GOOGLE_include_directive : require
 #extension GL_EXT_shader_16bit_storage : require
 #include "common/spec_constants.h"
+#include "common/quantize_io.h"
 
 layout(local_size_x = 32, local_size_y = 4) in;
 
 layout(constant_id = 0) const uint hasPosEmbed = 0;   // 0: token only, 1: token + positional
 layout(constant_id = 1) const uint batched = 0;       // 0: one sequence, so n is the position
+layout(constant_id = 2) const uint V = 0;             // rows of W: where a quantized W's scales start
 layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0;  // O (output) dtype
-layout(constant_id = SPEC_ID_TYPE_W) const uint typeW = 0;  // W / posW dtype
+layout(constant_id = SPEC_ID_TYPE_W) const uint typeW = 0;  // float W / posW dtype
+layout(constant_id = SPEC_ID_QUANTIZE) const uint quantize = 0;  // W's format, a QUANTIZE_* value
 
 layout(set = 0, binding = 0) buffer O_BUF_F32    { float bufferO_f32[]; };      // embedding [..., T, D]
 layout(set = 0, binding = 0) buffer O_BUF_F16    { float16_t bufferO_f16[]; };
@@ -31,6 +35,7 @@ layout(set = 0, binding = 1) buffer I_BUF        { uint bufferI[]; };           
 //////////////////////////////////////////////////////////////////////////////
 layout(set = 0, binding = 2) buffer W_BUF_F32    { float bufferW_f32[]; };      // token weight [V, D]
 layout(set = 0, binding = 2) buffer W_BUF_F16    { float16_t bufferW_f16[]; };
+layout(set = 0, binding = 2) buffer W_BUF_I32    { int bufferW_i32[]; };        // a quantized W's quants; its scales through W_BUF_F16
 //////////////////////////////////////////////////////////////////////////////
 layout(set = 0, binding = 3) buffer POSW_BUF_F32 { float bufferPosW_f32[]; };   // positional weight [M, D]
 layout(set = 0, binding = 3) buffer POSW_BUF_F16 { float16_t bufferPosW_f16[]; };
@@ -44,7 +49,12 @@ layout(push_constant) uniform PushConstants {
     float scale;
 };
 
-float readW(uint i) { return (typeW == DTYPE_F32) ? bufferW_f32[i] : float(bufferW_f16[i]); }
+float readW(uint i)
+{
+    if (quantize == QUANTIZE_Q8)
+        return READ_I8(bufferW_i32, i) * float(bufferW_f16[SCALE_INDEX_Q8(V, D, i)]);
+    return (typeW == DTYPE_F32) ? bufferW_f32[i] : float(bufferW_f16[i]);
+}
 float readPosW(uint i) { return (typeW == DTYPE_F32) ? bufferPosW_f32[i] : float(bufferPosW_f16[i]); }
 void writeO(uint i, float v) { if (typeO == DTYPE_F32) bufferO_f32[i] = v; else bufferO_f16[i] = float16_t(v); }
 

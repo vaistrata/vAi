@@ -13,11 +13,13 @@
 
  - O [M, N] (typeO), I [M, K] (typeI), W [N, K] (typeW) and bias (typeB) are
    fp32 or fp16 via same-binding buffer aliases; accumulation is fp32.
+ - Qint8 W (quantize == QUANTIZE_Q8): a K_PER_ITER chunk takes its block's
+   scale (quantize_io.h). Always aligned (K % 32 == 0); the host picks wgN.
  - bias B (typeB) is [N] or [M, N]; residual R
    (typeO) is [M, N]. A [M, N] operand may be shorter rows that repeat over M
    (biasElems / residualElems).
  - M is a spec constant, not a push constant: one W stream feeds M dot chains.
- - aligned == 1 (K % 4 == 0): direct vec4 loads, no masking.
+ - aligned == 1 (K % K_PER_ITER == 0): direct vec4 loads, no masking.
    aligned == 0: scalar-composed loads, K-tail masked on the last iteration.
  - wgN == 2 for fp16 W. An N that is not a multiple of wgN leaves a short
    last group, which main() hands a runtime count.
@@ -32,6 +34,7 @@
 #extension GL_EXT_control_flow_attributes : require
 #include "common/activation.h"
 #include "common/spec_constants.h"
+#include "common/quantize_io.h"
 
 layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;   // = wgSize (same SpecId)
 
@@ -49,9 +52,10 @@ layout(constant_id = 9) const uint typeB = 0;          // bias dtype
 layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0;  // O (output) dtype
 layout(constant_id = SPEC_ID_TYPE_I) const uint typeI = 0;  // I (input) dtype
 layout(constant_id = SPEC_ID_TYPE_W) const uint typeW = 0;  // W (weight) dtype
-layout(constant_id = SPEC_ID_ALIGNED) const uint aligned = 1;  // 1: K % 4 == 0, 0: masked K tail
+layout(constant_id = SPEC_ID_ALIGNED) const uint aligned = 1;  // 1: K % K_PER_ITER == 0, 0: masked K tail
+layout(constant_id = SPEC_ID_QUANTIZE) const uint quantize = 0;  // W's format, a QUANTIZE_* value
 
-const uint K_PER_ITER = 4;    // k elements per thread per iteration (ggml non-quant width)
+const uint K_PER_ITER = (quantize == QUANTIZE_Q8) ? 8u : 4u;   // k elements per thread per iteration: four floats or two int8 words
 
 layout(set = 0, binding = 0) writeonly buffer O_BUF_F32  { float bufferO_f32[]; };
 layout(set = 0, binding = 0) writeonly buffer O_BUF_F16  { float16_t bufferO_f16[]; };
@@ -65,6 +69,7 @@ layout(set = 0, binding = 2) readonly buffer W_BUF_F32   { float bufferW_f32[]; 
 layout(set = 0, binding = 2) readonly buffer W_BUF_4F32  { vec4 bufferW_4f32[]; };
 layout(set = 0, binding = 2) readonly buffer W_BUF_F16   { float16_t bufferW_f16[]; };
 layout(set = 0, binding = 2) readonly buffer W_BUF_4F16  { f16vec4 bufferW_4f16[]; };
+layout(set = 0, binding = 2) readonly buffer W_BUF_I32   { int bufferW_i32[]; };       // a quantized W's quants; its scales through W_BUF_F16
 //////////////////////////////////////////////////////////////////////////////
 layout(set = 0, binding = 3) readonly buffer BIAS_BUF_32 { float bufferBias_f32[]; };
 layout(set = 0, binding = 3) readonly buffer BIAS_BUF_16 { float16_t bufferBias_f16[]; };
@@ -80,8 +85,12 @@ layout(push_constant) uniform PushConstants {
 
 float readI(uint i)    { return (typeI == DTYPE_F32) ? bufferI_f32[i] : float(bufferI_f16[i]); }
 vec4  readI4(uint i4)  { return (typeI == DTYPE_F32) ? bufferI_4f32[i4] : vec4(bufferI_4f16[i4]); }
+// The quants only: dotKChunk applies the scale.
+vec4  readW4I8(uint i4) { const int w = bufferW_i32[i4]; return READ_4I8(w); }
+float readWScale(uint e) { return (quantize == QUANTIZE_Q8) ? float(bufferW_f16[SCALE_INDEX_Q8(N, K, e)]) : 1.0; }
+
 float readW(uint i)    { return (typeW == DTYPE_F32) ? bufferW_f32[i] : float(bufferW_f16[i]); }
-vec4  readW4(uint i4)  { return (typeW == DTYPE_F32) ? bufferW_4f32[i4] : vec4(bufferW_4f16[i4]); }
+vec4  readW4(uint i4)  { return (quantize == QUANTIZE_Q8) ? readW4I8(i4) : (typeW == DTYPE_F32) ? bufferW_4f32[i4] : vec4(bufferW_4f16[i4]); }
 // Each operand's element for output index i (row-major over [M, N]).
 uint biasIdx(uint i)     { return (biasElems == 0u) ? i : i % biasElems; }
 uint residualIdx(uint i) { return (residualElems == 0u) ? i : i % residualElems; }
@@ -122,15 +131,20 @@ void dotKChunk(inout float sums[M][wgN],
                uint n0, uint nCount, uint tid, uint it, bool lastIter)
 {
     const uint k0 = K_PER_ITER * (it * wgSize + tid);
+    const bool twoWords = K_PER_ITER == 8u;
 
     [[unroll]] for (uint j = 0; j < M; j++)
     {
         vec4 iv = readI4Masked(j * K, k0, lastIter);
+        const vec4 iv1 = twoWords ? readI4Masked(j * K, k0 + 4u, lastIter) : vec4(0.0);
 
         uint wRow = n0 * K;
         [[unroll]] for (uint n = 0; n < nCount; n++)
         {
-            sums[j][n] += dot(readW4Masked(wRow, k0, lastIter), iv);
+            float acc = dot(readW4Masked(wRow, k0, lastIter), iv);
+            if (twoWords)
+                acc += dot(readW4Masked(wRow, k0 + 4u, lastIter), iv1);
+            sums[j][n] += acc * readWScale(wRow + k0);
             wRow += K;
         }
     }

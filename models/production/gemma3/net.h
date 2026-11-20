@@ -67,6 +67,7 @@ struct RuntimeConfig
     vai::Dtype kvCacheDtype = vai::Dtype::Fp16;
     uint32_t maxRuntimeContext = uint32_t(-1);
     uint32_t prefillChunk = 512;   // 0: the sliding window; an image never splits
+    vai::QuantizeType quantizeType = vai::QuantizeType::None;   // the text weights only
 };
 
 

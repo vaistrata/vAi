@@ -1,0 +1,212 @@
+/*=============================================================================
+ linear-tile-q.comp: tile (2D) output decomposition over quantized weights
+     and a Qint8 activation, shared-memory staged
+
+     O[m, n] = sum_b dW[n, b] * dX[m, b] * sum_{k in b} W[n, k] * X[m, k]
+
+     M = flattened batch, N = outDim, K = inDim
+     W [N, K] and X = inQuant [M, K] are int8 quants, four per int32 word
+     (inQuant comes from quantize.comp; the scales dX and dW follow the quants
+     in inQuant's and W's buffers, quantize_io.h). A k-block is one block of 32
+     (wgK == 32): a workgroup stages the block's W rows and inQuant rows as
+     words and each row's scale, and every thread accumulates a tM x tN
+     register tile per piece as eight dotPacked4x8EXT products per (m, n)
+     pair, scaled by both rows' scales, in fp32. The tile hierarchy, the
+     loaders' thread mapping, split-K and the store are linear-tile's.
+
+ Requirements: K and splitSize % 32 == 0 (host). M / N tail rows are
+ zero-filled (with robustBufferAccess == 1 the row guards fold away as in
+ linear-tile).
+ Dispatch (host): (ceil(N / wgN), ceil(M / wgM), ceil(K / splitSize))
+=============================================================================*/
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_control_flow_attributes : enable
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_integer_dot_product : require
+#include "common/spec_constants.h"
+#include "common/quantize_io.h"
+
+layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;   // = wgSize (same SpecId)
+
+layout(constant_id = 0)  const uint wgSize   = 128;           // threads per workgroup (= local_size_x)
+layout(constant_id = 1)  const uint sgSize   = 32;            // lanes per subgroup tile (not forced on the pipeline)
+layout(constant_id = 2)  const uint wgM      = 64;            // workgroup tile size along M
+layout(constant_id = 3)  const uint wgN      = 64;            // workgroup tile size along N
+layout(constant_id = 4)  const uint wgK      = 32;            // k-block size (= one scale block)
+layout(constant_id = 5)  const uint sgM      = 32;            // subgroup tile size along M
+layout(constant_id = 6)  const uint sgN      = 32;            // subgroup tile size along N
+layout(constant_id = 7)  const uint tM       = 4;             // thread tile size along M
+layout(constant_id = 8)  const uint tN       = 2;             // thread tile size along N
+layout(constant_id = 9)  const uint sgpMIter = 2;             // pieces per subgroup tile along M (= sgM / sgpM)
+layout(constant_id = 10) const uint sgpNIter = 2;             // pieces per subgroup tile along N (= sgN / sgpN)
+layout(constant_id = 12) const uint robustBufferAccess = 0;   // robust buffer access (0: disabled, 1: enabled)
+
+layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0;  // O (output) dtype
+
+const uint WORDS        = wgK / 4;      // words per row per k-block
+const uint SHMEM_STRIDE = WORDS + 1;    // +1 keeps a row's reads off one bank
+
+layout(set = 0, binding = 0) writeonly buffer O_BUF_F32 { float bufferO_f32[]; };
+layout(set = 0, binding = 0) writeonly buffer O_BUF_F16 { float16_t bufferO_f16[]; };
+layout(set = 0, binding = 1) readonly buffer IN_QUANT_BUF { int bufferInQuant[]; };         // inQuant [M, K] as words
+layout(set = 0, binding = 1) readonly buffer IN_SCALE_BUF { float16_t bufferInScale[]; };   // the same buffer: its scales follow the quants
+layout(set = 0, binding = 2) readonly buffer W_BUF        { int bufferW[]; };               // weight [N, K] as words
+layout(set = 0, binding = 2) readonly buffer W_SCALE_BUF  { float16_t bufferWScale[]; };    // the same buffer: its scales follow the quants
+
+layout(push_constant) uniform PushConstants {
+    uint M;
+    uint N;
+    uint K;
+    uint splitSize;   // K span per workgroup-z (= K without splitting)
+};
+
+void writeO(uint i, float v) { if (typeO == DTYPE_F32) bufferO_f32[i] = v; else bufferO_f16[i] = float16_t(v); }
+
+// One k-block of W rows (tileA) and inQuant rows (tileB) as words, and each
+// row's scale.
+shared int   tileA[wgN * SHMEM_STRIDE];
+shared int   tileB[wgM * SHMEM_STRIDE];
+shared float tileAs[wgN];
+shared float tileBs[wgM];
+
+// A row's first thread also stages its scale. pos is a cursor in 8-quant units.
+void W_to_tileA(const uint pos_a, const uint row, const uint col, const uint idx_n, const uint block)
+{
+    const bool live = robustBufferAccess != 0 || idx_n < N;
+    const uint idx  = pos_a + col * (K / 8) + row;
+    tileA[col * SHMEM_STRIDE + row * 2    ] = live ? bufferW[2 * idx    ] : 0;
+    tileA[col * SHMEM_STRIDE + row * 2 + 1] = live ? bufferW[2 * idx + 1] : 0;
+    if (row == 0)
+        tileAs[col] = live ? float(bufferWScale[SCALE_INDEX_Q8(N, K, idx_n * K + block)]) : 0.0;
+}
+
+void inQuant_to_tileB(const uint pos_b, const uint row, const uint col, const uint idx_m, const uint block)
+{
+    const bool live = robustBufferAccess != 0 || idx_m < M;
+    const uint idx  = pos_b + col * (K / 8) + row;
+    tileB[col * SHMEM_STRIDE + row * 2    ] = live ? bufferInQuant[2 * idx    ] : 0;
+    tileB[col * SHMEM_STRIDE + row * 2 + 1] = live ? bufferInQuant[2 * idx + 1] : 0;
+    if (row == 0)
+        tileBs[col] = live ? float(bufferInScale[SCALE_INDEX_Q8(M, K, idx_m * K + block)]) : 0.0;
+}
+
+void main()
+{
+    const uint nTile = gl_WorkGroupID.x;   // which wgN-wide slice of N this workgroup owns
+    const uint mTile = gl_WorkGroupID.y;   // which wgM-wide slice of M this workgroup owns
+
+    // Split-K: workgroup z accumulates only its own K span.
+    const uint startK = gl_WorkGroupID.z * splitSize;
+    const uint endK   = min(K, startK + splitSize);
+
+    // Cooperative loading: wgK / 8 threads per row, the workgroup walks the
+    // rows loadstride at a time (= linear-tile's aligned mapping).
+    const uint loadr      = gl_LocalInvocationID.x % (wgK / 8);
+    const uint loadc      = gl_LocalInvocationID.x / (wgK / 8);
+    const uint loadstride = wgSize * 8 / wgK;
+
+    uint pos_a = nTile * wgN * (K / 8) + startK / 8;   // read cursor into W (8-quant units)
+    uint pos_b = mTile * wgM * (K / 8) + startK / 8;   // read cursor into inQuant (8-quant units)
+
+    // This thread's place in the hierarchy: workgroup -> subgroup -> piece -> thread.
+    const uint sgpM = sgM / sgpMIter;   // piece size along M
+    const uint sgpN = sgN / sgpNIter;   // piece size along N
+
+    const uint sgIdx = gl_LocalInvocationID.x / sgSize;   // subgroup index within the workgroup
+    const uint tis   = gl_LocalInvocationID.x % sgSize;   // thread index within the subgroup
+
+    const uint tisn = tis % (sgpN / tN);     // thread position in a piece, along N
+    const uint tism = tis / (sgpN / tN);     // thread position in a piece, along M
+
+    const uint sg_n = sgIdx % (wgN / sgN);   // subgroup position in the workgroup tile, along N
+    const uint sg_m = sgIdx / (wgN / sgN);   // subgroup position in the workgroup tile, along M
+
+    const uint a_row0 = sg_n * sgN + tisn * tN;   // this thread's first W row (within the workgroup tile)
+    const uint b_row0 = sg_m * sgM + tism * tM;   // this thread's first inQuant row (within the workgroup tile)
+
+    float sums[sgpMIter * tM * sgpNIter * tN];      // [sgpMIter][tM][sgpNIter][tN], fp32
+    int   cache_a[sgpNIter * tN * WORDS];           // this thread's W rows for one k-block
+    float cache_as[sgpNIter * tN];                  // ... and their scales
+    int   cache_b[WORDS];                           // one inQuant row for one k-block
+
+    [[unroll]] for (uint i = 0; i < sgpMIter * tM * sgpNIter * tN; i++)
+        sums[i] = 0.0;
+
+    // Stage one k-block of W and inQuant into shared memory, accumulate over it, repeat.
+    for (uint block = startK; block < endK; block += wgK)
+    {
+        [[unroll]] for (uint l = 0; l < wgN; l += loadstride)
+            W_to_tileA(pos_a, loadr, loadc + l, nTile * wgN + loadc + l, block);
+
+        [[unroll]] for (uint l = 0; l < wgM; l += loadstride)
+            inQuant_to_tileB(pos_b, loadr, loadc + l, mTile * wgM + loadc + l, block);
+
+        barrier();
+
+        pos_a += wgK / 8;
+        pos_b += wgK / 8;
+
+        // Pull this thread's W rows into registers.
+        [[unroll]] for (uint pn = 0; pn < sgpNIter; pn++)
+        {
+            [[unroll]] for (uint j = 0; j < tN; j++)
+            {
+                const uint row = a_row0 + pn * sgpN + j;
+                [[unroll]] for (uint w = 0; w < WORDS; w++)
+                    cache_a[(pn * tN + j) * WORDS + w] = tileA[row * SHMEM_STRIDE + w];
+                cache_as[pn * tN + j] = tileAs[row];
+            }
+        }
+
+        // Multiply each of this thread's inQuant rows against the cached W rows:
+        // the block's integer dot, then both scales.
+        [[unroll]] for (uint pm = 0; pm < sgpMIter; pm++)
+        {
+            [[unroll]] for (uint cm = 0; cm < tM; cm++)
+            {
+                const uint row = b_row0 + pm * sgpM + cm;
+                [[unroll]] for (uint w = 0; w < WORDS; w++)
+                    cache_b[w] = tileB[row * SHMEM_STRIDE + w];
+                const float bs = tileBs[row];
+
+                [[unroll]] for (uint pn = 0; pn < sgpNIter; pn++)
+                {
+                    [[unroll]] for (uint cn = 0; cn < tN; cn++)
+                    {
+                        const uint ca = pn * tN + cn;
+                        int q = 0;
+                        [[unroll]] for (uint w = 0; w < WORDS; w++)
+                            q += dotPacked4x8EXT(cache_a[ca * WORDS + w], cache_b[w]);
+                        sums[(pm * tM + cm) * sgpNIter * tN + ca] += float(q) * (cache_as[ca] * bs);
+                    }
+                }
+            }
+        }
+
+        barrier();
+    }
+
+    // Store. O[m, n] lives at m * N + n; stores are masked against the
+    // M / N tails. Split-K stores its partials to P[z, M, N] instead.
+    const uint n0   = nTile * wgN + a_row0;   // this thread's first output, along N (global)
+    const uint m0   = mTile * wgM + b_row0;   // this thread's first output, along M (global)
+    const uint zOff = gl_WorkGroupID.z * M * N;
+
+    [[unroll]] for (uint pm = 0; pm < sgpMIter; pm++)
+    {
+        [[unroll]] for (uint pn = 0; pn < sgpNIter; pn++)
+        {
+            const uint m_sgp = m0 + pm * sgpM;
+            const uint n_sgp = n0 + pn * sgpN;
+            [[unroll]] for (uint cm = 0; cm < tM; cm++)
+            {
+                [[unroll]] for (uint cn = 0; cn < tN; cn++)
+                {
+                    if (m_sgp + cm < M && n_sgp + cn < N)
+                        writeO(zOff + (m_sgp + cm) * N + n_sgp + cn, sums[(pm * tM + cm) * sgpNIter * tN + pn * tN + cn]);
+                }
+            }
+        }
+    }
+}

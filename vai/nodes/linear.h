@@ -55,16 +55,25 @@ namespace vai::node {
   [M, N] or rows that repeat over M: [N], or one image's position table under
   a batch. The "bias" slot always exists; the bias applies only when the
   weight loader filled it.
+
+  A quantized weight is a "weight" tensor of dtype Dtype::Qint8: [N, K] int8
+  quants, then in the same buffer one fp16 scale per 32 elements of a row. The
+  float kernels dequantize it as they load, or once into the packed copy on
+  Strix. Where the device runs the packed 4x8 signed integer dot product
+  natively, an integer kernel (linear-slab-q, linear-tile-q) can run instead,
+  reading in0 quantized into the temporary "inQuant" (useIntegerDot()).
 =============================================================================*/
 class Linear : public vai::Node
 {
     eva::ComputePipeline pipeTile;
     eva::ComputePipeline pipeSlab;
     eva::ComputePipeline pipeReduce;
+    eva::ComputePipeline pipeQuant_;
     eva::DescriptorSet descSetTile;
     eva::DescriptorSet descSetAmd_;
     eva::DescriptorSet descSetSlab;
     eva::DescriptorSet descSetReduce;
+    eva::DescriptorSet descSetQuant_;
 
 public:
     // The device's coopmat GEMM capability. The reported (M, N, K) maps to
@@ -231,6 +240,7 @@ public:
         uint32_t biasRepeat = 0;
         uint32_t residualRepeat = 0;
         vai::Dtype iDtype = vai::Dtype::None;
+        bool intDot = false;   // linear-slab-q in place of linear-slab
 
         bool operator==(const PipeParamsSlab&) const = default;
     };
@@ -240,6 +250,13 @@ public:
         uint32_t residualRepeat = 0;
 
         bool operator==(const PipeParamsReduce&) const = default;
+    };
+
+    struct PipeParamsQuant
+    {
+        vai::Dtype iDtype = vai::Dtype::None;
+
+        bool operator==(const PipeParamsQuant&) const = default;
     };
 
     // Intel scalar path (linear-tile-intel): tileB rows x 32 columns per subgroup.
@@ -290,6 +307,9 @@ public:
 
 private:
     vai::Dtype accDtype_ = vai::Dtype::None;   // None: FP32 on AMD, else the weight's dtype
+
+    // N positions per slab workgroup for the current shape.
+    uint32_t slabWgN(uint32_t M);
 
     // Intel path: the "weight" slot rewritten into linear-tile-intel's layout,
     // [ceil(N / 32), ceil(K / 2), 64], once (the first prepare).
@@ -343,8 +363,12 @@ private:
     PipeParamsTile pipeParamsTile;
     PipeParamsSlab pipeParamsSlab;
     PipeParamsReduce pipeParamsReduce;
+    PipeParamsQuant pipeParamsQuant_;
     uint32_t splitSize  = 0;  // K length per split for the current shape (= K when not splitting)
     uint32_t splitCount = 1;
+
+    QuantizeType quantizeType_ = QuantizeType::None;   // W's format (None: float), set by prepare()
+    bool intDot_ = false;   // an integer kernel runs, reading the quantized in0; set by prepare()
 };
 
 
@@ -2091,6 +2115,58 @@ inline uint32_t otherLinearSlabWgSize(uint32_t K, uint32_t N, uint32_t sgSize, e
 
 
 /////////////////////////////////////////////////////////////////////////////////////////
+// Quantized weights: the integer kernels' rule and the slab's wgN
+/////////////////////////////////////////////////////////////////////////////////////////
+
+// Whether a quantized W takes the integer kernels; quantize.comp needs a subgroup size >= 8.
+// It also needs the clustered subgroup operations, which eva does not expose: taken as supported.
+// TODO (eva): the clustered-operations query.
+inline bool useIntegerDot(eva::Device device, uint32_t M, uint32_t K)
+{
+    if (!device.supportsDot4x8PackedSignedAccelerated() || device.subgroupSize() < 8u)
+        return false;
+
+    if (M > 1)
+        return true;
+
+    switch (device.vendorID())
+    {
+    case eva::VENDOR_ID::NVIDIA:
+        return K > 4096u && !device.supportsCooperativeMatrix();
+    case eva::VENDOR_ID::AMD:
+        return K >= 2048u && device.architectureID() == eva::Architecture::AMD_GCN;
+    case eva::VENDOR_ID::INTEL:
+        return K >= 2048u && device.driverID() != eva::DRIVER_ID::INTEL_PROPRIETARY_WINDOWS;
+    default:
+        return true;
+    }
+}
+
+// wgN when the float slab (linear-slab) reads a quantized W.
+inline uint32_t quantSlabWgN(eva::Device device)
+{
+    if (device.vendorID() == eva::VENDOR_ID::INTEL)
+        return 2u;
+    if (device.architectureID() == eva::Architecture::AMD_GCN)
+        return 2u;
+    return 1u;
+}
+
+// wgN of the integer slab (linear-slab-q).
+inline uint32_t intDotSlabWgN(eva::Device device, uint32_t M)
+{
+    if (device.vendorID() == eva::VENDOR_ID::INTEL)
+        return 2u;
+    const eva::Architecture arch = device.architectureID();
+    if (arch == eva::Architecture::AMD_GCN)
+        return 4u;
+    if (arch == eva::Architecture::AMD_POST_RDNA2 && M >= 4u)
+        return 4u;
+    return 1u;
+}
+
+
+/////////////////////////////////////////////////////////////////////////////////////////
 // Tile, split count and slab size: the vendor decides
 /////////////////////////////////////////////////////////////////////////////////////////
 
@@ -2141,6 +2217,17 @@ inline Linear::Linear(Config config)
 
     addSlot("bias", NodeSlot::persistent);
     if (config_.acceptResidual) addSlot("residual", NodeSlot::input);
+
+    addSlot("inQuant", NodeSlot::temporary);   // in0 as Qint8 [M, K], assigned only when an integer kernel runs
+}
+
+inline uint32_t Linear::slabWgN(uint32_t M)
+{
+    if (intDot_)
+        return intDotSlabWgN(device(), M);
+    if (quantizeType_ != QuantizeType::None)
+        return quantSlabWgN(device());
+    return ((*this)["weight"].dtype() == Dtype::Fp16) ? 2u : 1u;   // fp16 W pairs N positions
 }
 
 inline bool Linear::weightPackedIntel() const
@@ -2237,8 +2324,14 @@ inline Tensor Linear::packWeightAmd(const Tensor& source, WeightLayout target, e
         packed.numBytes(),
         packed.numBytes()));
     const auto destination = packed.buffer();
+    // Only Fragments and PermuteN dequantize as they pack: Rows and Kn copy fp16 words.
+    const bool quant = isQuantized(source.dtype());
+    VAI_ASSERT(!quant || target == WeightLayout::Fragments || target == WeightLayout::PermuteN);
     auto pipe = pipelinePool().request(
-        "linear-preshuffle", { eva::constant_id<0>(target), eva::constant_id<SPEC_ID_TYPE_W>(source.dtype()) });
+        "linear-preshuffle",
+        { eva::constant_id<0>(target),
+          eva::constant_id<SPEC_ID_TYPE_W>(quant ? Dtype::Fp16 : source.dtype()),
+          eva::constant_id<SPEC_ID_QUANTIZE>(quantizeTypeFromDtype(source.dtype())) });
     auto set = gVaiDestSetPool(pipe.descSetLayout(0));
     set.write({ destination, source.buffer() });
     const uint32_t constants[] = { N, K, kb };
@@ -2310,23 +2403,32 @@ inline void Linear::prepare()
     VAI_ASSERT(inTen.shape().back() == K);
 
     const Dtype iDtype = inTen.dtype();
+
     const AmdLinearDevice chip = amdLinearDevice(device());
     const bool strix = chip != AmdLinearDevice::Other;
     // A packed Strix slot is fp16; the tile is still chosen by the dtype the
     // loader gave, which the Rows weight keeps.
-    const Dtype wDtype =
+    const Dtype wLoaded =
         strix && weightLayoutAmd() != WeightLayout::Rows && rowWeight_.validShape() ? rowWeight_.dtype() : wTen.dtype();
+    // For a quantized W, wDtype is the float dtype it would have loaded as.
+    const bool quant = isQuantized(wLoaded);
+    const Dtype wDtype = quant ? wDefaultDtype() : wLoaded;
     const bool amd = device().vendorID() == eva::VENDOR_ID::AMD;
     const Dtype accDtype = (accDtype_ == Dtype::None) ? (amd ? Dtype::Fp32 : wDtype) : accDtype_;
 
+    quantizeType_ = quantizeTypeFromDtype(wLoaded);
+    intDot_ = false;
+
     const auto& inShape = inTen.shape();
     uint32_t M = outerSize(inShape);
-    intel_ = useIntelTile(device());
+    intel_ = !quant && useIntelTile(device());   // linear-tile-intel reads a packed float W
     if (intel_ && wTen.isShapeOf(N, K))
         packWeightIntel();
     VAI_ASSERT(strix || (intel_ ? weightPackedIntel() : wTen.isShapeOf(N, K)));
     if (strix && useSlabPath(M))
         repackWeightAmd(WeightLayout::Rows);
+
+    const bool useIntDot = quant && useIntegerDot(device(), M, K);
 
     // An operand block that covers O is 0, so the shader indexes it directly;
     // a shorter one ([N], or one image's rows) is its length, read modulo.
@@ -2358,30 +2460,38 @@ inline void Linear::prepare()
         // the tile params below; run() only re-derives wgN.
         const uint32_t sgSize = ggmlSlabSgSize(device());
         const uint32_t wgSize = selectLinearSlabWgSize(K, N, sgSize, device());
-        const uint32_t wgN = (wDtype == Dtype::Fp16) ? 2u : 1u;   // fp16 W pairs N positions
-        const bool     aligned = (K % 4 == 0);   // K_PER_ITER = 4 wide loads
+        intDot_ = useIntDot;
+        const uint32_t wgN = slabWgN(M);
+        const bool aligned = (K % (quant ? 8u : 4u) == 0);   // K_PER_ITER-wide loads
 
-        const PipeParamsSlab p = { .M = M, .biasRepeat = biasElems, .residualRepeat = residualElems, .iDtype = iDtype };
+        const PipeParamsSlab p = {
+            .M = M,
+            .biasRepeat = biasElems,
+            .residualRepeat = residualElems,
+            .iDtype = iDtype,
+            .intDot = intDot_,
+        };
         if (!pipeSlab || p != pipeParamsSlab)
         {
             pipeParamsSlab = p;
 
             // clang-format off
-            pipeSlab = pipelinePool().request("linear-slab", {
-                eva::constant_id<0>(wgSize),                          // wgSize (= local_size_x)
-                eva::constant_id<1>(sgSize),                          // sgSize (pinned subgroup size)
-                eva::constant_id<2>(M),                               // M (flattened batch)
-                eva::constant_id<3>(wgN),                             // wgN
-                eva::constant_id<4>(hasBias() ? 1u : 0u),             // hasBias
-                eva::constant_id<5>(biasElems),                       // bias repeat (0: covers O)
-                eva::constant_id<6>(config_.acceptResidual ? 1u : 0u),   // hasResidual
-                eva::constant_id<7>(residualElems),                   // residual repeat (0: covers O)
-                eva::constant_id<8>((uint32_t) config_.residualOrder),   // residualOrder
-                eva::constant_id<9>(bDtype),                          // typeB (bias)
-                eva::constant_id<SPEC_ID_TYPE_O>(oDtype),     // typeO
-                eva::constant_id<SPEC_ID_TYPE_I>(iDtype),             // typeI
-                eva::constant_id<SPEC_ID_TYPE_W>(wDtype),             // typeW
-                eva::constant_id<SPEC_ID_ALIGNED>(aligned ? 1u : 0u), // aligned (K % 4 == 0)
+            pipeSlab = pipelinePool().request(intDot_ ? "linear-slab-q" : "linear-slab", {
+                eva::constant_id<0>(wgSize),                                      // wgSize (= local_size_x)
+                eva::constant_id<1>(sgSize),                                      // sgSize (pinned subgroup size)
+                eva::constant_id<2>(M),                                           // M (flattened batch)
+                eva::constant_id<3>(wgN),                                         // wgN
+                eva::constant_id<4>(hasBias() ? 1u : 0u),                         // hasBias
+                eva::constant_id<5>(biasElems),                                   // bias repeat (0: covers O)
+                eva::constant_id<6>(config_.acceptResidual ? 1u : 0u),            // hasResidual
+                eva::constant_id<7>(residualElems),                               // residual repeat (0: covers O)
+                eva::constant_id<8>((uint32_t) config_.residualOrder),            // residualOrder
+                eva::constant_id<9>(bDtype),                                      // typeB (bias)
+                eva::constant_id<SPEC_ID_TYPE_O>(oDtype),                         // typeO
+                eva::constant_id<SPEC_ID_TYPE_I>(iDtype),                         // typeI
+                eva::constant_id<SPEC_ID_TYPE_W>(wDtype),                         // typeW
+                eva::constant_id<SPEC_ID_ALIGNED>(aligned ? 1u : 0u),             // aligned (K % K_PER_ITER == 0)
+                eva::constant_id<SPEC_ID_QUANTIZE>(quantizeType_),                // quantize (W's format)
                 eva::constant_id<SPEC_ID_EPILOGUE>((uint32_t) config_.epilogue)   // epilogue
             }, {
                 .requiredSubgroupSize = sgSize,
@@ -2410,11 +2520,11 @@ inline void Linear::prepare()
                 pipeParamsIntel = pi;
                 // clang-format off
                 pipeTile = pipelinePool().request("linear-tile-intel", {
-                    eva::constant_id<7>(pi.tileB),                          // tileB
-                    eva::constant_id<10>(pi.bandTiles),                     // bandTiles
-                    eva::constant_id<11>(pi.accDtype),                      // accType
+                    eva::constant_id<7>(pi.tileB),                  // tileB
+                    eva::constant_id<10>(pi.bandTiles),             // bandTiles
+                    eva::constant_id<11>(pi.accDtype),              // accType
                     eva::constant_id<SPEC_ID_TYPE_O>(oDtype),       // typeO
-                    eva::constant_id<SPEC_ID_TYPE_I>(iDtype),               // typeI
+                    eva::constant_id<SPEC_ID_TYPE_I>(iDtype),       // typeI
                     eva::constant_id<SPEC_ID_TYPE_W>(wDtype)        // typeW
                 }, {
                     .requiredSubgroupSize = 16,
@@ -2429,18 +2539,41 @@ inline void Linear::prepare()
         {
             // fp32 x fp32 on the scalar tile kernel stages and accumulates fp32;
             // coopmat (like llama.cpp) and any fp16 operand keep fp16 staging.
-            const bool stageF32 = iDtype == Dtype::Fp32 && wDtype == Dtype::Fp32;
+            // A quantized W is always staged in fp16: the dequantizing loaders
+            // write only the fp16 tiles.
+            const Dtype wStage = quant ? Dtype::Fp16 : wDtype;
+            const bool stageF32 = iDtype == Dtype::Fp32 && wStage == Dtype::Fp32;
             uint32_t pickedSplits = 1;
             const Dtype cmAccDtype =
                 accDtype == Dtype::Fp16 && !ggmlCoopmatShape(device()).accF16 ? Dtype::Fp32 : accDtype;
-            PipeParamsTile t = selectLinearTile(M, N, K, iDtype, wDtype, oDtype, cmAccDtype, device(), pickedSplits);
+
+            // A quantized W takes its vendor's tile only where the vendor's kernel
+            // can read it: linear-cm-nv dequantizes as it loads, and a Strix tile on
+            // packed weights reads the fp16 copy linear-preshuffle dequantizes. A
+            // Strix tile on Rows weights would read the quantized buffer in place,
+            // so it takes the generic tile like the rest.
+            PipeParamsTile t;
+            const bool vendorTile = !quant || device().vendorID() == eva::VENDOR_ID::NVIDIA || strix;
+            if (vendorTile)
+                t = selectLinearTile(
+                    M, N, K, iDtype, quant ? wStage : wDtype, oDtype, cmAccDtype, device(), pickedSplits);
+            if (!vendorTile || (quant && t.strix && t.strix->weights == WeightLayout::Rows))
+            {
+                t = otherLinearTile(M, N, iDtype, wStage, device());
+                pickedSplits = otherLinearSplitCount(M, N, K, t, device());
+            }
+
+            // The integer GEMM runs on the scalar warptile, whose k-block equals one
+            // scale block. A coopmat tile keeps the float kernel, which is faster there.
+            intDot_ = useIntDot && t.tK == 0;
 
             // Resolve split-K for this shape: explicit splitSize, or the
             // vendor's count when 0.
             if (config_.splitSize > 0)
             {
                 VAI_ASSERT(config_.splitSize >= 32);
-                splitSize = config_.splitSize;
+                // A quantized W splits on its scale blocks: the size given is rounded up to them.
+                splitSize = quant ? ROUNDUP_POW2(config_.splitSize, quantizeBlock) : config_.splitSize;
                 splitCount = CEIL_DIV(K, splitSize);
             }
             else
@@ -2448,10 +2581,11 @@ inline void Linear::prepare()
                 splitCount = pickedSplits;
                 splitSize = (splitCount > 1) ? ggmlSplitSize(K, splitCount) : K;
             }
+            VAI_ASSERT(!quant || splitSize % quantizeBlock == 0);   // a split starts on a scale block
 
             // AMD: fp16 operands and output, what the lane tiles and the Strix
-            // plain-layer tiles are written for.
-            const bool fp16Io = iDtype == Dtype::Fp16 && wDtype == Dtype::Fp16 && oDtype == Dtype::Fp16;
+            // plain-layer tiles are written for. A quantized W does not count as fp16.
+            const bool fp16Io = !quant && iDtype == Dtype::Fp16 && wDtype == Dtype::Fp16 && oDtype == Dtype::Fp16;
             std::optional<RadvPick> radv;   // a lane tile or a linear-cm geometry to lay over t
 
             if (t.strix)
@@ -2504,7 +2638,7 @@ inline void Linear::prepare()
             }
             else if (!strix && splitSize == K && acc == Dtype::Fp32 && fp16Io && useAmdMFirst(M, N, K, t, device()))
                 t.rowMajor = CEIL_DIV(M, t.wgM);
-            else
+            else if (!quant)
                 t = amdNavi48CmTile(M, N, K, splitSize, t, device());
 
             if (!pipeTile || t != pipeParamsTile)
@@ -2518,6 +2652,8 @@ inline void Linear::prepare()
                 // k-block instead and takes a load-width code (nvCmLoadCode).
                 const bool aligned = (K % t.wgK == 0) && (splitSize % t.wgK == 0);
                 const uint32_t loadCode = t.kTailMasked ? nvCmLoadCode(K, splitSize) : (aligned ? 1u : 0u);
+                VAI_ASSERT(
+                    !quant || !t.kTailMasked || loadCode == 1u);   // linear-cm-nv dequantizes only its 8-wide loads
 
                 // Robustness folds the loaders' row-tail guards away (spec 12):
                 // garbage from a robust OOB tail read only feeds outputs the
@@ -2597,6 +2733,30 @@ inline void Linear::prepare()
                         { .requiredSubgroupSize = t.lane || t.sgSize != device().subgroupSize() ? t.sgSize : 0u,
                           .robustBufferAccess = robust });
                 }
+                else if (intDot_)   // integer GEMM
+                {
+                    VAI_ASSERT(t.wgK == quantizeBlock && aligned);
+
+                    // clang-format off
+                    pipeTile = pipelinePool().request("linear-tile-q", {
+                        eva::constant_id<0>(t.wgSize),                              // wgSize (= local_size_x)
+                        eva::constant_id<1>(t.sgSize),                              // sgSize
+                        eva::constant_id<2>(t.wgM),                                 // wgM
+                        eva::constant_id<3>(t.wgN),                                 // wgN
+                        eva::constant_id<4>(t.wgK),                                 // wgK (= 32)
+                        eva::constant_id<5>(t.sgM),                                 // sgM
+                        eva::constant_id<6>(t.sgN),                                 // sgN
+                        eva::constant_id<7>(t.tM),                                  // tM
+                        eva::constant_id<8>(t.tN),                                  // tN
+                        eva::constant_id<9>(t.sgpMIter),                            // sgpMIter
+                        eva::constant_id<10>(t.sgpNIter),                           // sgpNIter
+                        eva::constant_id<12>(robust ? 1u : 0u),                     // robustBufferAccess
+                        eva::constant_id<SPEC_ID_TYPE_O>(oDtype)                    // typeO
+                    }, {
+                        .robustBufferAccess = robust,
+                    });
+                    // clang-format on
+                }
                 else if (t.tK != 0)   // coopmat kernel
                 {
                     // NOTE (vs llama.cpp): ggml passes REQUIRE_FULL_SUBGROUPS_BIT
@@ -2617,10 +2777,11 @@ inline void Linear::prepare()
                         eva::constant_id<12>(robust ? 1u : 0u),              // robustBufferAccess
                         eva::constant_id<14>(t.rowMajor),                    // rowMajor (M-first: M tile count)
                         eva::constant_id<15>(uint32_t(t.prefetch)),          // prefetch
-                        eva::constant_id<SPEC_ID_TYPE_O>(oDtype),    // typeO
+                        eva::constant_id<SPEC_ID_TYPE_O>(oDtype),            // typeO
                         eva::constant_id<SPEC_ID_TYPE_I>(iDtype),            // typeI
-                        eva::constant_id<SPEC_ID_TYPE_W>(wDtype),    // typeW
-                        eva::constant_id<SPEC_ID_ALIGNED>(loadCode)          // aligned (linear-cm-nv: load-width code)
+                        eva::constant_id<SPEC_ID_TYPE_W>(wDtype),            // typeW
+                        eva::constant_id<SPEC_ID_ALIGNED>(loadCode),         // aligned (linear-cm-nv: load-width code)
+                        eva::constant_id<SPEC_ID_QUANTIZE>(quantizeType_)    // quantize (W's format)
                     }, {
                         .requiredSubgroupSize = t.sgSize != device().subgroupSize() ? t.sgSize : 0u,
                         .robustBufferAccess = robust,
@@ -2641,23 +2802,24 @@ inline void Linear::prepare()
 
                     // clang-format off
                     pipeTile = pipelinePool().request("linear-tile", {
-                        eva::constant_id<0>(t.wgSize),                                     // wgSize (= local_size_x)
-                        eva::constant_id<1>(t.sgSize),                                     // sgSize
-                        eva::constant_id<2>(t.wgM),                                        // wgM
-                        eva::constant_id<3>(t.wgN),                                        // wgN
-                        eva::constant_id<4>(t.wgK),                                        // wgK
-                        eva::constant_id<5>(t.sgM),                                        // sgM
-                        eva::constant_id<6>(t.sgN),                                        // sgN
-                        eva::constant_id<7>(t.tM),                                         // tM
-                        eva::constant_id<8>(t.tN),                                         // tN
-                        eva::constant_id<9>(t.sgpMIter),                                   // sgpMIter
-                        eva::constant_id<10>(t.sgpNIter),                                  // sgpNIter
+                        eva::constant_id<0>(t.wgSize),                             // wgSize (= local_size_x)
+                        eva::constant_id<1>(t.sgSize),                             // sgSize
+                        eva::constant_id<2>(t.wgM),                                // wgM
+                        eva::constant_id<3>(t.wgN),                                // wgN
+                        eva::constant_id<4>(t.wgK),                                // wgK
+                        eva::constant_id<5>(t.sgM),                                // sgM
+                        eva::constant_id<6>(t.sgN),                                // sgN
+                        eva::constant_id<7>(t.tM),                                 // tM
+                        eva::constant_id<8>(t.tN),                                 // tN
+                        eva::constant_id<9>(t.sgpMIter),                           // sgpMIter
+                        eva::constant_id<10>(t.sgpNIter),                          // sgpNIter
                         eva::constant_id<11>(stageF32 ? Dtype::Fp32 : accDtype),   // accType (fp32 over fp32 staging)
-                        eva::constant_id<12>(robust ? 1u : 0u),                            // robustBufferAccess
+                        eva::constant_id<12>(robust ? 1u : 0u),                    // robustBufferAccess
                         eva::constant_id<SPEC_ID_TYPE_O>(oDtype),                  // typeO
-                        eva::constant_id<SPEC_ID_TYPE_I>(iDtype),                          // typeI
+                        eva::constant_id<SPEC_ID_TYPE_I>(iDtype),                  // typeI
                         eva::constant_id<SPEC_ID_TYPE_W>(wDtype),                  // typeW
-                        eva::constant_id<SPEC_ID_ALIGNED>(aligned ? 1u : 0u)               // aligned
+                        eva::constant_id<SPEC_ID_ALIGNED>(aligned ? 1u : 0u),      // aligned
+                        eva::constant_id<SPEC_ID_QUANTIZE>(quantizeType_)          // quantize (W's format)
                     }, {
                         .requiredSubgroupSize = forceSg ? t.sgSize : 0u,
                         .robustBufferAccess = robust,
@@ -2677,13 +2839,13 @@ inline void Linear::prepare()
             pipeParamsReduce = r;
             // clang-format off
             pipeReduce = pipelinePool().request("linear-reduce", {
-                eva::constant_id<0>(hasBias() ? 1u : 0u),                // hasBias
-                eva::constant_id<1>(biasElems),                          // bias repeat (0: covers O)
-                eva::constant_id<2>(config_.acceptResidual ? 1u : 0u),   // hasResidual
-                eva::constant_id<3>(residualElems),                      // residual repeat (0: covers O)
-                eva::constant_id<4>((uint32_t) config_.residualOrder),   // residualOrder
-                eva::constant_id<5>(bDtype),                             // typeB (bias)
-                eva::constant_id<SPEC_ID_TYPE_O>(oDtype),        // typeO (O, P & residual)
+                eva::constant_id<0>(hasBias() ? 1u : 0u),                         // hasBias
+                eva::constant_id<1>(biasElems),                                   // bias repeat (0: covers O)
+                eva::constant_id<2>(config_.acceptResidual ? 1u : 0u),            // hasResidual
+                eva::constant_id<3>(residualElems),                               // residual repeat (0: covers O)
+                eva::constant_id<4>((uint32_t) config_.residualOrder),            // residualOrder
+                eva::constant_id<5>(bDtype),                                      // typeB (bias)
+                eva::constant_id<SPEC_ID_TYPE_O>(oDtype),                         // typeO (O, P & residual)
                 eva::constant_id<SPEC_ID_EPILOGUE>((uint32_t) config_.epilogue)   // epilogue
             });
             // clang-format on
@@ -2696,6 +2858,24 @@ inline void Linear::prepare()
         // splitCount keeps the previous shape's value and must not be read.
         if (needReducePass())
             (*this)["partial"] = Tensor({ splitCount, M, N }, oDtype);
+    }
+
+    if (intDot_)
+    {
+        const PipeParamsQuant q = { .iDtype = iDtype };
+        if (!pipeQuant_ || q != pipeParamsQuant_)
+        {
+            pipeParamsQuant_ = q;
+            // clang-format off
+            pipeQuant_ = pipelinePool().request("quantize", {
+                eva::constant_id<SPEC_ID_TYPE_I>(iDtype)   // typeI
+            });
+            // clang-format on
+
+            if (!descSetQuant_)
+                descSetQuant_ = gVaiDestSetPool(pipeQuant_.descSetLayout(0));
+        }
+        (*this)["inQuant"] = Tensor({ M, K }, Dtype::Qint8);
     }
 
     auto outShape = inShape;
@@ -2716,13 +2896,40 @@ inline void Linear::run(eva::CommandBuffer cmdBuff)
 
     auto rBuf = config_.acceptResidual ? (*this)["residual"].buffer() : eva::Buffer();
 
+    // An integer kernel reads inQuant at the binding where a float kernel reads
+    // in0, so in0 is quantized first.
+    auto inQuantBuf = intDot_ ? (*this)["inQuant"].buffer() : eva::Buffer();
+    if (intDot_)
+    {
+        constexpr uint32_t quantWgSize = 128;   // = local_size_x of quantize
+        const uint32_t numBlocks = M * K / quantizeBlock;
+
+        // Eight threads per block. A count past the device's X limit folds into z, as
+        // the slab dispatch below does; a long prefill gets there.
+        uint32_t gx = CEIL_DIV(numBlocks, quantWgSize / 8);
+        uint32_t gz = 1;
+        if (gx > device().maxComputeWorkGroupCount()[0])
+        {
+            gz = 64;   // same as the slab's
+            gx = CEIL_DIV(gx, gz);
+        }
+
+        descSetQuant_.write({ inBuf, inQuantBuf });   // 0 = I, 1 = inQuant
+        cmdBuff.bindPipeline(pipeQuant_)
+            .bindDescSets({ descSetQuant_ })
+            .setPushConstants(0, sizeof(numBlocks), &numBlocks)
+            .dispatch(gx, 1, gz)
+            .barrier(eva::SYNC_SCOPE::COMPUTE_WRITE / inQuantBuf / eva::SYNC_SCOPE::COMPUTE_READ);
+        inBuf = inQuantBuf;   // what the kernel below reads at binding 1
+    }
+
     // Slab path: bias / epilogue / the residual are fused in the kernel, so
     // neither the split-K partial buffer nor the reduce pass runs. M is baked
     // into the pipeline as a spec constant, so the push constants are just
     // {K, N} (the tile kernel below uses {M, N, K, splitSize}).
     if (useSlabPath(M))
     {
-        const uint32_t wgN = ((*this)["weight"].dtype() == Dtype::Fp16) ? 2u : 1u;   // fp16 W pairs N positions
+        const uint32_t wgN = slabWgN(M);
         auto bBuf = hasBias() ? (*this)["bias"].buffer() : eva::Buffer();
         struct { uint32_t K, N; float scalarScale; } slabConstants = { K, N, config_.scalarScale };
 

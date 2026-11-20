@@ -72,12 +72,14 @@ add_library(vAi STATIC
     vai/engine/tensor.h
     vai/engine/buffer-pool.h
     vai/engine/error.h
+    vai/engine/quantize.h
     vai/engine/safetensors-parser.h
     vai/engine/weights.h
     vai/utils/image-processor.h
     vai/utils/tokenizer.h
 
     vai/engine/neural-net.cpp
+    vai/engine/quantize.cpp
     vai/engine/safetensors-parser.cpp
     vai/engine/tensor.cpp
     vai/utils/image-processor.cpp

@@ -1,8 +1,10 @@
 #include "tensor.h"
 #include "neural-net.h"   // getVaiDevice(), getVaiPool()
+#include "quantize.h"     // quantizeBlocks(), quantizeBlock
 #include <atomic>
 #include <bit>
 #include <algorithm>
+#include <stdexcept>
 #include <thread>
 #include <vector>
 
@@ -153,6 +155,22 @@ static void transformParallel(const Src* src, Dst* dst, size_t count, Fn fn)
 }
 
 
+static void quantizeFloats(const float* src, void* dst, Dtype dstDtype, size_t count)
+{
+    VAI_ASSERT(count % quantizeBlock == 0);
+
+    std::atomic<bool> finite{ true };
+    parallelChunks(count / quantizeBlock, [&](size_t begin, size_t end) {
+        const size_t first = begin * quantizeBlock;
+        if (!quantizeBlocks(dstDtype, src + first, (end - begin) * quantizeBlock, dst, count, first))
+            finite = false;
+    });
+
+    if (!finite)
+        throw std::runtime_error("convertDtype: a value to quantize is not finite");
+}
+
+
 // dtype-tagged element-wise conversion of `count` elements from src to dst.
 // Handles all fp32 / fp16 combinations; same-dtype is a memcpy.
 void convertDtype(const void* src, Dtype srcDtype,
@@ -160,14 +178,24 @@ void convertDtype(const void* src, Dtype srcDtype,
 {
     if (srcDtype == dstDtype)
     {
-        std::memcpy(dst, src, count * bytesPerElement(srcDtype));
+        std::memcpy(dst, src, bytesForElements(srcDtype, count));
         return;
     }
+
+    if (isQuantized(dstDtype))
+    {
+        VAI_ASSERT(srcDtype == Dtype::Fp32);
+        quantizeFloats(static_cast<const float*>(src), dst, dstDtype, count);
+        return;
+    }
+
     auto sF = static_cast<const float*>(src);
     auto sU = static_cast<const uint16_t*>(src);
     auto dF = static_cast<float*>(dst);
     auto dU = static_cast<uint16_t*>(dst);
 
+    static_assert(unsigned(Dtype::Qint8) < 4, "convertDtype: dtype key needs a wider shift");
+    VAI_ASSERT(!isQuantized(srcDtype) && "convertDtype: a quantized dtype does not convert back");
     constexpr auto K = [](Dtype s, Dtype d) { return (unsigned(s) << 2) | unsigned(d); };
     using D = Dtype;
     switch (K(srcDtype, dstDtype))
@@ -196,20 +224,48 @@ static void convertStored(const char* src, const std::string& storedType, char* 
 }
 
 
+// The 16-bit formats are widened to fp32 a piece at a time, so the piece stays
+// in cache. Returns false if a value is not finite.
+static bool quantizeStored(
+    const char* src, const std::string& storedType, char* dst, Dtype dstDtype, size_t total, size_t first, size_t count)
+{
+    if (storedType == "F32")
+        return quantizeBlocks(dstDtype, reinterpret_cast<const float*>(src), count, dst, total, first);
+
+    constexpr size_t piece = 8192;
+    float wide[piece];
+    bool finite = true;
+    for (size_t e = 0; e < count; e += piece)
+    {
+        const size_t m = std::min(piece, count - e);
+        convertStored(src + e * sizeof(uint16_t), storedType, reinterpret_cast<char*>(wide), Dtype::Fp32, m);
+        finite &= quantizeBlocks(dstDtype, wide, m, dst, total, first + e);
+    }
+    return finite;
+}
+
+
 // Reads srcBytes of ref from byteOffset into dst as dstDtype. Worker threads take
 // parts of it in turn and each converts the part it just read, so the drive keeps
 // several reads in flight and conversion runs while other parts are being read.
 // The per-worker staging buffers belong to the calling thread and are reused
 // across loads, so their pages fault in once.
-static void loadInto(const SafetensorRef& ref, size_t byteOffset, size_t srcBytes,
-                     const std::string& storedType, char* dst, Dtype dstDtype)
+// dst holds `total` elements (0: this load's); the load fills them from `first`.
+static void loadInto(
+    const SafetensorRef& ref, size_t byteOffset, size_t srcBytes, const std::string& storedType, char* dst,
+    Dtype dstDtype, size_t total = 0, size_t first = 0)
 {
     constexpr size_t kPartBytes = size_t(8) << 20;
     constexpr unsigned kWorkers = 8;
 
-    const bool same = storedType != "BF16" && dtypeFromString(storedType) == dstDtype;
+    const bool quant = isQuantized(dstDtype);
+    const bool same = !quant && storedType != "BF16" && dtypeFromString(storedType) == dstDtype;
     const size_t srcElem = (storedType == "BF16") ? 2 : bytesPerElement(dtypeFromString(storedType));
     const size_t dstElem = bytesPerElement(dstDtype);
+    if (total == 0)
+        total = srcBytes / srcElem;
+    if (!quant)
+        dst += first * dstElem;   // a float load starts here; a quantized one is placed by `first`
     const size_t parts = (srcBytes + kPartBytes - 1) / kPartBytes;
     const unsigned workers = unsigned(std::min<size_t>(kWorkers, parts));
 
@@ -223,6 +279,7 @@ static void loadInto(const SafetensorRef& ref, size_t byteOffset, size_t srcByte
     }
 
     std::atomic<size_t> next{0};
+    std::atomic<bool> finite{ true };
     auto work = [&](unsigned w)
     {
         for (size_t i; (i = next++) < parts;)
@@ -234,7 +291,13 @@ static void loadInto(const SafetensorRef& ref, size_t byteOffset, size_t srcByte
             else
             {
                 ref.readInto(buf[w], byteOffset + pos, n);
-                convertStored(buf[w], storedType, dst + pos / srcElem * dstElem, dstDtype, n / srcElem);
+                if (quant)
+                {
+                    if (!quantizeStored(buf[w], storedType, dst, dstDtype, total, first + pos / srcElem, n / srcElem))
+                        finite = false;
+                }
+                else
+                    convertStored(buf[w], storedType, dst + pos / srcElem * dstElem, dstDtype, n / srcElem);
             }
         }
     };
@@ -245,6 +308,9 @@ static void loadInto(const SafetensorRef& ref, size_t byteOffset, size_t srcByte
     work(0);
     for (std::thread& t : threads)
         t.join();
+
+    if (!finite)
+        throw std::runtime_error(ref.key + ": a weight is not finite");
 }
 
 
@@ -252,11 +318,12 @@ Tensor::Tensor(const SafetensorRef& ref, Dtype targetDtype)
 : data_(std::make_shared<TensorData>(targetDtype==Dtype::None ? dtypeFromString(ref.getDataType()) : targetDtype))
 {
     shape_ = ref.getShape();
+    VAI_ASSERT(!isQuantized(dtype()) || (shape_.size() == 2 && shape_[1] % quantizeBlock == 0));
 
     const std::string storedType = ref.getDataType();
     const size_t count    = numElements();
     const size_t srcBytes = ref.byteSize();
-    const size_t dstBytes = count * bytesPerElement(dtype());
+    const size_t dstBytes = bytesForElements(dtype(), count);
 
     data_->hostData_.resize(dstBytes);
     loadInto(ref, 0, srcBytes, storedType, data_->hostData_.data(), dtype());
@@ -265,6 +332,7 @@ Tensor::Tensor(const SafetensorRef& ref, Dtype targetDtype)
 
 // Checkpoint tensors stacked along the leading axis, the inverse of split().
 // Each is read into its own part of one buffer, so the bytes are written once.
+// Stacks into a quantized dtype too, which Tensor::concat() refuses.
 Tensor concat(std::initializer_list<SafetensorRef> refs, Dtype targetDtype)
 {
     VAI_ASSERT(refs.size() > 0);
@@ -294,18 +362,20 @@ Tensor concat(std::initializer_list<SafetensorRef> refs, Dtype targetDtype)
         sizes.push_back(ref.byteSize());
     }
 
+    VAI_ASSERT(!isQuantized(targetDtype) || (shape.size() == 2 && shape[1] % quantizeBlock == 0));
     Tensor out(shape, targetDtype);
     HostBuffer& host = out.data_->hostData_;
-    host.resize(out.numElements() * bytesPerElement(targetDtype));
+    host.resize(out.numBytes());
 
     // Each part lands at its own offset of the one buffer.
     const size_t srcElem = (storedType == "BF16") ? 2 : bytesPerElement(dtypeFromString(storedType));
-    char* dst = host.data();
+    const size_t total = out.numElements();
+    size_t first = 0;
     size_t i = 0;
     for (const SafetensorRef& ref : refs)
     {
-        loadInto(ref, 0, sizes[i], storedType, dst, targetDtype);
-        dst += sizes[i++] / srcElem * bytesPerElement(targetDtype);
+        loadInto(ref, 0, sizes[i], storedType, host.data(), targetDtype, total, first);
+        first += sizes[i++] / srcElem;
     }
 
     return out;
@@ -327,9 +397,10 @@ Tensor slice(const SafetensorRef& ref, uint32_t begin, uint32_t end, Dtype targe
     const size_t srcBytes  = size_t(end - begin) * rowBytes;
 
     shape[0] = end - begin;
+    VAI_ASSERT(!isQuantized(targetDtype) || (shape.size() == 2 && shape[1] % quantizeBlock == 0));
     Tensor out(shape, targetDtype);
     HostBuffer& host = out.data_->hostData_;
-    host.resize(out.numElements() * bytesPerElement(targetDtype));
+    host.resize(out.numBytes());
     loadInto(ref, srcOffset, srcBytes, storedType, host.data(), targetDtype);
 
     return out;
@@ -339,6 +410,7 @@ Tensor slice(const SafetensorRef& ref, uint32_t begin, uint32_t end, Dtype targe
 Tensor sum(const SafetensorRef& a, const SafetensorRef& b, Dtype targetDtype)
 {
     VAI_ASSERT(targetDtype != Dtype::None);
+    VAI_ASSERT(!isQuantized(targetDtype));
 
     Tensor ta(a, Dtype::Fp32);
     Tensor tb(b, Dtype::Fp32);
@@ -431,12 +503,13 @@ Tensor& Tensor::setFloats(std::vector<float>&& inData)
 Tensor& Tensor::setFloats(const float* inData)
 {
     VAI_ASSERT(validShape() && baseOffset_ == 0);
+    VAI_ASSERT(!isQuantized(data_->dtype_) || (shape_.size() == 2 && shape_[1] % quantizeBlock == 0));
     const size_t count = numElements();
 
     data_->lastSubmission_ = {nullptr, 0};
     data_->hostUploaded_ = false;
 
-    data_->hostData_.resize(count * bytesPerElement(data_->dtype_));
+    data_->hostData_.resize(numBytes());
     convertDtype(inData, Dtype::Fp32, data_->hostData_.data(), data_->dtype_, count);
     return *this;
 }

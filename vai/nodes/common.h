@@ -7,6 +7,7 @@
 // this so the domain headers are self-contained and independent of one another.
 #include "vai/engine/neural-net.h"
 #include "vai/engine/graph-flow.h"
+#include "vai/engine/quantize.h"
 
 #include <tuple>
 #include <array>

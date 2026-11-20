@@ -9,6 +9,8 @@
      buffer aliases; shared-memory / register-cache staging is fp16 and the
      accumulator dtype is selected by accType, except that fp32 I and W
      stage and accumulate in fp32 (stageF32).
+     Qint8 W (quantize == QUANTIZE_Q8) is dequantized as it is staged
+     (quantize_io.h), rounded to fp16 like an fp32 W.
 
  One workgroup computes one wgM x wgN tile of O, marching over K in
  wgK-wide blocks staged through shared memory. Inside the workgroup the
@@ -38,6 +40,7 @@
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 #include "common/spec_constants.h"
+#include "common/quantize_io.h"
 
 layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;   // = wgSize (same SpecId)
 
@@ -59,6 +62,7 @@ layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0;  // O (output) dtype
 layout(constant_id = SPEC_ID_TYPE_I) const uint typeI = 0;  // I (input) dtype
 layout(constant_id = SPEC_ID_TYPE_W) const uint typeW = 0;  // W (weight) dtype
 layout(constant_id = SPEC_ID_ALIGNED) const uint aligned = 1;  // 1: K % wgK == 0, 0: scalar masked loads
+layout(constant_id = SPEC_ID_QUANTIZE) const uint quantize = 0;  // W's format, a QUANTIZE_* value
 
 const uint LOAD_VEC       = (aligned != 0u) ? 8u : 1u;   // elements per load (mat2x4 / f16mat2x4, or scalar)
 const uint LOAD_VEC_BATCH = (aligned != 0u) ? 1u : 2u;   // the scalar path loads 2 values per call
@@ -66,7 +70,7 @@ const uint WGK_STEP     = 4;              // k elements consumed per inner step
 const uint SHMEM_STRIDE = wgK / 2 + 1;    // 2-element slots per shmem row; +1 avoids bank conflicts
 
 // fp32 staging when both operands are fp32 (the host then passes accType fp32).
-const uint stageF32 = (1u - typeI) * (1u - typeW);
+const uint stageF32 = (1u - typeI) * (1u - typeW) * uint(quantize == QUANTIZE_NONE);
 
 const float16_t FP16_MAX = 65504.0hf;     // largest finite fp16 value
 
@@ -82,6 +86,7 @@ layout(set = 0, binding = 2) readonly buffer W_BUF_F32  { float bufferW_f32[]; }
 layout(set = 0, binding = 2) readonly buffer W_BUF_F16  { float16_t bufferW_f16[]; };
 layout(set = 0, binding = 2) readonly buffer W_BUF_8F32 { mat2x4 bufferW_8f32[]; };
 layout(set = 0, binding = 2) readonly buffer W_BUF_8F16 { f16mat2x4 bufferW_8f16[]; };
+layout(set = 0, binding = 2) readonly buffer W_BUF_I32  { int bufferW_i32[]; };        // a quantized W's quants; its scales through W_BUF_F16
 
 layout(push_constant) uniform PushConstants {
     uint M;
@@ -94,6 +99,17 @@ f16mat2x4 readI8(uint i8) { return (typeI == DTYPE_F32) ? f16mat2x4(bufferI_8f32
 f16mat2x4 readW8(uint i8) { return (typeW == DTYPE_F32) ? f16mat2x4(bufferW_8f32[i8]) : bufferW_8f16[i8]; }
 float16_t readI(uint i)   { return (typeI == DTYPE_F32) ? float16_t(bufferI_f32[i]) : bufferI_f16[i]; }
 float16_t readW(uint i)   { return (typeW == DTYPE_F32) ? float16_t(bufferW_f32[i]) : bufferW_f16[i]; }
+
+// Qint8 W. One scale serves an 8-wide load, which never straddles a scale block. The product
+// is fp32 on both paths: an fp16 one flushes a subnormal scale on some devices.
+float readWScale(uint e) { return float(bufferW_f16[SCALE_INDEX_Q8(N, K, e)]); }
+float readWI8(uint i)    { return READ_I8(bufferW_i32, i); }
+f16mat2x4 readW8Q8(uint i8)
+{
+    const float s = readWScale(8u * i8);
+    const int w0 = bufferW_i32[2 * i8], w1 = bufferW_i32[2 * i8 + 1];
+    return f16mat2x4(f16vec4(READ_4I8(w0) * s), f16vec4(READ_4I8(w1) * s));
+}
 void writeO(uint i, float v) { if (typeO == DTYPE_F32) bufferO_f32[i] = v; else bufferO_f16[i] = float16_t(v); }
 void writeO(uint i, float16_t v) { if (typeO == DTYPE_F32) bufferO_f32[i] = float(v); else bufferO_f16[i] = v; }
 
@@ -121,7 +137,8 @@ void W_to_tileA(const uint pos_a, const uint row, const uint col, const uint idx
         }
         else
         {
-            f16mat2x4 aa = live ? readW8(idx) : f16mat2x4(0.0);
+            f16mat2x4 aa = !live ? f16mat2x4(0.0)
+                         : (quantize == QUANTIZE_Q8) ? readW8Q8(idx) : readW8(idx);
             tileA16[buf_idx    ] = aa[0].xy;
             tileA16[buf_idx + 1] = aa[0].zw;
             tileA16[buf_idx + 2] = aa[1].xy;
@@ -136,6 +153,11 @@ void W_to_tileA(const uint pos_a, const uint row, const uint col, const uint idx
         const bool k1 = live && block + row * 2 + 1 < endK;
         if (stageF32 != 0u)
             tileA32[buf_idx] = vec2(k0 ? bufferW_f32[idx] : 0.0, k1 ? bufferW_f32[idx + 1] : 0.0);
+        else if (quantize == QUANTIZE_Q8)
+        {
+            const float s = k0 ? readWScale(idx) : 0.0;
+            tileA16[buf_idx] = f16vec2(k0 ? float16_t(readWI8(idx) * s) : 0.0hf, k1 ? float16_t(readWI8(idx + 1) * s) : 0.0hf);
+        }
         else
             tileA16[buf_idx] = f16vec2(k0 ? readW(idx) : 0.0hf, k1 ? readW(idx + 1) : 0.0hf);
     }

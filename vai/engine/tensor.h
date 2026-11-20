@@ -16,16 +16,34 @@ namespace vai {
 
 class NeuralNet;
 
-enum class Dtype { Fp32, Fp16, None };
+// Qint8 is last so that the others keep the values the shaders use (DTYPE_*).
+enum class Dtype { Fp32, Fp16, None, Qint8 };
 
+constexpr bool isQuantized(Dtype dt) noexcept
+{
+    return dt == Dtype::Qint8;
+}
+
+// 0 for a quantized dtype: use bytesForElements().
 constexpr size_t bytesPerElement(Dtype dt) noexcept
 {
-    switch (dt) {
-        case Dtype::Fp16:  return 2;
-        case Dtype::Fp32:  return 4;
-        case Dtype::None:  return 0;
+    switch (dt)
+    {
+    case Dtype::Fp16:
+        return 2;
+    case Dtype::Fp32:
+        return 4;
+    case Dtype::None:
+    case Dtype::Qint8:
+        return 0;
     }
     return 4;
+}
+
+// Qint8: count is a multiple of 32, and every 32 elements carry a 2-byte scale.
+constexpr size_t bytesForElements(Dtype dt, size_t count) noexcept
+{
+    return dt == Dtype::Qint8 ? count + count / 32 * 2 : count * bytesPerElement(dt);
 }
 
 // Tensor dtype a safetensors dtype string loads as. BF16 is a file format
@@ -145,6 +163,7 @@ public:
     void bindBuffer(vai::PooledBuffer buf, uint32_t baseOffset = 0)
     {
         VAI_ASSERT(data_ && baseOffset_ == 0);
+        VAI_ASSERT(baseOffset == 0 || !isQuantized(dtype()));
         data_->buffer_.release();
         data_->buffer_ = std::move(buf);
         baseOffset_ = baseOffset;
@@ -181,6 +200,7 @@ public:
      */
     Tensor reshape(const std::vector<uint32_t>& dims) const
     {
+        VAI_ASSERT(!isQuantized(dtype()));
         VAI_ASSERT(data_);
         size_t total = 1;
         for (auto d : dims) total *= d;
@@ -227,6 +247,7 @@ public:
      */
     Tensor view(const std::vector<uint32_t>& dims, uint32_t baseOffset) const
     {
+        VAI_ASSERT(!isQuantized(dtype()));
         VAI_ASSERT(data_);
 
         Tensor out = *this;
@@ -273,10 +294,7 @@ public:
         return sz;
     }
 
-    size_t numBytes() const
-    {
-        return numElements() * bytesPerElement(dtype());
-    }
+    size_t numBytes() const { return bytesForElements(dtype(), numElements()); }
 
     bool validShape() const
     {
@@ -336,6 +354,7 @@ template <typename... Ts>
 inline Tensor Tensor::permute(Ts... Perms) const
 {
     static_assert((std::conjunction_v<std::is_integral<Ts>...>), "All dims must be integral types");
+    VAI_ASSERT(!isQuantized(dtype()));
     VAI_ASSERT(data_ && !data_->hostData_.empty());
 
     const uint32_t rank = shape_.size();
@@ -400,6 +419,7 @@ template <typename... Ts>
 inline auto Tensor::split(Ts... offsets) const
 {
     static_assert((std::conjunction_v<std::is_integral<Ts>...>), "All offsets must be integral types");
+    VAI_ASSERT(!isQuantized(dtype()));
     VAI_ASSERT(data_ && !data_->hostData_.empty());
     VAI_ASSERT(!shape_.empty());
 
@@ -431,6 +451,7 @@ template <typename... Ts>
 inline Tensor Tensor::concat(const Ts&... others) const
 {
     static_assert((std::conjunction_v<std::is_same<Ts, Tensor>...>), "All arguments must be Tensors");
+    VAI_ASSERT(!isQuantized(dtype()));
     VAI_ASSERT(data_ && !data_->hostData_.empty());
     VAI_ASSERT(!shape_.empty());
 

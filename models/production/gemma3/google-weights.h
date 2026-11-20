@@ -40,6 +40,7 @@ inline void loadWeights(Net& net, const vai::Checkpoint& parser)
 {
     // Weights load at the net's wDefaultDtype, norm coefficients at Fp32.
     const vai::Dtype wDt = net.config().wDefaultDtype;
+    const vai::Dtype textDt = vai::dtypeFromQuantizeType(net.runtimeCfg.quantizeType, wDt);
     const vai::Dtype normDt = vai::Dtype::Fp32;
 
     const bool hasVision = net.modelCfg.vision;
@@ -54,7 +55,7 @@ inline void loadWeights(Net& net, const vai::Checkpoint& parser)
     // Each tensor is loaded at the dtype declared by its owning node.
     auto loadLin = [&](auto& lin, const std::string& wKey) {
         // Gemma3 text linear layers carry no bias: the "bias" slot stays empty.
-        lin["weight"] = vai::Tensor(parser[wKey], wDt);
+        lin["weight"] = vai::Tensor(parser[wKey], textDt);
     };
 
     // Gemma stores the RMS scale centered on zero. The kernel scales by scale as
@@ -150,7 +151,7 @@ inline void loadWeights(Net& net, const vai::Checkpoint& parser)
 
     // Token embedding
     {
-        net.embedding["weight"] = vai::Tensor(parser[textRoot + "embed_tokens.weight"], wDt);
+        net.embedding["weight"] = vai::Tensor(parser[textRoot + "embed_tokens.weight"], textDt);
     }
 
     // Decoder blocks
@@ -181,8 +182,8 @@ inline void loadWeights(Net& net, const vai::Checkpoint& parser)
         // checkpoint tensors are stacked row-wise: gate first, then up/value.
         {
 
-            block.ffn.gateValue["weight"] = vai::Tensor(parser[prefix + "mlp.gate_proj.weight"], wDt)
-                                                .concat(vai::Tensor(parser[prefix + "mlp.up_proj.weight"], wDt));
+            block.ffn.gateValue["weight"] =
+                vai::concat({ parser[prefix + "mlp.gate_proj.weight"], parser[prefix + "mlp.up_proj.weight"] }, textDt);
         }
 
         loadLin(block.ffn.out, prefix + "mlp.down_proj.weight");

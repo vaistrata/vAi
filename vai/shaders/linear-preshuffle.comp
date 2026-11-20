@@ -1,7 +1,8 @@
 /*=============================================================================
  linear-preshuffle.comp: rewrites a Linear weight W [N, K] into a layout
      linear-cm-amd.comp reads (Linear::packWeightAmd, once per weight and
-     layout). The output is fp16.
+     layout). The output is fp16. A quantized W (quantize, Fragments and
+     PermuteN only) is dequantized on the way (quantize_io.h).
 
      weightLayout (= Linear::WeightLayout):
        Rows       W'[n, k] = W[n, k]: a copy, fp16 W only
@@ -23,10 +24,12 @@
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 #include "common/spec_constants.h"
+#include "common/quantize_io.h"
 
 layout(local_size_x = 256) in;
 
 layout(constant_id = SPEC_ID_TYPE_W) const uint typeW = 0;
+layout(constant_id = SPEC_ID_QUANTIZE) const uint quantize = 0;   // W's format, a QUANTIZE_* value
 layout(constant_id = 0) const uint weightLayout = 1;   // LAYOUT_* below
 
 // weightLayout (= Linear::WeightLayout)
@@ -36,6 +39,7 @@ const uint LAYOUT_ROWS = 0u, LAYOUT_FRAGMENTS = 1u, LAYOUT_PERMUTE_N = 2u, LAYOU
 layout(set = 0, binding = 0) writeonly buffer DST { float16_t dst[]; };
 layout(set = 0, binding = 1) readonly buffer W_F32 { float wF32[]; };
 layout(set = 0, binding = 1) readonly buffer W_F16 { float16_t wF16[]; };
+layout(set = 0, binding = 1) readonly buffer W_I32 { int wI32[]; };   // a quantized W's quants; its scales through W_F16
 
 layout(set = 0, binding = 0) writeonly buffer PACKED_WORDS { uint packedWords[]; };
 layout(set = 0, binding = 1) readonly buffer WEIGHT_WORDS { uint weightWords[]; };
@@ -94,6 +98,12 @@ void main()
     }
     float16_t value = 0.0hf;
     if (n < N && k < K)
-        value = typeW == DTYPE_F32 ? float16_t(wF32[n * K + k]) : wF16[n * K + k];
+    {
+        if (quantize == QUANTIZE_Q8)   // the product is fp32: an fp16 one flushes a subnormal scale
+            value = float16_t(READ_I8(wI32, n * K + k) *
+                              float(wF16[SCALE_INDEX_Q8(N, K, n * K + k)]));
+        else
+            value = typeW == DTYPE_F32 ? float16_t(wF32[n * K + k]) : wF16[n * K + k];
+    }
     dst[offset] = value;
 }

@@ -7,6 +7,10 @@
 #define DTYPE_F16 1u
 #define DTYPE_NONE 2u
 
+// vai::QuantizeType of W, carried like vai::Dtype above.
+#define QUANTIZE_NONE 0u
+#define QUANTIZE_Q8 1u   // Dtype::Qint8
+
 // Shape specialization constants: 30-36.
 #define SPEC_ID_TYPE_CI 30
 #define SPEC_ID_TYPE_CO 31
@@ -28,6 +32,9 @@
 #define SPEC_ID_EPILOGUE 110
 #define SPEC_ID_HAS_SCALE 111
 #define SPEC_ID_HAS_BIAS 112
+
+// Quantization specialization constants: 120+.
+#define SPEC_ID_QUANTIZE 120   // W's format, a QUANTIZE_* value
 
 // Shared shape limits: sized arrays a push-constant or uniform block and its host
 // mirror must agree on.

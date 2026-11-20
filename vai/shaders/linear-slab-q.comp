@@ -1,0 +1,181 @@
+/*=============================================================================
+ linear-slab-q.comp: slab (1D) output decomposition over quantized weights
+     and a Qint8 activation, for M <= 8
+
+     O[j, n] = s * epilogue( A[j, n] + B[j, n] ) + R[j, n]    residualOrder 0
+     O[j, n] = s * epilogue( A[j, n] + B[j, n] + R[j, n] )    residualOrder 1
+     A[j, n] = sum_b dW[n, b] * dX[j, b] * sum_{k in b} W[n, k] * X[j, k]
+
+ W [N, K] and X = inQuant [M, K] are int8 quants, four per int32 word (inQuant
+ comes from quantize.comp). A thread's chunk is K_PER_ITER = 8 quants, two
+ dotPacked4x8EXT products in int32, then scaled by the chunk's two fp16 scales
+ dW and dX, which follow the quants in W's and inQuant's buffers
+ (quantize_io.h). A workgroup owns wgN N positions and its threads split K; the
+ partials reduce as in linear-slab, and thread 0 stores with the bias, the
+ epilogue, s and the residual, read as there (bias B typeB, residual R typeO,
+ either [M, N] or rows that repeat over M).
+ - K % 32 == 0 (host).
+ - Dispatch as linear-slab.
+=============================================================================*/
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_integer_dot_product : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_EXT_control_flow_attributes : require
+#include "common/activation.h"
+#include "common/spec_constants.h"
+#include "common/quantize_io.h"
+
+layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;   // = wgSize (same SpecId)
+
+layout(constant_id = 0) const uint wgSize = 32;        // threads per workgroup (= local_size_x)
+layout(constant_id = 1) const uint sgSize = 32;        // pinned subgroup size (host requiredSubgroupSize)
+layout(constant_id = 2) const uint M      = 1;         // flattened batch
+layout(constant_id = 3) const uint wgN    = 1;         // N positions per workgroup
+layout(constant_id = 4) const uint hasBias = 0;        // 1: bias[N] or bias[M, N]
+layout(constant_id = 5) const uint biasElems = 0;      // 0 covers O; else the bias block repeats
+layout(constant_id = 6) const uint hasResidual = 0;    // 1: residual[M, N]
+layout(constant_id = 7) const uint residualElems = 0;  // 0: the residual covers O; else it repeats
+layout(constant_id = 8) const uint residualOrder = 0;  // 0: after the epilogue, 1: before it
+layout(constant_id = 9) const uint typeB = 0;          // bias dtype
+
+layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0;  // O (output) and residual dtype
+
+const uint K_PER_ITER = 8;    // quants per thread per iteration: two activation words
+
+layout(set = 0, binding = 0) writeonly buffer O_BUF_F32  { float bufferO_f32[]; };
+layout(set = 0, binding = 0) writeonly buffer O_BUF_F16  { float16_t bufferO_f16[]; };
+layout(set = 0, binding = 1) readonly buffer IN_QUANT_BUF { int bufferInQuant[]; };         // inQuant [M, K] as words
+layout(set = 0, binding = 1) readonly buffer IN_SCALE_BUF { float16_t bufferInScale[]; };   // the same buffer: its scales follow the quants
+layout(set = 0, binding = 2) readonly buffer W_BUF        { int bufferW[]; };               // weight [N, K] as words
+layout(set = 0, binding = 2) readonly buffer W_SCALE_BUF  { float16_t bufferWScale[]; };    // the same buffer: its scales follow the quants
+layout(set = 0, binding = 3) readonly buffer BIAS_BUF_32 { float bufferBias_f32[]; };
+layout(set = 0, binding = 3) readonly buffer BIAS_BUF_16 { float16_t bufferBias_f16[]; };
+layout(set = 0, binding = 4) readonly buffer R_BUF_F32 { float bufferR_f32[]; };
+layout(set = 0, binding = 4) readonly buffer R_BUF_F16 { float16_t bufferR_f16[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint K;
+    uint N;
+    float scalarScale;
+};
+
+// Each operand's element for output index i (row-major over [M, N]).
+uint biasIdx(uint i)     { return (biasElems == 0u) ? i : i % biasElems; }
+uint residualIdx(uint i) { return (residualElems == 0u) ? i : i % residualElems; }
+float readBias(uint i) { return (hasBias == 0u) ? 0.0 : ((typeB == DTYPE_F32) ? bufferBias_f32[biasIdx(i)] : float(bufferBias_f16[biasIdx(i)])); }
+float readR(uint i)    { return (hasResidual == 0u) ? 0.0 : ((typeO == DTYPE_F32) ? bufferR_f32[residualIdx(i)] : float(bufferR_f16[residualIdx(i)])); }
+void writeO(uint i, float v) { if (typeO == DTYPE_F32) bufferO_f32[i] = v; else bufferO_f16[i] = float16_t(v); }
+
+int dotChunk(uint e, int x0, int x1)
+{
+    return dotPacked4x8EXT(bufferW[e >> 2], x0) + dotPacked4x8EXT(bufferW[(e >> 2) + 1], x1);
+}
+
+// One iteration: this thread's chunk at k0, dotted for every
+// (batch entry, N position) pair and scaled by both block scales.
+void dotKChunk(inout float sums[M][wgN], uint n0, uint nCount, uint tid, uint it)
+{
+    const uint k0 = K_PER_ITER * (it * wgSize + tid);
+
+    [[unroll]] for (uint j = 0; j < M; j++)
+    {
+        const uint  xw = (j * K + k0) >> 2;
+        const int   x0 = bufferInQuant[xw], x1 = bufferInQuant[xw + 1];
+        const float dx = float(bufferInScale[SCALE_INDEX_Q8(M, K, j * K + k0)]);
+
+        uint wRow = n0 * K;
+        [[unroll]] for (uint n = 0; n < nCount; n++)
+        {
+            const int   q  = dotChunk(wRow + k0, x0, x1);
+            const float dw = float(bufferWScale[SCALE_INDEX_Q8(N, K, wRow + k0)]);
+            sums[j][n] += float(q) * dw * dx;
+            wRow += K;
+        }
+    }
+}
+
+shared float tmpsh[M][wgN][wgSize / sgSize];
+
+void computeOutputs(const uint n0, const uint nCount)
+{
+    const uint tid = gl_LocalInvocationID.x;
+
+    float sums[M][wgN];
+    [[unroll]] for (uint j = 0; j < M; j++)
+        [[unroll]] for (uint n = 0; n < wgN; n++)
+            sums[j][n] = 0.0;
+
+    // This thread owns the chunks at K_PER_ITER * (i * wgSize + tid); K is a
+    // multiple of 32, so a chunk is always whole.
+    uint numIters = K / (K_PER_ITER * wgSize);
+    if (numIters * K_PER_ITER * wgSize + K_PER_ITER * tid < K)
+        numIters++;
+
+    uint i = 0;
+    while (i + 4 <= numIters)
+    {
+        [[unroll]] for (uint u = 0; u < 4; u++)
+        {
+            dotKChunk(sums, n0, nCount, tid, i);
+            i++;
+        }
+    }
+    while (i < numIters)
+    {
+        dotKChunk(sums, n0, nCount, tid, i);
+        i++;
+    }
+
+    [[unroll]] for (uint j = 0; j < M; j++)
+        [[unroll]] for (uint n = 0; n < nCount; n++)
+            sums[j][n] = subgroupAdd(sums[j][n]);
+
+    if (wgSize > sgSize)
+    {
+        if (gl_SubgroupInvocationID == 0)
+            [[unroll]] for (uint j = 0; j < M; j++)
+                [[unroll]] for (uint n = 0; n < nCount; n++)
+                    tmpsh[j][n][gl_SubgroupID] = sums[j][n];
+        barrier();
+        if (tid == 0)
+        {
+            [[unroll]] for (uint j = 0; j < M; j++)
+            {
+                [[unroll]] for (uint n = 0; n < nCount; n++)
+                {
+                    sums[j][n] = 0.0;
+                    [[unroll]] for (uint s = 0; s < gl_NumSubgroups; s++)
+                        sums[j][n] += tmpsh[j][n][s];
+                }
+            }
+        }
+    }
+
+    if (tid != 0) return;
+    [[unroll]] for (uint j = 0; j < M; j++)
+    {
+        [[unroll]] for (uint n = 0; n < nCount; n++)
+        {
+            const uint idx = j * N + n0 + n;
+            const float acc = sums[j][n] + readBias(idx);
+            const float r = readR(idx);
+            writeO(idx, (residualOrder == 1u) ? scalarScale * applyEpilogue(acc + r)
+                                              : scalarScale * applyEpilogue(acc) + r);
+        }
+    }
+}
+
+void main()
+{
+    const uint n0 = (gl_WorkGroupID.x + gl_NumWorkGroups.x * gl_WorkGroupID.z) * wgN;
+    if (n0 >= N)
+        return;
+
+    if (n0 + wgN <= N)
+        computeOutputs(n0, wgN);
+    else
+        computeOutputs(n0, N - n0);
+}

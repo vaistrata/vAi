@@ -22,6 +22,9 @@ namespace vai::node {
   reads the same table. posTableSize > 0 adds a "posWeight" [posTableSize, D] slot
   and needs setKvCacheCounter() to supply cachedCount; positions restart at each
   sequence, which the kernel only has to work out when there is more than one.
+
+  A quantized table is the Dtype::Qint8 "weight" tensor a Linear takes ([V, D]),
+  so a tied head shares it. The kernel dequantizes the rows it gathers.
 =============================================================================*/
 class TokenEmbedding : public vai::Node
 {
@@ -74,11 +77,15 @@ inline void TokenEmbedding::prepare()
     VAI_ASSERT(inTen.validShape());
     VAI_ASSERT(wTen.isShapeOf(config_.vocabSize, config_.embedDim));
 
+    const bool quant = isQuantized(wTen.dtype());
+    Dtype wDtype = quant ? wDefaultDtype() : wTen.dtype();   // a quantized W alone leaves typeW unread
     if (config_.posTableSize)
     {
         const Tensor& posWTen = (*this)["posWeight"];
-        VAI_ASSERT(posWTen.dtype() == wTen.dtype());
+        VAI_ASSERT(!isQuantized(posWTen.dtype()));
+        VAI_ASSERT(quant || posWTen.dtype() == wTen.dtype());
         VAI_ASSERT(posWTen.isShapeOf(config_.posTableSize, config_.embedDim));
+        wDtype = posWTen.dtype();
     }
 
     const auto& inShape = inTen.shape();
@@ -95,10 +102,12 @@ inline void TokenEmbedding::prepare()
         pipeParams = p;
         // clang-format off
         pipe = pipelinePool().request("token-embedding", {
-            eva::constant_id<0>(config_.posTableSize ? 1u : 0u),   // hasPosEmbed
-            eva::constant_id<1>(p.batched ? 1u : 0u),              // batched
-            eva::constant_id<SPEC_ID_TYPE_O>(oDtype),      // typeO
-            eva::constant_id<SPEC_ID_TYPE_W>(wTen.dtype())         // typeW (W & posW)
+            eva::constant_id<0>(config_.posTableSize ? 1u : 0u),                      // hasPosEmbed
+            eva::constant_id<1>(p.batched ? 1u : 0u),                                 // batched
+            eva::constant_id<2>(config_.vocabSize),                                   // V (where a quantized W's scales start)
+            eva::constant_id<SPEC_ID_TYPE_O>(oDtype),                                 // typeO
+            eva::constant_id<SPEC_ID_TYPE_W>(wDtype),                                 // typeW (a float W & posW)
+            eva::constant_id<SPEC_ID_QUANTIZE>(quantizeTypeFromDtype(wTen.dtype()))   // quantize (W's format)
         });
         // clang-format on
         if (!descSet)
