@@ -8,8 +8,8 @@ namespace vai::node {
 
 /*=============================================================================
   NearestUpsample - Replicates CHW pixels by an integer scale factor.
-  Input:  in0  [C, H, W]
-  Output: out0 [C, H*scale, W*scale]
+  Input:  in0  [..., C, H, W]
+  Output: out0 [..., C, H*scale, W*scale]
 
   scaleFactor must be greater than one. Each input pixel is replicated without
   interpolation.
@@ -75,10 +75,12 @@ inline void NearestUpsample::prepare()
         if (!descSet)
             descSet = gVaiDestSetPool(pipe.descSetLayout(0));
     }
-    VAI_ASSERT(inTen.shape().size() == 3);
 
-    const auto& s = inTen.shape();
-    (*this)["out0"] = Tensor({ s[0], s[1] * scale, s[2] * scale }, oDtype);
+    VAI_ASSERT(inTen.shape().size() >= 3);
+    auto shape = inTen.shape();
+    shape[shape.size() - 2] *= scale;
+    shape.back() *= scale;
+    (*this)["out0"] = Tensor(shape, oDtype);
 }
 
 inline void NearestUpsample::run(eva::CommandBuffer cmdBuff)
@@ -89,9 +91,11 @@ inline void NearestUpsample::run(eva::CommandBuffer cmdBuff)
     descSet.write({ outBuf, inBuf });
 
     const auto& s = (*this)["in0"].shape();
-    uint32_t C = s[0];
-    uint32_t Hi = s[1];
-    uint32_t Wi = s[2];
+    uint32_t C = outerSize(s, 2);
+    uint32_t Hi = s[s.size() - 2];
+    uint32_t Wi = s.back();
+
+    VAI_ASSERT(C <= device().maxComputeWorkGroupCount()[2]);
 
     struct {
         uint32_t C, Hi, Wi;
