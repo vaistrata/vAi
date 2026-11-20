@@ -22,7 +22,7 @@ Separate the model structure, weight loading, and execution example. Changes to 
 | `data/tokenizers/<model>/` | Tokenizer files |
 | `data/images/` | Input images |
 
-`<impl>` is `production` for a finished implementation and `experimental` for one still in progress.
+`<impl>` is `production` for a finished implementation and `experimental` for one still in progress. **When contributing a model, implement it under `models/experimental/<model>/`.**
 
 GPT-2 uses `gpt2` as the model name and `openai` as the checkpoint distribution name. To support another distributor's checkpoint for the same model structure, add a new loader.
 
