@@ -64,6 +64,9 @@ nav:
       - GPT-2: en/04-models/gpt2.md
       - Llama 3: en/04-models/llama3.md
       - Gemma 3: en/04-models/gemma3.md
+      - PaliGemma: en/04-models/paligemma.md
+      - π0: en/04-models/pi0.md
+      - ACT: en/04-models/act.md
   - Built-in nodes: en/06-nodes.md
   - Contributing:
       - en/contributing/README.md               # Contribution workflow and automated checks
@@ -153,6 +156,9 @@ plugins:
                 - GPT-2: ko/04-models/gpt2.md
                 - Llama 3: ko/04-models/llama3.md
                 - Gemma 3: ko/04-models/gemma3.md
+                - PaliGemma: ko/04-models/paligemma.md
+                - π0: ko/04-models/pi0.md
+                - ACT: ko/04-models/act.md
             - 제공 노드들: ko/06-nodes.md
             - 기여하기:
                 - ko/contributing/README.md
