@@ -498,6 +498,10 @@ struct ImplicitGemmPlan
     bool alignK = false;
     bool padA = true;
     bool wideFp32Tile = false;
+    // conv-k7s2-direct (validDirectK7S2): wgN output columns by wgSize / wgN
+    // output rows per workgroup, tM output channels per pass; the GEMM fields
+    // are unused.
+    bool directK7S2 = false;
 
     auto operator<=>(const ImplicitGemmPlan&) const = default;
 };
@@ -2838,6 +2842,9 @@ constexpr std::array<K7S2ExactRule, 3> kK7S2ExactTable{
           1u,
           { 480u, 640u, 240u, 320u, 3u, 64u },
           { .wgSize = 256u, .wgM = 64u, .wgN = 64u, .wgK = 8u, .tM = 4u, .alignM = true, .alignN = true } },
+        // The stem as conv-k7s2-direct, fp32 or fp16 weights: 32 x 16 pixels, 16 channels a
+        // pass. In the ACT forward it takes 0.12 ms against the implicit GEMM's 0.31 ms (fp32)
+        // and the cooperative-matrix tile's 0.27 ms (fp16), which gather K = 147 through im2col.
         { eva::VENDOR_ID::AMD,
           kAMDStrixHaloDeviceId,
           40u,
@@ -2847,7 +2854,7 @@ constexpr std::array<K7S2ExactRule, 3> kK7S2ExactTable{
           ConvolutionFusion::Scale,
           1u,
           { 480u, 640u, 240u, 320u, 3u, 64u },
-          { .wgSize = 256u, .wgM = 64u, .wgN = 128u, .wgK = 8u, .tM = 8u, .alignM = true, .alignN = true } },
+          { .wgSize = 512u, .wgN = 32u, .tM = 16u, .directK7S2 = true } },
         { eva::VENDOR_ID::AMD,
           kAMDStrixHaloDeviceId,
           40u,
@@ -2857,15 +2864,7 @@ constexpr std::array<K7S2ExactRule, 3> kK7S2ExactTable{
           ConvolutionFusion::Scale,
           1u,
           { 480u, 640u, 240u, 320u, 3u, 64u },
-          { .wgSize = 128u,
-            .wgM = 64u,
-            .wgN = 16u,
-            .sgM = 16u,
-            .sgN = 16u,
-            .wgK = 0u,
-            .tM = 0u,
-            .panelK = 32u,
-            .cooperativeMatrix = true } },
+          { .wgSize = 512u, .wgN = 32u, .tM = 16u, .directK7S2 = true } },
     },
 };
 
@@ -2974,6 +2973,7 @@ private:
         PipelineBinding weightTransform;
         eva::Buffer transformedWeight;
         bool weightTransformed = false;
+        bool directWeight = false;   // transformedWeight is conv-k7s2-direct's layout, not cooperative-matrix fragments
     };
 
     // Shared by specialized K1S1, K3S1, and K3S2 paths. A node only
@@ -3403,6 +3403,25 @@ inline uint32_t convSharedMemoryBytes(const ImplicitGemmPlan& plan, Dtype weight
         : elements * sizeof(float) + 2u * sizeof(uint16_t);
 }
 
+// conv-k7s2-direct's shared memory: the input patch with its halo, columns split by parity.
+inline uint32_t directK7S2SharedMemoryBytes(const ImplicitGemmPlan& plan, uint32_t ci, uint32_t kernel)
+{
+    const uint32_t rows = 2u * (plan.wgSize / plan.wgN) + kernel - 2u;
+    const uint32_t columns = 2u * plan.wgN + kernel - 2u;
+    return ci * rows * 2u * ((columns + 1u) / 2u) * uint32_t(sizeof(float));
+}
+
+// The workloads conv-k7s2-direct runs: stride 2, an odd kernel over a few input
+// channels, fp32 input and output, no residual, Co a multiple of the channel
+// block. Its shared memory is checked with the launch (deriveConvLaunch).
+inline bool validDirectK7S2(const ImplicitGemmPlan& plan, const Workload& workload)
+{
+    return plan.directK7S2 && plan.wgN != 0u && plan.wgSize % plan.wgN == 0u && plan.tM != 0u &&
+           workload.co % plan.tM == 0u && workload.stride == 2u && workload.kernel >= 3u &&
+           workload.kernel % 2u == 1u && workload.ci <= 4u && !workload.residual && workload.iDtype == Dtype::Fp32 &&
+           workload.oDtype == Dtype::Fp32;
+}
+
 inline bool validImplicitGemmPlan(
     const ImplicitGemmPlan& plan,
     const eva::Device& device,
@@ -3411,6 +3430,10 @@ inline bool validImplicitGemmPlan(
 {
     if (weightDtype != Dtype::Fp16 && weightDtype != Dtype::Fp32)
         return false;
+
+    if (plan.directK7S2)
+        return !plan.cooperativeMatrix && plan.wgN != 0u && plan.wgSize != 0u && plan.wgSize % plan.wgN == 0u &&
+               plan.wgSize <= device.maxComputeWorkGroupInvocations() && plan.tM != 0u && plan.tM <= 64u;
 
     if (plan.wgSize == 0u || plan.wgM == 0u || plan.wgN == 0u)
         return false;
@@ -3788,6 +3811,29 @@ inline eva::ComputePipeline ConvPipeline(PipelinePool& pool, const ImplicitGemmP
     return pool.request(
         shader, std::move(specialization),
         {.requiredSubgroupSize = requiredSubgroupSize});
+}
+
+inline eva::ComputePipeline convK7S2DirectPipeline(
+    PipelinePool& pool, const ImplicitGemmPlan& plan, const Workload& workload, uint32_t epilogue, Dtype paramType,
+    uint32_t hasScale, uint32_t hasBias)
+{
+    VAI_ASSERT(plan.directK7S2);
+    eva::SpecializationConstant specialization{
+        eva::constant_id<0>(plan.wgN),
+        eva::constant_id<1>(plan.wgSize / plan.wgN),
+        eva::constant_id<2>(plan.tM),
+        eva::constant_id<3>(workload.kernel),
+        eva::constant_id<SPEC_ID_TYPE_CI>(workload.ci),
+        eva::constant_id<SPEC_ID_TYPE_CO>(workload.co),
+        eva::constant_id<SPEC_ID_TYPE_P>(paramType),
+    };
+    withFusion(specialization, epilogue, hasScale, hasBias);
+    return pool.request("conv-k7s2-direct", std::move(specialization));
+}
+
+inline eva::ComputePipeline convK7S2DirectWeightPipeline(PipelinePool& pool, Dtype typeW)
+{
+    return pool.request("conv-k7s2-direct-weight", { eva::constant_id<SPEC_ID_TYPE_W>(typeW) });
 }
 
 inline eva::ComputePipeline ConvCMPipeline(PipelinePool& pool, const ImplicitGemmPlan& plan, const Workload& workload,
@@ -4311,6 +4357,15 @@ inline ConvLaunch deriveConvLaunch(const ConvPlan& convPlan, const Workload& wor
                 .groupCount = { convWorkgroupCount(CEIL_DIV(uint64_t(Co), 4u) * N, plan.wgSize), 1u, 1u },
                 .sharedMemoryBytes = convSharedMemoryBytes(plan, workload.wDtype)
             };
+        if (plan.directK7S2)
+        {
+            if (plan.wgN == 0u || plan.wgSize < plan.wgN)
+                return ConvLaunch{ .dispatchRepresentable = false };
+            return ConvLaunch{
+                .groupCount = { convWorkgroupCount(Wo, plan.wgN), convWorkgroupCount(Ho, plan.wgSize / plan.wgN), 1u },
+                .sharedMemoryBytes = directK7S2SharedMemoryBytes(plan, workload.ci, workload.kernel)
+            };
+        }
         const uint8_t cmFeatures = convPlan.useCM
             ? uint8_t(ConvLaunch::CooperativeMatrix)
             : 0u;
@@ -4406,6 +4461,8 @@ inline std::vector<ConvLaunch> deriveConvLaunchRequirements(const ConvPlan& conv
             const uint64_t paddedK = ((rawK + 15u) / 16u) * 16u;
             appendTransformRequirement(requirements, paddedM * paddedK, 32u);
         }
+        if (convPlan.implicit.directK7S2)
+            appendTransformRequirement(requirements, Co * Ci * workload.kernel * workload.kernel, 0u);
         return requirements;
     }
 
@@ -5779,6 +5836,7 @@ inline ConvPlan selectGeneralFallbackPlan(
         fallback.implicit = *exactPlan;
         fallback.useCM = exactPlan->cooperativeMatrix;
         if (validImplicitGemmPlan(fallback.implicit, device, caps, workload.wDtype) &&
+            (!fallback.implicit.directK7S2 || validDirectK7S2(fallback.implicit, workload)) &&
             validConvLaunches(fallback, workload, device, caps))
             return fallback;
     }
@@ -6383,7 +6441,20 @@ inline void Convolution::prepareImplicit(const Workload& workload)
     const auto [iDtype, oDtype, affineDtype, hasScale, epilogue] = makeFusionSpec(workload);
     const ImplicitGemmPlan& plan = plan_.implicit;
 
-    if (plan_.useCM)
+    // The two transforms write different layouts: switching between them transforms again.
+    if (implicit.directWeight != plan.directK7S2)
+    {
+        implicit.weightTransformed = false;
+        implicit.directWeight = plan.directK7S2;
+    }
+
+    if (plan.directK7S2)
+    {
+        implicit.gemm = makePipelineBinding(
+            convK7S2DirectPipeline(pipelinePool(), plan, workload, epilogue, affineDtype, hasScale, hasBias()));
+        implicit.weightTransform = makePipelineBinding(convK7S2DirectWeightPipeline(pipelinePool(), workload.wDtype));
+    }
+    else if (plan_.useCM)
     {
         implicit.gemm = makePipelineBinding(ConvCMPipeline(
             pipelinePool(), plan, workload, epilogue, affineDtype, hasScale, hasBias(), residualFusion()));
@@ -6591,7 +6662,7 @@ inline bool Convolution::hasPendingWeightTransforms() const
     case ConvPlan::Path::General:
     {
         const ImplicitResources& implicit = std::get<ImplicitResources>(prepared_);
-        return plan_.useCM && !implicit.weightTransformed;
+        return (plan_.useCM || plan_.implicit.directK7S2) && !implicit.weightTransformed;
     }
     }
     VAI_ASSERT(false && "invalid convolution plan");
@@ -6670,6 +6741,20 @@ inline bool Convolution::recordImplicitWeightTransform(eva::CommandBuffer cmdBuf
 {
     ImplicitResources& implicit =
         std::get<ImplicitResources>(prepared_);
+    if (plan_.implicit.directK7S2)
+    {
+        const uint32_t elements = workload.co * workload.ci * workload.kernel * workload.kernel;
+        return ensureWeightTransform(
+            device(),
+            cmdBuff,
+            implicit.weightTransform,
+            (*this)["weight"].buffer(),
+            implicit.transformedWeight,
+            makePushConstants(workload),
+            size_t(elements) * sizeof(float),
+            elements,
+            implicit.weightTransformed);
+    }
     if (!plan_.useCM || implicit.weightTransformed)
         return false;
 
@@ -7101,6 +7186,24 @@ inline void Convolution::runConv(eva::CommandBuffer cmdBuff, const Workload& wor
     Tensor& inTen = (*this)["in0"];
     const eva::BufferRange weight = (*this)["weight"].buffer();
     const AffineBindings affine = convAffineBindings(*this, hasBias(), hasScale());
+    if (plan.directK7S2)
+    {
+        implicit.gemm.descriptorSet.write({
+            outTen.buffer(),
+            inTen.buffer(),
+            implicit.transformedWeight,
+            affine.bias,
+            affine.scale,
+        });
+        recordDispatch(
+            cmdBuff,
+            implicit.gemm,
+            makePushConstants(workload),
+            CEIL_DIV(workload.wo, plan.wgN),
+            CEIL_DIV(workload.ho, plan.wgSize / plan.wgN));
+        cmdBuff.barrier(eva::SYNC_SCOPE::COMPUTE_WRITE / outTen.buffer() / eva::SYNC_SCOPE::COMPUTE_READ);
+        return;
+    }
     implicit.gemm.descriptorSet.write({
         outTen.buffer(),
         inTen.buffer(),
