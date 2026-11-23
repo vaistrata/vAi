@@ -51,7 +51,7 @@
 
  Split-K: workgroup z owns the K span [z * splitSize, min(K, (z + 1) *
  splitSize)) and writes its partials to P[z, M, N] on binding 0;
- linear-reduce.comp folds the partials and applies bias / epilogue.
+ linear-reduce.comp folds the partials and applies bias / activation.
 
  Dispatch (host): (ceil(N / wgN), ceil(M / wgM), ceil(K / splitSize))
 =============================================================================*/

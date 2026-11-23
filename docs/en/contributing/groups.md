@@ -37,13 +37,13 @@ struct Config {
     uint32_t inDim;
     uint32_t hiddenDim;
     uint32_t outDim;
-    vai::Epilogue activation = vai::Epilogue::None;
+    vai::ActType actType = vai::ActType::None;
     bool acceptResidual = false;
 };
 ```
 
 `inDim`, `hiddenDim`, and `outDim` determine the sizes of the `Linear` `Node` objects to create.
-`activation` is the activation function applied by the first `Linear`. The default, `None`, applies no activation function.
+`actType` is the activation function applied by the first `Linear`. The default, `None`, applies no activation function.
 Receive shared values once and pass them to the components that need them, so the group does not define the same value more than once.
 
 Express structural differences according to the following criteria.
@@ -129,7 +129,7 @@ struct FeedForward : public vai::NodeGroup
     // ... Config from section 2
 
     FeedForward(Config config)
-    : fc1({ .inDim = config.inDim, .outDim = config.hiddenDim, .epilogue = config.activation })
+    : fc1({ .inDim = config.inDim, .outDim = config.hiddenDim, .actType = config.actType })
     , fc2({ .inDim = config.hiddenDim, .outDim = config.outDim, .acceptResidual = config.acceptResidual })
     {
         // ... Connections from section 4 and slot exposure from section 5

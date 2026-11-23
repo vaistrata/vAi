@@ -9,7 +9,7 @@
 | [Activation](#activation) | Applies an element-wise activation. | `activation.comp` |
 | [Add](#add) | element-wise addition for residual connections | `add.comp` |
 | [Argmax](#argmax) | Row-wise argmax / greedy sampling | `argmax.comp` |
-| [Attention](#attention) | fused KV cache append + causal attention (GQA), split between four paths | `attention-fa-intel.comp`, `attention-fa-cm-intel.comp`, `attention-fa-cm.comp`, `attention-fa.comp`, `attention-fa-reduce-intel.comp`, `attention-fa-reduce.comp`, `attention.comp` |
+| [Attention](#attention) | fused KV cache append + causal attention (GQA), split between five paths | `attention-cm-xe3.comp`, `attention-append-xe3.comp`, `linear-cm-xe3.comp`, `attention-prep-xe3.comp`, `attention-softmax-xe3.comp`, `attention-fa-intel.comp`, `attention-fa-cm-intel.comp`, `attention-fa-cm.comp`, `attention-fa.comp`, `attention-fa-reduce-intel.comp`, `attention-fa-reduce.comp`, `attention.comp` |
 | [Concat](#concat) | join inputs along one axis | `concat.comp` |
 | [Convolution](#convolution) | 2D convolution with device-selected direct, implicit, or Winograd plans | `conv-k1s1-gemm-cm.comp`, `conv-k1s1-gemm.comp`, `conv-k3s2-gemm-cm.comp`, `conv-k3s1-implicit-gemm-cm.comp`, `conv-k3s1-implicit-gemm.comp`, `conv-implicit-gemm.comp`, `conv-implicit-gemm-cm.comp`, `conv-k3s2-gemm.comp`, `cm-transform.comp`, `conv-k3s1-winograd-filter-transform.comp`, `conv-k3s1-winograd-input.comp`, `conv-k3s1-winograd-output.comp`, `bn-reduce.comp`, `conv-k3s1-winograd-gemm.comp`, `conv-k3s1-winograd-gemm-cm.comp` |
 | [CyclicTableReader](#cyclictablereader) | read successive table rows, wrapping at the end | `cyclic-table-reader.comp` |
@@ -21,7 +21,7 @@
 | [Identity](#identity) | Pass-through node (no computation) | — |
 | [IndexCopy](#indexcopy) | write source slices at listed indices, as torch.index_copy | `index-copy.comp` |
 | [LayerNorm](#layernorm) | layer normalization over the feature axis, single kernel | `layer-norm.comp` |
-| [Linear](#linear) | O = I · Wᵀ, split between two output decompositions | `linear-pack-intel.comp`, `linear-preshuffle.comp`, `linear-slab.comp`, `linear-tile-intel.comp`, `linear-cm-amd.comp`, `linear-cm-nv.comp`, `linear-cm.comp`, `linear-tile.comp`, `linear-reduce.comp` |
+| [Linear](#linear) | O = I · Wᵀ, split between two output decompositions | `linear-pack-intel.comp`, `linear-preshuffle.comp`, `linear-pack-xe3.comp`, `linear-glu-rows.comp`, `linear-slab.comp`, `cast.comp`, `linear-cm-xe3.comp`, `linear-tile-intel.comp`, `linear-cm-amd.comp`, `linear-cm-nv.comp`, `linear-cm.comp`, `linear-tile.comp`, `linear-reduce.comp` |
 | [Mul](#mul) | Element-wise multiplication | `mul.comp` |
 | [NearestUpsample](#nearestupsample) | Replicates CHW pixels by an integer scale factor. | `upsample.comp` |
 | [Permute](#permute) | Permutes the axes of a tensor of any rank. | `permute.comp` |
@@ -46,7 +46,7 @@ Applies an element-wise activation.
 **시그니처**
 
 - 입력: in0 [any shape]
-- 출력: epilogue(in0); optionally in-place
+- 출력: activation(in0); optionally in-place
 
 **슬롯**
 
@@ -59,7 +59,7 @@ Applies an element-wise activation.
 
 | 필드 | 타입 | 기본값 | 설명 |
 |---|---|---|---|
-| `epilogue` | `vai::Epilogue` | `vai::Epilogue::None` |  |
+| `actType` | `vai::ActType` | `vai::ActType::None` |  |
 | `inPlace` | `bool` | `false` |  |
 
 **동작 및 제약**
@@ -133,7 +133,7 @@ in0[m, :]. Output elements are raw uint32 values, not fp32 numeric values.
 
 ## Attention
 
-fused KV cache append + causal attention (GQA), split between four paths
+fused KV cache append + causal attention (GQA), split between five paths
 
 소스: [`vai/nodes/attention.h`](../../vai/nodes/attention.h)
 
@@ -154,6 +154,11 @@ fused KV cache append + causal attention (GQA), split between four paths
 | `V_cache` | persistent |  |
 | `partialML` | temporary |  |
 | `partialO` | temporary |  |
+| `xe3L` | temporary |  |
+| `xe3P` | temporary |  |
+| `xe3Q` | temporary |  |
+| `xe3S` | temporary |  |
+| `xe3V` | temporary |  |
 
 **Config**
 
@@ -182,14 +187,25 @@ fixed 16x64 tile; prefill and GQA-packed decode on cm-capable devices,
 and the only FA tile past Dh 256 (384 / 512 on NVIDIA / AMD).
 - scalar FA (attention-fa): flash attention with per-(shape,
 vendor) tuned tiles, Dh <= 256; everything the cm gates reject.
-- Intel FA (attention-fa-intel): Intel parts without a coopmat path;
-a 16-row tile packs one KV group's heads, subgroup-broadcast products.
+- Intel FA (attention-fa-intel): Intel parts without a coopmat path, and
+Xe3 where its three-pass path does not apply; a 16-row tile packs one KV
+group's heads, subgroup-broadcast products.
 - naive (attention): the unconditional fallback — unfamiliar
 devices degrade instead of crashing. See supportsFlashAttention().
+- Xe3 on the fork's 2D block loads (ANV_CMAT_BLOCK2D=1), fp16 throughout.
+Grids of 256 8-row tiles or more run in one pass (attention-cm-xe3):
+Q K^T, the online softmax and P V stay in a subgroup's registers, after
+attention-append-xe3 puts the new K / V in the cache. Smaller grids run
+three passes: the two products on the Linear kernel (linear-cm-xe3) with
+attention-softmax-xe3 between them, after attention-prep-xe3 appends and
+lays V out. With a cache: one sequence and one KV head, no ring. Without
+one: any. Under 64 rows a KV head, and everything else on Xe3, keep the
+kernels below. See prepare().
 
-Intel's coopmat tiles (Xe2 / Xe3) run attention-fa-cm-intel, the kernel
-Intel was verified with, under the tuning it was verified with; the other
-vendors' tuning moved attention-fa-cm on.
+Intel's coopmat tiles (Xe2, and Xe3 for the grids the Intel kernel leaves)
+run attention-fa-cm-intel, the kernel Intel was verified with, under the
+tuning it was verified with; the other vendors' tuning moved
+attention-fa-cm on.
 
 The path and tuning are selected per (shape, device) in prepare(); a tuning
 change re-requests the pipeline from the pool. Every path leaves the KV
@@ -233,6 +249,11 @@ new token to the last split.
 
 **커널**
 
+- `vai/shaders/attention-cm-xe3.comp`
+- `vai/shaders/attention-append-xe3.comp`
+- `vai/shaders/linear-cm-xe3.comp`
+- `vai/shaders/attention-prep-xe3.comp`
+- `vai/shaders/attention-softmax-xe3.comp`
 - `vai/shaders/attention-fa-intel.comp`
 - `vai/shaders/attention-fa-cm-intel.comp`
 - `vai/shaders/attention-fa-cm.comp`
@@ -325,16 +346,16 @@ Off, every input is required, so a recording that cannot supply one drops this n
 | `kernelSize` | `uint32_t` | — |  |
 | `stride` | `uint32_t` | — |  |
 | `acceptResidual` | `bool` | `false` | input "residual" |
-| `residualOrder` | `vai::ResidualOrder` | `vai::ResidualOrder::AfterEpilogue` |  |
-| `epilogue` | `vai::Epilogue` | `vai::Epilogue::None` |  |
+| `residualOrder` | `vai::ResidualOrder` | `vai::ResidualOrder::AfterActivation` |  |
+| `actType` | `vai::ActType` | `vai::ActType::None` |  |
 
 **동작 및 제약**
 
 The "scale" and "bias" slots always exist; each applies only when the weight
 loader filled it. Odd kernels use symmetric same-padding, so each spatial
 output size is ceil(inputSize / stride).
-acceptResidual opens the "residual" input (input dtype), added after the epilogue
-or, with ResidualOrder::BeforeEpilogue, before it.
+acceptResidual opens the "residual" input (input dtype), added after the activation
+or, with ResidualOrder::BeforeActivation, before it.
 The axes ahead of Ci are a batch of images. The plan is one image's; every
 dispatch stacks the images on its z axis, and each kernel offsets its buffers
 to its image.
@@ -521,7 +542,7 @@ element-wise multiply with one operand activated (GLU gating)
 
 | 필드 | 타입 | 기본값 | 설명 |
 |---|---|---|---|
-| `activation` | `vai::Epilogue` | `vai::Epilogue::Silu` |  |
+| `actType` | `vai::ActType` | `vai::ActType::Silu` |  |
 
 **동작 및 제약**
 
@@ -529,7 +550,7 @@ The two halves arrive in ONE buffer: the projections feeding them are a
 single Linear over the concatenated weights, so the leading half is whatever
 that concatenation put first. It is the activated one.
 
-activation names the GLU variant — silu: SwiGLU, gelu: GEGLU, relu: ReGLU,
+actType names the GLU variant — silu: SwiGLU, gelu: GEGLU, relu: ReGLU,
 none: bilinear.
 
 **커널**
@@ -547,7 +568,7 @@ group normalization over a CHW feature map
 **시그니처**
 
 - 입력: in0 [..., C, H, W], optional residual [..., C, H, W]
-- 출력: epilogue(scale[c] * (in0 - μ[g(c)]) * rsqrt(σ²[g(c)] + eps) + shift[c]) + residual
+- 출력: activation(scale[c] * (in0 - μ[g(c)]) * rsqrt(σ²[g(c)] + eps) + shift[c]) + residual
 
 **슬롯**
 
@@ -565,8 +586,8 @@ group normalization over a CHW feature map
 | `eps` | `float` | `1e-5f` |  |
 | `coeffsAsInputs` | `bool` | `false` | scale / shift are inputs, not parameters |
 | `acceptResidual` | `bool` | `false` | input "residual" |
-| `residualOrder` | `vai::ResidualOrder` | `vai::ResidualOrder::AfterEpilogue` |  |
-| `epilogue` | `vai::Epilogue` | `vai::Epilogue::None` |  |
+| `residualOrder` | `vai::ResidualOrder` | `vai::ResidualOrder::AfterActivation` |  |
+| `actType` | `vai::ActType` | `vai::ActType::None` |  |
 
 **동작 및 제약**
 
@@ -574,7 +595,7 @@ The channel axis is third from the end; the axes before it are independent
 samples. scale / shift [C] are parameters, or inputs under coeffsAsInputs
 (e.g. AdaGN's timestep modulation); shift applies when present, filled by
 the loader or wired. acceptResidual opens the "residual" input (input
-dtype), added after the epilogue or, with ResidualOrder::BeforeEpilogue,
+dtype), added after the activation or, with ResidualOrder::BeforeActivation,
 before it. The channels split into `groups` consecutive groups; each group's statistics
 are computed at run time over its C/groups channels and all of their spatial
 positions (unlike BatchNorm, which reads μ/σ² trained offline). One
@@ -740,6 +761,7 @@ O = I · Wᵀ, split between two output decompositions
 | `out0` | output |  |
 | `bias` | persistent |  |
 | `weight` | persistent |  |
+| `inputF16` | temporary |  |
 | `partial` | temporary |  |
 
 **Config**
@@ -749,10 +771,11 @@ O = I · Wᵀ, split between two output decompositions
 | `inDim` | `uint32_t` | — |  |
 | `outDim` | `uint32_t` | — |  |
 | `acceptResidual` | `bool` | `false` | input "residual" |
-| `residualOrder` | `vai::ResidualOrder` | `vai::ResidualOrder::AfterEpilogue` |  |
-| `epilogue` | `vai::Epilogue` | `vai::Epilogue::None` |  |
-| `scalarScale` | `float` | `1.0f` | s, right after the epilogue |
+| `residualOrder` | `vai::ResidualOrder` | `vai::ResidualOrder::AfterActivation` |  |
+| `actType` | `vai::ActType` | `vai::ActType::None` |  |
+| `scalarScale` | `float` | `1.0f` | s, right after the activation |
 | `splitSize` | `uint32_t` | `0` | split-K: K length per split (0: the vendor's count per shape) |
+| `glu` | `bool` | `false` |  |
 
 **동작 및 제약**
 
@@ -760,7 +783,7 @@ vai naming: O [M, N], I [M, K] (M = flattened batch), W [N, K]
 (N = outDim, K = inDim).
 
 - slab (M <= 8, linear-slab): a workgroup owns wgN whole columns of O,
-so K is split across its threads and reduced; bias / epilogue are fused
+so K is split across its threads and reduced; bias / activation are fused
 in-kernel. See useSlabPath().
 - tile (M > 8): a workgroup owns a wgM x wgN tile. Two kernels share the
 frame, chosen per device in selectLinearTile(): scalar
@@ -776,6 +799,11 @@ Other shapes keep linear-cm, on those chips also M-first or prefetching.
 OpenVINO's fully_connected_gpu_bf_tiled, reading W packed once on the GPU
 (packWeightIntel); its tile choice is intelTileParams(), its split
 intelTileSplitCount().
+- Xe3 (useXe3Cm; every M, slab included): linear-cm-xe3, coopmat loads
+straight from global memory. Runs only on the local Mesa fork started
+with ANV_CMAT_BLOCK2D=1 (tests/linear-tune-intel-cm). fp16 I and W only;
+W is transposed once into [K, N] rows (repackWeightXe3). Its tile, split
+and the rest are xe3LinearTile().
 Everything below applies to every tile kernel:
 
 The tile params are selected per output shape in prepare(); when a shape
@@ -783,12 +811,12 @@ change selects a different tile, the pipeline is re-requested from the pool.
 
 Split-K (splitSize option; 0 selects the vendor's rule per shape)
 accumulates partials P[splitCount, M, N] (oDtype) in a temporary buffer
-and folds them in a second pass (linear-reduce); bias / epilogue / the
+and folds them in a second pass (linear-reduce); bias / activation / the
 residual live in that reduce pass, unless linear-cm-amd fuses them into an
 unsplit tile.
 
-O = s · epilogue(I · Wᵀ + bias) + R      residualOrder AfterEpilogue
-O = s · epilogue(I · Wᵀ + bias + R)      residualOrder BeforeEpilogue
+O = s · activation(I · Wᵀ + bias) + R      residualOrder AfterActivation
+O = s · activation(I · Wᵀ + bias + R)      residualOrder BeforeActivation
 
 s is Config::scalarScale (e.g. dt of an Euler step x + dt · v), 1 by default.
 
@@ -801,7 +829,11 @@ weight loader filled it.
 
 - `vai/shaders/linear-pack-intel.comp`
 - `vai/shaders/linear-preshuffle.comp`
+- `vai/shaders/linear-pack-xe3.comp`
+- `vai/shaders/linear-glu-rows.comp`
 - `vai/shaders/linear-slab.comp`
+- `vai/shaders/cast.comp`
+- `vai/shaders/linear-cm-xe3.comp`
 - `vai/shaders/linear-tile-intel.comp`
 - `vai/shaders/linear-cm-amd.comp`
 - `vai/shaders/linear-cm-nv.comp`

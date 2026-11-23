@@ -48,7 +48,7 @@ private:
             .numQHeads = embedDim / 64,
             .numKVHeads = embedDim / 64,
             .ffnHiddenDim = embedDim * 4,
-            .ffnActivation = vai::Epilogue::GeluTanh,
+            .ffnActType = vai::ActType::GeluTanh,
         };
     }
 };

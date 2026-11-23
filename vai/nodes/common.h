@@ -2,8 +2,8 @@
 #define VAI_NODES_COMMON_H
 
 // Shared base for every builtin-node header: the Node/Tensor engine API, the
-// std headers the node implementations use, the Epilogue enum, and the build
-// macros (SHADER_SPV / CEIL_DIV / SPEC_ID_EPILOGUE). Each nodes/*.h includes
+// std headers the node implementations use, the vai::ActType enum, and the build
+// macros (SHADER_SPV / CEIL_DIV / SPEC_ID_ACT_TYPE). Each nodes/*.h includes
 // this so the domain headers are self-contained and independent of one another.
 #include "vai/engine/neural-net.h"
 #include "vai/engine/graph-flow.h"
@@ -28,7 +28,7 @@ namespace vai {
 // descriptor setup references it. For the device, use Node::device().
 extern eva::DescriptorPool gVaiDestSetPool;
 
-enum class Epilogue : uint32_t {
+enum class ActType : uint32_t {
     None,
     Relu,
     Gelu,       // exact, through erf
@@ -38,10 +38,10 @@ enum class Epilogue : uint32_t {
     Max
 };
 
-// Where Linear and Convolution fold their "residual" in, relative to the epilogue.
+// Where Linear and Convolution fold their "residual" in, relative to the activation.
 enum class ResidualOrder : uint32_t {
-    AfterEpilogue = 0,    // a following Add (e.g. YOLO's bottleneck)
-    BeforeEpilogue = 1,   // an Add ahead of the activation (e.g. ResNet's block, pi0's time MLP)
+    AfterActivation = 0,    // a following Add (e.g. YOLO's bottleneck)
+    BeforeActivation = 1,   // an Add ahead of the activation (e.g. ResNet's block, pi0's time MLP)
 };
 
 enum class RopeType {

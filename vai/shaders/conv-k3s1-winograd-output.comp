@@ -17,7 +17,7 @@ layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;
 
 layout(constant_id = 3) const bool shortcut = false;
 layout(constant_id = 4) const bool STORE_MODE = false;
-layout(constant_id = 5) const uint residualOrder = 0u;  // 0: after the epilogue, 1: before it
+layout(constant_id = 5) const uint residualOrder = 0u;  // 0: after the activation, 1: before it
 layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0u;
 layout(constant_id = SPEC_ID_TYPE_I) const uint typeI = 0u;
 layout(constant_id = SPEC_ID_TYPE_W) const uint typeW = 0u;
@@ -114,7 +114,7 @@ void writeO(
     uint offset = imageOutputBase + (c * pc.ho + oh) * pc.wo + ow;
     if (shortcut && residualOrder == 1u)
         value += readR(offset);
-    value = applyEpilogue(value);
+    value = applyActivation(value);
     if (shortcut && residualOrder == 0u)
         value += readR(offset);
 
@@ -166,7 +166,7 @@ void writeOutputRow(
     }
     if (shortcut && residualOrder == 1u)
         value += residual;
-    value = applyEpilogue(value);
+    value = applyActivation(value);
     if (shortcut && residualOrder == 0u)
         value += residual;
 

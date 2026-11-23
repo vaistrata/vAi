@@ -72,7 +72,7 @@ inline FocusConv::FocusConv(uint32_t inChannels, uint32_t outChannels, uint32_t 
       .outChannels = outChannels,
       .kernelSize = kernelSize,
       .stride = 1u,
-      .epilogue = vai::Epilogue::Silu,
+      .actType = vai::ActType::Silu,
   })
 , inputChannels_(inChannels)
 {
@@ -116,10 +116,7 @@ inline vai::node::Workload FocusConv::makeFocusWorkload() const
 inline FocusConv::Plan FocusConv::selectPlan(const vai::node::Workload& workload) const
 {
     const eva::Device currentDevice = device();
-    const vai::node::ConvolutionCaps caps{
-        .hasCM = vai::node::hasCooperativeMatrixUnit(currentDevice.vendorID(), currentDevice.architectureID()),
-        .accFP16 = vai::node::supportsCMShape(currentDevice, vai::Dtype::Fp16, vai::Dtype::Fp16),
-    };
+    const vai::node::ConvolutionCaps caps = vai::node::convolutionCaps(currentDevice);
 
     Plan plan;
     plan.cooperativeMatrix = workload.wDtype == vai::Dtype::Fp16 && vai::node::enableCM(currentDevice, caps);
@@ -192,7 +189,7 @@ inline void FocusConv::preparePipeline(const vai::node::Workload& workload, cons
                               vai::Dtype::Fp32,
                               nextPlan.accType,
                               { .includeAcc = true });
-        vai::node::withFusion(specialization, uint32_t(vai::Epilogue::Silu), 1u, 1u);
+        vai::node::withFusion(specialization, uint32_t(vai::ActType::Silu), 1u, 1u);
         gemm_ = vai::node::makePipelineBinding(device().createComputePipeline({
             .csStage = { focusConvCMSpv, std::move(specialization) },
             .requiredSubgroupSize = 32u,
@@ -222,7 +219,7 @@ inline void FocusConv::preparePipeline(const vai::node::Workload& workload, cons
                               workload.wDtype,
                               0u,
                               { .includeWeight = true });
-        vai::node::withFusion(specialization, uint32_t(vai::Epilogue::Silu), 1u, 1u);
+        vai::node::withFusion(specialization, uint32_t(vai::ActType::Silu), 1u, 1u);
         gemm_ = vai::node::makePipelineBinding(device().createComputePipeline({
             .csStage = { focusConvSpv, std::move(specialization) },
         }));

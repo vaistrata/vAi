@@ -9,13 +9,13 @@ namespace vai::node {
 /*=============================================================================
   GroupNorm - group normalization over a CHW feature map
   Input:  in0 [..., C, H, W], optional residual [..., C, H, W]
-  Output: epilogue(scale[c] * (in0 - μ[g(c)]) * rsqrt(σ²[g(c)] + eps) + shift[c]) + residual
+  Output: activation(scale[c] * (in0 - μ[g(c)]) * rsqrt(σ²[g(c)] + eps) + shift[c]) + residual
 
   The channel axis is third from the end; the axes before it are independent
   samples. scale / shift [C] are parameters, or inputs under coeffsAsInputs
   (e.g. AdaGN's timestep modulation); shift applies when present, filled by
   the loader or wired. acceptResidual opens the "residual" input (input
-  dtype), added after the epilogue or, with ResidualOrder::BeforeEpilogue,
+  dtype), added after the activation or, with ResidualOrder::BeforeActivation,
   before it. The channels split into `groups` consecutive groups; each group's statistics
   are computed at run time over its C/groups channels and all of their spatial
   positions (unlike BatchNorm, which reads μ/σ² trained offline). One
@@ -62,8 +62,8 @@ public:
         float eps = 1e-5f;
         bool coeffsAsInputs = false;   // scale / shift are inputs, not parameters
         bool acceptResidual = false;   // input "residual"
-        vai::ResidualOrder residualOrder = vai::ResidualOrder::AfterEpilogue;
-        vai::Epilogue epilogue = vai::Epilogue::None;
+        vai::ResidualOrder residualOrder = vai::ResidualOrder::AfterActivation;
+        vai::ActType actType = vai::ActType::None;
     } config_;
 
     GroupNorm(Config config);
@@ -121,7 +121,7 @@ inline GroupNorm::GroupNorm(Config config)
 : config_(config)
 {
     VAI_ASSERT(config_.groups != 0u);
-    VAI_ASSERT(config_.epilogue < Epilogue::Max);
+    VAI_ASSERT(config_.actType < vai::ActType::Max);
 
     addSlot("out0", NodeSlot::output);
     addSlot("in0", NodeSlot::input);
@@ -184,7 +184,7 @@ inline void GroupNorm::prepare()
             eva::constant_id<7>(config_.groups),                    // groups
             eva::constant_id<8>(config_.acceptResidual ? 1u : 0u),  // hasResidual
             eva::constant_id<9>((uint32_t)config_.residualOrder),   // residualOrder
-            eva::constant_id<SPEC_ID_EPILOGUE>((uint32_t)config_.epilogue),
+            eva::constant_id<SPEC_ID_ACT_TYPE>((uint32_t)config_.actType),
             eva::constant_id<SPEC_ID_TYPE_O>(oDtype),       // typeO
             eva::constant_id<SPEC_ID_TYPE_I>(iDtype),               // typeI
             eva::constant_id<SPEC_ID_TYPE_W>(wDtype),               // typeW (scale & shift)

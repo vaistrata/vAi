@@ -27,7 +27,7 @@ layout(constant_id = 6) const bool alignN = false;
 layout(constant_id = 7) const bool alignK = false;
 layout(constant_id = 8) const uint splitK = 0u;
 layout(constant_id = 9) const bool shortcut = false;
-layout(constant_id = 10) const uint residualOrder = 0u;  // 0: after the epilogue, 1: before it
+layout(constant_id = 10) const uint residualOrder = 0u;  // 0: after the activation, 1: before it
 layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0u;
 layout(constant_id = SPEC_ID_TYPE_I) const uint typeI = 0u;
 layout(constant_id = SPEC_ID_TYPE_W) const uint typeW = 0u;
@@ -150,7 +150,7 @@ vec4 applyOutput(uint i, uint base, uint count, vec4 acc)
     const vec4 residual = shortcut ? readResidual4(base, count) : vec4(0.0);
     if (shortcut && residualOrder == 1u)
         value += residual;
-    value = applyEpilogue(value);
+    value = applyActivation(value);
     if (shortcut && residualOrder == 0u)
         value += residual;
     return value;

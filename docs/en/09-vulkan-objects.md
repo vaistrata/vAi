@@ -267,7 +267,7 @@ pipe = pipelinePool().request("activation", {
     eva::constant_id<0>(config_.inPlace ? 1u : 0u),
     eva::constant_id<SPEC_ID_TYPE_O>(oDtype),
     eva::constant_id<SPEC_ID_TYPE_I>(iDtype),
-    eva::constant_id<SPEC_ID_EPILOGUE>((uint32_t) config_.epilogue)
+    eva::constant_id<SPEC_ID_ACT_TYPE>((uint32_t) config_.actType)
 });
 ```
 

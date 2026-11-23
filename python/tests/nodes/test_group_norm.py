@@ -1,5 +1,5 @@
 import torch.nn.functional as F
-from node_check import EPILOGUES, check_node
+from node_check import ACTIVATIONS, check_node
 
 import pyvai
 from pyvai import nodes
@@ -24,16 +24,16 @@ def test_group_norm_no_shift_batched():
     )
 
 
-def test_group_norm_epilogue_residual():
+def test_group_norm_activation_residual():
     check_node(
         lambda: nodes.GroupNormNode(
             groups=4,
             accept_residual=True,
-            residual_order=pyvai.ResidualOrder.BEFORE_EPILOGUE,
-            epilogue=pyvai.Epilogue.RELU,
+            residual_order=pyvai.ResidualOrder.BEFORE_ACTIVATION,
+            act_type=pyvai.ActType.RELU,
         ),
         {"in0": (8, 4, 4), "residual": (8, 4, 4)},
-        lambda in0, residual, scale, shift: EPILOGUES["RELU"](
+        lambda in0, residual, scale, shift: ACTIVATIONS["RELU"](
             F.group_norm(in0[None], 4, scale, shift, 1e-5)[0] + residual
         ),
         params={"scale": (8,), "shift": (8,)},

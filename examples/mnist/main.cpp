@@ -46,7 +46,7 @@ struct ConvBlock : public vai::NodeGroup {
           .outChannels = outChannels,
           .kernelSize = kernelSize,
           .stride = 1,
-          .epilogue = vai::Epilogue::Relu,
+          .actType = vai::ActType::Relu,
       })
     , maxpool({ .kernelSize = 2, .stride = 2 })
     {
@@ -108,6 +108,9 @@ struct Net : public vai::NeuralNet
         // clang-format off
         input("in0") - convX2 - flatten - linear - output("out0");
         // clang-format on
+
+        // The logits are read back as fp32, whatever oDefaultDtype is.
+        linear.setODtype(Dtype::Fp32, dtypeKey());
     }
 };
 
