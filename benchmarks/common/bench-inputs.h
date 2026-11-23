@@ -1,6 +1,9 @@
 #ifndef BENCHMARKS_COMMON_BENCH_INPUTS_H
 #define BENCHMARKS_COMMON_BENCH_INPUTS_H
 
+#include <cstdint>
+#include <vector>
+
 // LLM benches: a prompt of N tokens is the first N tokens of this paragraph.
 // clang-format off
 inline constexpr const char* llmParagraph =
@@ -17,5 +20,28 @@ inline constexpr const char* llmParagraph =
     "None of these lessons will be learned automatically, and none of the institutions described here will build themselves; they will be assembled, argued over, and revised by people who chose to treat this transition as their generation's shared responsibility rather than someone else's distant problem, one meeting, one standard, and one carefully examined failure at a time. "
     "Perhaps the most honest summary is that the technology has outrun our vocabulary for it. We still reach for words like intelligence, understanding, and intention because they are the words we have, not because they fit. Better ones will come, as they did for electricity and for flight, once enough people have lived alongside these systems long enough to notice what they actually do rather than what they seem to promise. Until then, the most useful posture is neither awe nor dismissal but patient attention: measuring carefully, publishing what we find, and keeping the comparison fair enough that the next reader can trust it without having to take our word.";
 // clang-format on
+
+
+// VLA benches: one observation - three cameras under VAI_DATA_DIR, a task and the robot's
+// state - and the seed of the flow-matching noise, as models/production/pi05/demo.cpp uses them.
+inline constexpr const char* vlaCameras[] = {
+    "images/cam_high.jpg",
+    "images/cam_left_wrist.jpg",
+    "images/cam_right_wrist.jpg",
+};
+
+inline constexpr const char* vlaTask = "Take the shoe with patterned bottom from the table and place it on the mat";
+
+inline constexpr uint64_t vlaNoiseSeed = 0;
+
+
+// The state, already normalized: six joint positions 0.1 .. 0.6, zero-padded to width.
+inline std::vector<float> makeVLAState(uint32_t width)
+{
+    std::vector<float> state(width, 0.0f);
+    for (uint32_t i = 0; i < 6 && i < width; ++i)
+        state[i] = 0.1f * float(i + 1);
+    return state;
+}
 
 #endif   // BENCHMARKS_COMMON_BENCH_INPUTS_H
