@@ -49,7 +49,7 @@ struct EncoderBlock : public vai::NodeGroup
           .inDim = config.embedDim,
           .hiddenDim = config.ffnHiddenDim,
           .outDim = config.embedDim,
-          .activation = vai::Epilogue::Relu,
+          .actType = vai::ActType::Relu,
           .acceptResidual = true,
       })
     , norm2({ .eps = config.normEps })

@@ -19,7 +19,7 @@ First, define the values to compute and the supported input conditions. These co
 | Slot names | Inputs and outputs to connect in the graph | Input `in0`, output `out0` |
 | Shape | Meaning of each axis and supported sizes | Input and output have the same shape |
 | dtype | Supported input and output storage formats | FP32 and FP16 |
-| Configuration | Values to set when creating the `Node` | Activation function `epilogue`, in-place operation `inPlace` |
+| Configuration | Values to set when creating the `Node` | Activation function `actType`, in-place operation `inPlace` |
 
 Document any restrictions on rank, dimension sizes, or alignment. For example, an operation that normalizes only the last dimension should specify that axis and the size of its weights.
 
@@ -27,7 +27,7 @@ Configuration is set when the `Node` is created. The actual input shape and `dty
 
 The following example declares a node configured for ReLU as a model member. It leaves `inPlace` at its default value of `false`.
 ```cpp
-vai::node::Activation activation{{.epilogue = vai::Epilogue::Relu}};
+vai::node::Activation activation{{.actType = vai::ActType::Relu}};
 ```
 
 ## 2. Prepare tensors in the node
@@ -44,7 +44,7 @@ class Activation : public vai::Node
     // ... pipeline and internal state
 public:
     struct Config {
-        vai::Epilogue epilogue = vai::Epilogue::None;
+        vai::ActType actType = vai::ActType::None;
         bool inPlace = false;
     } config_;
 
@@ -126,7 +126,7 @@ void main()
     if (i >= N) return;
 
     float x = (inPlace != 0u) ? readO(i) : readI(i);
-    writeO(i, applyEpilogue(x));
+    writeO(i, applyActivation(x));
 }
 ```
 
@@ -137,7 +137,7 @@ uint i = gl_GlobalInvocationID.x;
 if (i >= N) return;
 ```
 
-On the default path, the kernel reads the input with `readI()`, computes the result with `applyEpilogue()`, and writes it to the output with `writeO()`. With ReLU selected, `applyEpilogue(x)` computes `max(x, 0.0)`. Buffer read and write functions should use the storage format for the dtype.
+On the default path, the kernel reads the input with `readI()`, computes the result with `applyActivation()`, and writes it to the output with `writeO()`. With ReLU selected, `applyActivation(x)` computes `max(x, 0.0)`. Buffer read and write functions should use the storage format for the dtype.
 
 An operation in which multiple threads write to the same output location must handle write conflicts. In `Activation`, each thread computes a different output element, so no conflict handling is needed. In the `Argmax` kernel, however, multiple threads compute a single output value together. If they write to the same output location, they can overwrite one another's results. To prevent this, combine the intermediate results from each thread and have one thread write the final value. When intermediate results are shared within a workgroup, synchronize inside the kernel so that values are read only after they are all ready. `Argmax` combines its intermediate results and then lets only thread 0 in the workgroup write the row's result to `outIdx[row]`.
 
@@ -181,7 +181,7 @@ if (!pipe || p != pipeParams)
         eva::constant_id<0>(config_.inPlace ? 1u : 0u),
         eva::constant_id<SPEC_ID_TYPE_O>(oDtype),
         eva::constant_id<SPEC_ID_TYPE_I>(iDtype),
-        eva::constant_id<SPEC_ID_EPILOGUE>((uint32_t) config_.epilogue)
+        eva::constant_id<SPEC_ID_ACT_TYPE>((uint32_t) config_.actType)
     });
     if (!descSet)
         descSet = gVaiDestSetPool(pipe.descSetLayout(0));
@@ -216,7 +216,7 @@ Values passed by the node map to the following locations. Check both the numbers
 | `constant_id<0>(...)` | `constant_id = 0`: whether to operate in place |
 | `constant_id<SPEC_ID_TYPE_O>(...)` | `constant_id = SPEC_ID_TYPE_O`: output dtype |
 | `constant_id<SPEC_ID_TYPE_I>(...)` | `constant_id = SPEC_ID_TYPE_I`: input dtype |
-| `constant_id<SPEC_ID_EPILOGUE>(...)` | `epilogue` in `common/activation.h`: activation function |
+| `constant_id<SPEC_ID_ACT_TYPE>(...)` | `actType` in `common/activation.h`: activation function |
 | Push constant `uint32_t N` | `uint N` in `PushConstants` |
 
 The dtype constants use the shared IDs and values in [common/spec_constants.h](../../../vai/shaders/common/spec_constants.h). `activation.comp` declares FP32 and FP16 buffers at the same binding numbers, then uses the dtype constants to select which to use. This preserves the order in which C++ binds buffers. The constant that selects the activation function is declared in `common/activation.h`. Do not redeclare the same ID in the kernel.
@@ -346,7 +346,7 @@ The following example is taken from the input and output section of the `Activat
 /*=============================================================================
   Activation - Applies an element-wise activation.
   Input: in0 [any shape]
-  Output: epilogue(in0); optionally in-place
+  Output: activation(in0); optionally in-place
 
   // ... supported conditions and behavior
 =============================================================================*/
@@ -358,7 +358,7 @@ The following example is taken from the comment in `activation.comp`.
 ```glsl
 /*=============================================================================
  activation.comp:
-     O[i] = epilogue(I[i])     (element-wise; epilogue via spec constant)
+     O[i] = activation(I[i])     (element-wise; activation via spec constant)
 
  // ... option descriptions
  - O (typeO) and I (typeI) are fp32 or fp16, accessed through same-binding

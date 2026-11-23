@@ -1,6 +1,6 @@
 /*=============================================================================
  linear-naive.comp:   Linear / fully-connected layer (NT)
-     O[m, n] = epilogue( sum_k I[m, k] * W[n, k] + bias[n] )
+     O[m, n] = activation( sum_k I[m, k] * W[n, k] + bias[n] )
 
  - O [M, N] (typeO), I [M, K] (typeI), W [N, K] / bias [N] (typeW) are each
    fp32 or fp16, accessed through same-binding buffer aliases (scalar / vec4).
@@ -73,5 +73,5 @@ void main()
             : readI(iOff + k) * readW(wOff + k);
     }
 
-    writeO(m * N + n, applyEpilogue(sum));
+    writeO(m * N + n, applyActivation(sum));
 }

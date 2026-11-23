@@ -25,7 +25,7 @@ layout(constant_id = 6) const uint splitK = 1u;
 layout(constant_id = 7) const bool alignN = false;
 layout(constant_id = 8) const bool alignK = false;
 layout(constant_id = 9) const bool shortcut = false;
-layout(constant_id = 10) const uint residualOrder = 0u;  // 0: after the epilogue, 1: before it
+layout(constant_id = 10) const uint residualOrder = 0u;  // 0: after the activation, 1: before it
 // Keep accumulator arrays and their unrolled loops at a literal size of 8.
 // Specialization-constant array sizes or loop bounds regress NVIDIA codegen.
 layout(constant_id = SPEC_ID_TYPE_CI) const uint CI_SPEC = 0u;
@@ -236,7 +236,7 @@ vec4 applyOutput(uint m, uint base, uint count, vec4 acc)
     const vec4 residual = shortcut ? readResidual4(base, count) : vec4(0.0);
     if (shortcut && residualOrder == 1u)
         value += residual;
-    value = applyEpilogue(value);
+    value = applyActivation(value);
     if (shortcut && residualOrder == 0u)
         value += residual;
     return value;
@@ -558,7 +558,7 @@ void main()
         return;
     }
 
-    // K-split path: write FP32 partial sums without applying the epilogue.
+    // K-split path: write FP32 partial sums without applying the activation.
     if (K_SPLIT)
     {
         uint splitId = convImageZ(pc.batch);

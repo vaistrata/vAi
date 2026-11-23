@@ -24,7 +24,7 @@ struct TransformerConfig
     float globalRopeFactor;   // a global block's linear RoPE scale if > 1.0, else 1.0 (default RoPE)
     static constexpr uint32_t headDim = 256;
     static constexpr float normEps = 1e-6f;
-    static constexpr vai::Epilogue ffnActivation = vai::Epilogue::GeluTanh;
+    static constexpr vai::ActType ffnActType = vai::ActType::GeluTanh;
 };
 
 }   // namespace model::production::gemma3
@@ -93,7 +93,7 @@ struct TransformerBlock : public vai::NodeGroup
           .inDim = config.base.embedDim,
           .hiddenDim = config.base.ffnHiddenDim,
           .outDim = config.base.embedDim,
-          .activation = config.base.ffnActivation,
+          .actType = config.base.ffnActType,
       })
     , norm4({ .eps = config.base.normEps, .acceptResidual = true })
     {

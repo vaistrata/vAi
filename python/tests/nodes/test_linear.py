@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 import torch.nn.functional as F
-from node_check import EPILOGUES, FP16, FP32, check_node, normal
+from node_check import ACTIVATIONS, FP16, FP32, check_node, normal
 
 import pyvai
 from pyvai import nodes
@@ -9,7 +9,7 @@ from pyvai import nodes
 
 # M <= 8 takes the slab kernel, larger M the tile kernel (linear.h).
 @pytest.mark.parametrize(
-    "m, k, n, has_bias, epilogue, split_size, tol, alt_m",
+    "m, k, n, has_bias, activation, split_size, tol, alt_m",
     [
         pytest.param(1, 64, 32, True, "NONE", 0, FP32, 33, id="slab_m1"),  # rerun: slab -> tile
         pytest.param(8, 96, 40, False, "NONE", 0, FP32, None, id="slab_m8"),
@@ -26,19 +26,19 @@ from pyvai import nodes
         pytest.param(33, 1000, 48, False, "NONE", 100, FP16, None, id="tile_k_tail_split_size"),
     ],
 )
-def test_linear(m, k, n, has_bias, epilogue, split_size, tol, alt_m):
+def test_linear(m, k, n, has_bias, activation, split_size, tol, alt_m):
     params = {"weight": normal((n, k), 1.0 / np.sqrt(k))}
     if has_bias:
         params["bias"] = (n,)
 
     def ref(in0, weight, bias=None):
-        return EPILOGUES[epilogue](F.linear(in0, weight, bias))
+        return ACTIVATIONS[activation](F.linear(in0, weight, bias))
 
     check_node(
         lambda: nodes.LinearNode(
             in_dim=k,
             out_dim=n,
-            epilogue=getattr(pyvai.Epilogue, epilogue),
+            act_type=getattr(pyvai.ActType, activation),
             split_size=split_size,
         ),
         {"in0": (m, k)},
@@ -50,14 +50,14 @@ def test_linear(m, k, n, has_bias, epilogue, split_size, tol, alt_m):
     )
 
 
-# The residual joins after the epilogue (a following add) or before it.
+# The residual joins after the activation (a following add) or before it.
 @pytest.mark.parametrize(
     "m, order, tol",
     [
-        pytest.param(4, "AFTER_EPILOGUE", FP32, id="slab_after"),
-        pytest.param(4, "BEFORE_EPILOGUE", FP32, id="slab_before"),
-        pytest.param(33, "AFTER_EPILOGUE", FP16, id="tile_after"),
-        pytest.param(33, "BEFORE_EPILOGUE", FP16, id="tile_before"),
+        pytest.param(4, "AFTER_ACTIVATION", FP32, id="slab_after"),
+        pytest.param(4, "BEFORE_ACTIVATION", FP32, id="slab_before"),
+        pytest.param(33, "AFTER_ACTIVATION", FP16, id="tile_after"),
+        pytest.param(33, "BEFORE_ACTIVATION", FP16, id="tile_before"),
     ],
 )
 def test_linear_residual(m, order, tol):
@@ -65,7 +65,7 @@ def test_linear_residual(m, order, tol):
 
     def ref(in0, residual, weight, bias):
         out = F.linear(in0, weight, bias)
-        if order == "BEFORE_EPILOGUE":
+        if order == "BEFORE_ACTIVATION":
             return F.relu(out + residual)
         return F.relu(out) + residual
 
@@ -75,7 +75,7 @@ def test_linear_residual(m, order, tol):
             out_dim=n,
             accept_residual=True,
             residual_order=getattr(pyvai.ResidualOrder, order),
-            epilogue=pyvai.Epilogue.RELU,
+            act_type=pyvai.ActType.RELU,
         ),
         {"in0": (m, k), "residual": (m, n)},
         ref,

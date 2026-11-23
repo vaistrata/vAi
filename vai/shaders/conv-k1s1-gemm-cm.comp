@@ -33,7 +33,7 @@ layout(constant_id = 12) const bool reorder = false;
 layout(constant_id = 13) const uint swapXY = 0u;
 layout(constant_id = 14) const bool directOutput = false;
 layout(constant_id = 15) const bool shortcut = false;
-layout(constant_id = 16) const uint residualOrder = 0u;  // 0: after the epilogue, 1: before it
+layout(constant_id = 16) const uint residualOrder = 0u;  // 0: after the activation, 1: before it
 layout(constant_id = SPEC_ID_TYPE_CI) const uint CI_SPEC = 0u;
 layout(constant_id = SPEC_ID_TYPE_N) const uint N_SPEC = 0u;
 layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0u;
@@ -137,7 +137,7 @@ float applyOutput(uint i, uint index, float value)
         : fma(value, readScale(i), readBias(i));
     if (shortcut && residualOrder == 1u)
         value += readResidual(index);
-    value = applyEpilogue(value);
+    value = applyActivation(value);
     if (shortcut && residualOrder == 0u)
         value += readResidual(index);
     return value;
@@ -151,7 +151,7 @@ vec4 applyOutputVec4(uint m, uint base, vec4 value)
         : fma(value, vec4(readScale(m)), vec4(readBias(m)));
     if (shortcut && residualOrder == 1u)
         value += readResidual4(base);
-    value = applyEpilogue(value);
+    value = applyActivation(value);
     if (shortcut && residualOrder == 0u)
         value += readResidual4(base);
     return value;
@@ -310,7 +310,7 @@ void writeOutputFragmentDirect(
             : fma(acc[element], scaleValues[element], biasValues[element]);
         if (shortcut && residualOrder == 1u)
             value += residualValues[element];
-        value = applyEpilogue(value);
+        value = applyActivation(value);
         if (shortcut && residualOrder == 0u)
             value += residualValues[element];
         acc[element] = value;

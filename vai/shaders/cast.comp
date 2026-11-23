@@ -4,7 +4,8 @@
 
  - element-wise dtype conversion; O (typeO) and I (typeI) are fp32 or fp16,
    accessed through same-binding buffer aliases.
- Dispatch (host): one thread per element -> dispatch2(N).
+ Dispatch (host): one thread per element -> dispatch2(N), or past the x
+ limit workgroups folded into (x, y): index = y * (numX * 64) + x * 64 + local.
 =============================================================================*/
 #version 450
 #extension GL_GOOGLE_include_directive : require
@@ -29,7 +30,7 @@ void writeO(uint i, float v) { if (typeO == DTYPE_F32) bufferO_f32[i] = v; else 
 
 void main()
 {
-    uint i = gl_GlobalInvocationID.x;
+    uint i = gl_GlobalInvocationID.y * (gl_NumWorkGroups.x * gl_WorkGroupSize.x) + gl_GlobalInvocationID.x;
     if (i >= N) return;
 
     writeO(i, readI(i));

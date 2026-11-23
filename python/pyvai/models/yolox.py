@@ -35,14 +35,9 @@ class YOLOX:
         conf_threshold: float = 0.25,
         iou_threshold: float = 0.45,
         w_default_dtype: Dtype = Dtype.F16,
-        o_default_dtype: Dtype = Dtype.F32,
+        o_default_dtype: Dtype = Dtype.F16,
         device: Device | None = None,
     ):
-        if o_default_dtype != Dtype.F32:
-            raise ValueError(
-                "YOLOX: detect() feeds float32 tensors, so o_default_dtype "
-                "must be Dtype.F32 (use YOLOXModel directly for other hints)"
-            )
         self.image_size = image_size
         self.conf_threshold = conf_threshold
         self.iou_threshold = iou_threshold

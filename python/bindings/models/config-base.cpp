@@ -25,7 +25,7 @@ void bindModelConfigs(nb::module_& m)
                uint32_t num_q_heads,
                uint32_t num_kv_heads,
                uint32_t ffn_hidden_dim,
-               vai::Epilogue ffn_activation,
+               vai::ActType ffn_act_type,
                float norm_eps,
                bool with_qk_norm,
                std::optional<vai::RopeConfig>
@@ -37,7 +37,7 @@ void bindModelConfigs(nb::module_& m)
                     .numQHeads = num_q_heads,
                     .numKVHeads = num_kv_heads,
                     .ffnHiddenDim = ffn_hidden_dim,
-                    .ffnActivation = ffn_activation,
+                    .ffnActType = ffn_act_type,
                     .normEps = norm_eps,
                     .withQkNorm = with_qk_norm,
                     .ropeCfg = rope_cfg,
@@ -50,7 +50,7 @@ void bindModelConfigs(nb::module_& m)
             nb::arg("num_q_heads"),
             nb::arg("num_kv_heads"),
             nb::arg("ffn_hidden_dim"),
-            nb::arg("ffn_activation"),
+            nb::arg("ffn_act_type"),
             nb::arg("norm_eps") = 1e-5f,
             nb::arg("with_qk_norm") = false,
             nb::arg("rope_cfg") = nb::none(),
@@ -62,8 +62,8 @@ void bindModelConfigs(nb::module_& m)
         .def_rw(
             "num_kv_heads", &vai::TransformerConfig::numKVHeads, "Fewer than num_q_heads for GQA; it must divide them.")
         .def_rw("ffn_hidden_dim", &vai::TransformerConfig::ffnHiddenDim)
-        .def_rw("ffn_activation",
-                &vai::TransformerConfig::ffnActivation,
+        .def_rw("ffn_act_type",
+                &vai::TransformerConfig::ffnActType,
                 "The FFN's activation (its GLU variant when the FFN is gated).")
         .def_rw(
             "norm_eps", &vai::TransformerConfig::normEps, "Epsilon of every norm in the stack, the QK norm included.")

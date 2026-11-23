@@ -22,7 +22,7 @@
 | `data/tokenizers/<모델명>/` | 토크나이저 파일 |
 | `data/images/` | 입력 이미지 |
 
-`<impl>`은 정식 구현이면 `production`, 아직 진행 중이면 `experimental`입니다.
+`<impl>`은 정식 구현이면 `production`, 아직 진행 중이면 `experimental`입니다. **모델을 기여하실 때는 `models/experimental/<모델명>/` 경로에 구현해주세요.**
 
 GPT-2의 경우 모델 이름으로 `gpt2`, 체크포인트 배포명은 `openai`를 사용합니다. 같은 모델 구조에 다른 배포자의 체크포인트를 지원하려면 새로운 로더를 추가하면 됩니다.
 

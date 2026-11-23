@@ -6,6 +6,7 @@ Every comparison framework is optional (CMake leaves out a bench whose framework
 | Benches | Models | Compared against |
 |---|---|---|
 | [LLM](#llm-benchmarks) | [GPT-2](gpt2/README.md) (124M) · [Llama 3](llama3/README.md) (3.2-1B, 3.2-3B) · [Gemma 3](gemma3/README.md) (270M, 1B, 4B as text) | [llama.cpp](SETUP.md#llamacpp) |
+| [VLA](#vla-benchmarks) | [pi0.5](pi05/README.md) (LIBERO) | [vla.cpp](SETUP.md#vlacpp) and [TensorRT Edge-LLM](SETUP.md#tensorrt-edge-llm) on NVIDIA, [MIGraphX](SETUP.md#migraphx) on AMD |
 
 Sizes listed are the ones measured; each bench's `--size` takes more, listed in the model's README.
 
@@ -75,3 +76,52 @@ What the benches leave to each framework, to keep in mind when reading the resul
 | Vulkan kernels | `KHR_cooperative_matrix` | `NV_coopmat2` where the driver exposes it, otherwise `KHR_cooperative_matrix` |
 | Command submission | One command buffer per forward, recorded when the input shape changes and then submitted whole; later calls only resubmit it | Recorded on every call and submitted in chunks as it is recorded, so recording overlaps GPU work |
 | Precision | FP16 weight matrices and KV cache, FP32 norms; GPT-2's linear biases and position embedding FP16 | The same, except GPT-2's linear biases and position embedding, which the converter keeps F32. Tested to cost vAi no precision: see the [GPT-2 README](gpt2/README.md#summary) |
+
+## VLA benchmarks
+
+- Benches, with their results and how to run them: [pi0.5](pi05/README.md)
+- Comparison frameworks: [vla.cpp](https://github.com/VinRobotics/vla.cpp) and [TensorRT Edge-LLM](https://github.com/NVIDIA/TensorRT-Edge-LLM) on NVIDIA, [MIGraphX](https://github.com/ROCm/AMDMIGraphX) on AMD
+
+### Requirements
+
+vAi reads the checkpoint where the demos do, the tokenizer from `data/tokenizers/paligemma/` and the weights from `data/ckpts/<model>/lerobot/<size>/`. The comparison frameworks read files converted from it, in `data/benchmarks/<model>/<size>/`. The model's README lists the exact files. Installing the comparison frameworks, which run on Linux only, and making their model files: see [SETUP.md](SETUP.md#vla-benchmarks).
+
+| | Format | Found by (CMake) |
+|---|---|---|
+| vAi | `tokenizer.json` + `.safetensors` | always built |
+| vla.cpp | `.gguf` | `vla_ROOT` |
+| TensorRT Edge-LLM | TensorRT engines | `TensorRTEdgeLLM_ROOT` |
+| MIGraphX | FP16 ONNX bundle | `migraphx_DIR` |
+
+### Shared conditions
+
+#### Measurement
+
+Whatever the framework, the VLA benches share one code skeleton (`runVLABench` in `common/bench-utils.h`) and one measurement protocol.
+
+| | Shared condition |
+|---|---|
+| Input | `common/bench-inputs.h`: the camera images, the task and the robot state; the noise and the preprocessed images come from the model's reference script when it has written them |
+| Warmup | 3 predictions |
+| Measurement | 20 predictions, each timed from uploading its host inputs to the complete action chunk in host memory |
+| Reported | Milliseconds per prediction, **mean ± SD**, and the fastest; the maximum absolute error against the reference |
+
+#### Matched settings
+
+vAi and the framework it is compared with run the same configuration, a `VlaConfig` in `<model>/common/vla-config.h`: the checkpoint size, the policy, the cameras, the action chunk and the denoise steps. The comparison bench always runs its own; the vAi bench picks it with `--comparison <framework>`.
+
+| | Matched how |
+|---|---|
+| Policy | The framework's own: the LeRobot policy puts the discretized robot state in the prompt; openpi's, which TensorRT Edge-LLM serves, leaves it out |
+| Action chunk, denoise steps | The framework's: vAi runs whichever the configuration names |
+| Noise, images | The reference's, read by every bench, so the comparison covers the model, not the image preprocessing |
+
+### Where the frameworks differ
+
+What the benches leave to each framework, to keep in mind when reading the results.
+
+| | vAi | vla.cpp | TensorRT Edge-LLM | MIGraphX |
+|---|---|---|---|---|
+| GPU API | Vulkan | CUDA (ggml) | CUDA (TensorRT) | HIP (ROCm 10.1) |
+| Precision | FP16 weights, K/V cache and block branches; FP32 vision accumulation and vision / language residuals; FP16 action expert residual | Framework-specific | Framework-specific | As exported, then as MIGraphX compiles it |
+| Action output | Normalized | Un-normalized | Normalized | Normalized |

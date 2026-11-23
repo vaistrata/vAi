@@ -1,0 +1,42 @@
+/*=============================================================================
+ attention-append-xe3.comp: the cache append ahead of attention-cm-xe3
+     (Attention's Xe3 path, one KV head)
+
+     K / V input row r goes to the cache's row kvCacheCount + r, and the V
+     cache's next zeroRows rows are zeroed: the attention reads whole key
+     tiles, and a row of V past the keys must hold nothing that 0 x it is not 0.
+
+ One invocation per (4 head dims, row).
+=============================================================================*/
+#version 450
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+layout(local_size_x = 16, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer K_BUF { f16vec4 bufferK[]; };
+layout(set = 0, binding = 1) readonly buffer V_BUF { f16vec4 bufferV[]; };
+layout(set = 0, binding = 2) writeonly buffer KCACHE_BUF { f16vec4 bufferKCache[]; };
+layout(set = 0, binding = 3) writeonly buffer VCACHE_BUF { f16vec4 bufferVCache[]; };
+layout(set = 0, binding = 4) uniform UB { uint kvCacheCount; };
+
+layout(push_constant) uniform PushConstants {
+    uint Dh4;        // Dh / 4
+    uint Tkv;        // K / V input rows
+    uint Tmax;       // the cache's rows
+    uint zeroRows;   // rows of the V cache zeroed after the appended ones
+};
+
+void main()
+{
+    const uint d = gl_GlobalInvocationID.x, r = gl_GlobalInvocationID.y;
+    const uint row = kvCacheCount + r;
+    if (d >= Dh4 || row >= Tmax) return;
+    if (r < Tkv)
+    {
+        bufferKCache[row * Dh4 + d] = bufferK[r * Dh4 + d];
+        bufferVCache[row * Dh4 + d] = bufferV[r * Dh4 + d];
+    }
+    else if (r < Tkv + zeroRows)
+        bufferVCache[row * Dh4 + d] = f16vec4(0.0);
+}

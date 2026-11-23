@@ -73,7 +73,7 @@ STRINGS = {
 OUTS = {lang: ROOT / "docs" / lang / "06-nodes.md" for lang in STRINGS}
 
 # 노드가 아닌 공용 헤더
-SKIP = {"common.h"}
+SKIP = {"common.h", "linear-tune-table.h"}
 
 # 스탬프 펜스: `/*====` 로 열고 `====*/` 로 닫는 블록 주석
 STAMP_OPEN = re.compile(r"^\s*/\*={10,}\s*$")

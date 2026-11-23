@@ -128,6 +128,19 @@ inline bool enableCM(const eva::Device& device, const ConvolutionCaps& caps)
     return device.supportsCooperativeMatrix() && caps.hasCM;
 }
 
+// The convolution kernels fix their cooperative matrices at 16x16x16, so a matrix unit counts only
+// when the device offers that shape (Intel Xe2 and later offer 8x16x16 alone and take the scalar
+// kernels; on them the 16-row tiles came out right in rows 0-7 only).
+inline ConvolutionCaps convolutionCaps(const eva::Device& device)
+{
+    const bool acc16 = supportsCMShape(device, Dtype::Fp16, Dtype::Fp16);
+    const bool acc32 = supportsCMShape(device, Dtype::Fp16, Dtype::Fp32);
+    return {
+        .hasCM = hasCooperativeMatrixUnit(device.vendorID(), device.architectureID()) && (acc16 || acc32),
+        .accFP16 = acc16,
+    };
+}
+
 // Selects the accumulator inside an already established FP16 CM branch.
 inline Dtype selectAccType(const eva::Device& device, const ConvolutionCaps& caps)
 {
@@ -2444,8 +2457,8 @@ inline const K3S2ExactRule* findK3S2ExactRule(const eva::Device& device, const W
   The "scale" and "bias" slots always exist; each applies only when the weight
   loader filled it. Odd kernels use symmetric same-padding, so each spatial
   output size is ceil(inputSize / stride).
-  acceptResidual opens the "residual" input (input dtype), added after the epilogue
-  or, with ResidualOrder::BeforeEpilogue, before it.
+  acceptResidual opens the "residual" input (input dtype), added after the activation
+  or, with ResidualOrder::BeforeActivation, before it.
   The axes ahead of Ci are a batch of images. The plan is one image's; every
   dispatch stacks the images on its z axis, and each kernel offsets its buffers
   to its image.
@@ -2460,8 +2473,8 @@ public:
         uint32_t stride;
 
         bool acceptResidual = false;   // input "residual"
-        vai::ResidualOrder residualOrder = vai::ResidualOrder::AfterEpilogue;
-        vai::Epilogue epilogue = vai::Epilogue::None;
+        vai::ResidualOrder residualOrder = vai::ResidualOrder::AfterActivation;
+        vai::ActType actType = vai::ActType::None;
     };
 
     Convolution(Config config);
@@ -2507,13 +2520,13 @@ private:
         Dtype oDtype = Dtype::None;
         Dtype affineDtype = Dtype::None;
         uint32_t hasScale = 0u;
-        uint32_t epilogue = 0u;
+        uint32_t actType = 0u;
     };
     FusionSpec makeFusionSpec(const Workload& workload) const
     {
         const bool hasScale = workload.fusion == ConvolutionFusion::Scale;
         return {
-            workload.iDtype, workload.oDtype, workload.wDtype, hasScale ? 1u : 0u, (uint32_t)config_.epilogue,
+            workload.iDtype, workload.oDtype, workload.wDtype, hasScale ? 1u : 0u, (uint32_t)config_.actType,
         };
     }
     ResidualFusion residualFusion() const { return { config_.acceptResidual, (uint32_t)config_.residualOrder }; }
@@ -3178,88 +3191,90 @@ inline void withDTypes(
         specialization.addConstant(eva::constant_id<SPEC_ID_TYPE_ACC>(accType));
 }
 
-inline void withFusion(eva::SpecializationConstant& specialization, uint32_t epilogue, uint32_t hasScale, uint32_t hasBias)
+inline void withFusion(
+    eva::SpecializationConstant& specialization, uint32_t actType, uint32_t hasScale, uint32_t hasBias)
 {
-    specialization.addConstant(eva::constant_id<SPEC_ID_EPILOGUE>(epilogue));
+    specialization.addConstant(eva::constant_id<SPEC_ID_ACT_TYPE>(actType));
     specialization.addConstant(eva::constant_id<SPEC_ID_HAS_SCALE>(hasScale));
     specialization.addConstant(eva::constant_id<SPEC_ID_HAS_BIAS>(hasBias));
 }
 
-inline eva::ComputePipeline k1s1CMPipeline(PipelinePool& pool, const K1S1Plan& plan, uint32_t kPerSplit, uint32_t ep,
-                                           Dtype paramType, uint32_t hasScale, uint32_t hasBias,
-                                           ResidualFusion residual, Dtype iDtype, Dtype oDtype,
-                                           uint32_t requiredSubgroupSize)
+inline eva::ComputePipeline k1s1CMPipeline(
+    PipelinePool& pool, const K1S1Plan& plan, uint32_t kPerSplit, uint32_t actType, Dtype paramType, uint32_t hasScale,
+    uint32_t hasBias, ResidualFusion residual, Dtype iDtype, Dtype oDtype, uint32_t requiredSubgroupSize)
 {
     const uint32_t subgroupCount =
         (plan.wgM / plan.sgM) * (plan.wgN / plan.sgN);
     const uint32_t wgSize = plan.sgSize * subgroupCount;
 
-    return pool.request("conv-k1s1-gemm-cm",
-                        {
-                            eva::constant_id<0>(wgSize),
-                            eva::constant_id<1>(plan.wgM),
-                            eva::constant_id<2>(plan.wgN),
-                            eva::constant_id<3>(plan.sgM),
-                            eva::constant_id<4>(plan.sgN),
-                            eva::constant_id<5>(plan.accStoreBatchSize),
-                            eva::constant_id<6>(plan.alignM),
-                            eva::constant_id<7>(plan.alignN),
-                            eva::constant_id<8>(plan.alignK),
-                            eva::constant_id<9>(kPerSplit),
-                            eva::constant_id<10>(plan.loadMode),
-                            eva::constant_id<11>(plan.storeMode),
-                            eva::constant_id<12>(plan.reorder),
-                            eva::constant_id<13>(plan.swapXY),
-                            eva::constant_id<14>(plan.directOutput),
-                            eva::constant_id<15>(residual.enabled),
-                            eva::constant_id<16>(residual.order),
-                            eva::constant_id<SPEC_ID_TYPE_CI>(plan.ciSpec),
-                            eva::constant_id<SPEC_ID_TYPE_N>(plan.nSpec),
-                            eva::constant_id<SPEC_ID_TYPE_O>(oDtype),
-                            eva::constant_id<SPEC_ID_TYPE_I>(iDtype),
-                            eva::constant_id<SPEC_ID_TYPE_P>(paramType),
-                            eva::constant_id<SPEC_ID_TYPE_ACC>(plan.accType),
-                            eva::constant_id<SPEC_ID_EPILOGUE>(ep),
-                            eva::constant_id<SPEC_ID_HAS_SCALE>(hasScale),
-                            eva::constant_id<SPEC_ID_HAS_BIAS>(hasBias),
-                        },
-                        { .requiredSubgroupSize = requiredSubgroupSize });
+    return pool.request(
+        "conv-k1s1-gemm-cm",
+        {
+            eva::constant_id<0>(wgSize),
+            eva::constant_id<1>(plan.wgM),
+            eva::constant_id<2>(plan.wgN),
+            eva::constant_id<3>(plan.sgM),
+            eva::constant_id<4>(plan.sgN),
+            eva::constant_id<5>(plan.accStoreBatchSize),
+            eva::constant_id<6>(plan.alignM),
+            eva::constant_id<7>(plan.alignN),
+            eva::constant_id<8>(plan.alignK),
+            eva::constant_id<9>(kPerSplit),
+            eva::constant_id<10>(plan.loadMode),
+            eva::constant_id<11>(plan.storeMode),
+            eva::constant_id<12>(plan.reorder),
+            eva::constant_id<13>(plan.swapXY),
+            eva::constant_id<14>(plan.directOutput),
+            eva::constant_id<15>(residual.enabled),
+            eva::constant_id<16>(residual.order),
+            eva::constant_id<SPEC_ID_TYPE_CI>(plan.ciSpec),
+            eva::constant_id<SPEC_ID_TYPE_N>(plan.nSpec),
+            eva::constant_id<SPEC_ID_TYPE_O>(oDtype),
+            eva::constant_id<SPEC_ID_TYPE_I>(iDtype),
+            eva::constant_id<SPEC_ID_TYPE_P>(paramType),
+            eva::constant_id<SPEC_ID_TYPE_ACC>(plan.accType),
+            eva::constant_id<SPEC_ID_ACT_TYPE>(actType),
+            eva::constant_id<SPEC_ID_HAS_SCALE>(hasScale),
+            eva::constant_id<SPEC_ID_HAS_BIAS>(hasBias),
+        },
+        { .requiredSubgroupSize = requiredSubgroupSize });
 }
 
-inline eva::ComputePipeline k1s1Pipeline(PipelinePool& pool, const K1S1Plan& plan, Dtype wDtype, Dtype paramDtype,
-                                         uint32_t epilogue, uint32_t hasScale, uint32_t hasBias,
-                                         ResidualFusion residual, Dtype iDtype, Dtype oDtype, uint32_t kPerSplit,
-                                         uint32_t requiredSubgroupSize)
+inline eva::ComputePipeline k1s1Pipeline(
+    PipelinePool& pool, const K1S1Plan& plan, Dtype wDtype, Dtype paramDtype, uint32_t actType, uint32_t hasScale,
+    uint32_t hasBias, ResidualFusion residual, Dtype iDtype, Dtype oDtype, uint32_t kPerSplit,
+    uint32_t requiredSubgroupSize)
 {
     const uint32_t wgSize =
         (plan.wgM / plan.tM) * (plan.wgN / 4u);
-    return pool.request("conv-k1s1-gemm",
-                        {
-                            eva::constant_id<0>(wgSize),
-                            eva::constant_id<1>(plan.wgM),
-                            eva::constant_id<2>(plan.wgN),
-                            eva::constant_id<3>(plan.wgK),
-                            eva::constant_id<4>(plan.tM),
-                            eva::constant_id<5>(plan.alignM),
-                            eva::constant_id<6>(plan.alignN),
-                            eva::constant_id<7>(plan.alignK),
-                            eva::constant_id<8>(kPerSplit),
-                            eva::constant_id<9>(residual.enabled),
-                            eva::constant_id<10>(residual.order),
-                            eva::constant_id<SPEC_ID_TYPE_O>(oDtype),
-                            eva::constant_id<SPEC_ID_TYPE_I>(iDtype),
-                            eva::constant_id<SPEC_ID_TYPE_W>(wDtype),
-                            eva::constant_id<SPEC_ID_TYPE_P>(paramDtype),
-                            eva::constant_id<SPEC_ID_EPILOGUE>(epilogue),
-                            eva::constant_id<SPEC_ID_HAS_SCALE>(hasScale),
-                            eva::constant_id<SPEC_ID_HAS_BIAS>(hasBias),
-                        },
-                        { .requiredSubgroupSize = requiredSubgroupSize });
+    return pool.request(
+        "conv-k1s1-gemm",
+        {
+            eva::constant_id<0>(wgSize),
+            eva::constant_id<1>(plan.wgM),
+            eva::constant_id<2>(plan.wgN),
+            eva::constant_id<3>(plan.wgK),
+            eva::constant_id<4>(plan.tM),
+            eva::constant_id<5>(plan.alignM),
+            eva::constant_id<6>(plan.alignN),
+            eva::constant_id<7>(plan.alignK),
+            eva::constant_id<8>(kPerSplit),
+            eva::constant_id<9>(residual.enabled),
+            eva::constant_id<10>(residual.order),
+            eva::constant_id<SPEC_ID_TYPE_O>(oDtype),
+            eva::constant_id<SPEC_ID_TYPE_I>(iDtype),
+            eva::constant_id<SPEC_ID_TYPE_W>(wDtype),
+            eva::constant_id<SPEC_ID_TYPE_P>(paramDtype),
+            eva::constant_id<SPEC_ID_ACT_TYPE>(actType),
+            eva::constant_id<SPEC_ID_HAS_SCALE>(hasScale),
+            eva::constant_id<SPEC_ID_HAS_BIAS>(hasBias),
+        },
+        { .requiredSubgroupSize = requiredSubgroupSize });
 }
 
-inline eva::ComputePipeline k3s2CMPipeline(PipelinePool& pool, const K3S2Plan& plan, uint32_t ep, Dtype paramType,
-                                           uint32_t hasScale, uint32_t hasBias, ResidualFusion residual, Dtype iDtype,
-                                           Dtype oDtype, uint32_t requiredSubgroupSize)
+inline eva::ComputePipeline k3s2CMPipeline(
+    PipelinePool& pool, const K3S2Plan& plan, uint32_t actType, Dtype paramType, uint32_t hasScale, uint32_t hasBias,
+    ResidualFusion residual, Dtype iDtype, Dtype oDtype, uint32_t requiredSubgroupSize)
 {
     VAI_ASSERT(plan.cooperativeMatrix());
     const bool packed = plan.packedWeights;
@@ -3274,17 +3289,16 @@ inline eva::ComputePipeline k3s2CMPipeline(PipelinePool& pool, const K3S2Plan& p
     };
     withShape(specialization, plan.shape, true);
     withDTypes(specialization, oDtype, iDtype, paramType, Dtype::Fp32, plan.accType, {.includeAcc = true});
-    withFusion(specialization, ep, hasScale, hasBias);
+    withFusion(specialization, actType, hasScale, hasBias);
 
     return pool.request(
         "conv-k3s2-gemm-cm", std::move(specialization),
         {.requiredSubgroupSize = requiredSubgroupSize});
 }
 
-inline eva::ComputePipeline k3s1ImplicitGemmPipeline(PipelinePool& pool, const K3S1Plan& plan, uint32_t ep,
-                                                     Dtype paramType, uint32_t hasScale, uint32_t hasBias, Dtype iDtype,
-                                                     Dtype oDtype, ResidualFusion residual, bool directOutput,
-                                                     uint32_t requiredSubgroupSize)
+inline eva::ComputePipeline k3s1ImplicitGemmPipeline(
+    PipelinePool& pool, const K3S1Plan& plan, uint32_t actType, Dtype paramType, uint32_t hasScale, uint32_t hasBias,
+    Dtype iDtype, Dtype oDtype, ResidualFusion residual, bool directOutput, uint32_t requiredSubgroupSize)
 {
     VAI_ASSERT(plan.algorithm == ConvAlgorithm::Implicit && requiredSubgroupSize == 32u);
     const bool rowAlignedFlatSpatial = plan.flatSpatial &&
@@ -3299,16 +3313,16 @@ inline eva::ComputePipeline k3s1ImplicitGemmPipeline(PipelinePool& pool, const K
     };
     withShape(specialization, plan.shape, true);
     withDTypes(specialization, oDtype, iDtype, paramType, Dtype::Fp32, 0u, {});
-    withFusion(specialization, ep, hasScale, hasBias);
+    withFusion(specialization, actType, hasScale, hasBias);
 
     return pool.request(
         "conv-k3s1-implicit-gemm-cm", std::move(specialization),
         {.requiredSubgroupSize = requiredSubgroupSize});
 }
 
-inline eva::ComputePipeline ConvPipeline(PipelinePool& pool, const ImplicitGemmPlan& plan, const Workload& workload,
-                                         uint32_t epilogue, Dtype paramType, uint32_t hasScale, uint32_t hasBias,
-                                         ResidualFusion residual, bool k3s1Variant, uint32_t requiredSubgroupSize = 0u)
+inline eva::ComputePipeline convPipeline(
+    PipelinePool& pool, const ImplicitGemmPlan& plan, const Workload& workload, uint32_t actType, Dtype paramType,
+    uint32_t hasScale, uint32_t hasBias, ResidualFusion residual, bool k3s1Variant, uint32_t requiredSubgroupSize = 0u)
 {
     VAI_ASSERT(!plan.cooperativeMatrix);
     const ShapeSpec shape = ShapeSpec::fromWorkload(workload);
@@ -3327,7 +3341,7 @@ inline eva::ComputePipeline ConvPipeline(PipelinePool& pool, const ImplicitGemmP
     withShape(specialization, shape, true);
     withDTypes(specialization, workload.oDtype, workload.iDtype, paramType,
                workload.wDtype, 0u, {.includeWeight = true});
-    withFusion(specialization, epilogue, hasScale, hasBias);
+    withFusion(specialization, actType, hasScale, hasBias);
 
     VAI_ASSERT(!plan.wideFp32Tile || k3s1Variant);
     const char* shader = k3s1Variant
@@ -3338,9 +3352,9 @@ inline eva::ComputePipeline ConvPipeline(PipelinePool& pool, const ImplicitGemmP
         {.requiredSubgroupSize = requiredSubgroupSize});
 }
 
-inline eva::ComputePipeline ConvCMPipeline(PipelinePool& pool, const ImplicitGemmPlan& plan, const Workload& workload,
-                                           uint32_t epilogue, Dtype paramType, uint32_t hasScale, uint32_t hasBias,
-                                           ResidualFusion residual)
+inline eva::ComputePipeline convCMPipeline(
+    PipelinePool& pool, const ImplicitGemmPlan& plan, const Workload& workload, uint32_t actType, Dtype paramType,
+    uint32_t hasScale, uint32_t hasBias, ResidualFusion residual)
 {
     VAI_ASSERT(plan.cooperativeMatrix);
     const ShapeSpec shape = ShapeSpec::fromWorkload(workload);
@@ -3352,17 +3366,17 @@ inline eva::ComputePipeline ConvCMPipeline(PipelinePool& pool, const ImplicitGem
     withShape(specialization, shape, true);
     withDTypes(specialization, workload.oDtype, workload.iDtype, paramType,
                Dtype::Fp32, plan.accType, {.includeAcc = true});
-    withFusion(specialization, epilogue, hasScale, hasBias);
+    withFusion(specialization, actType, hasScale, hasBias);
 
     return pool.request("conv-implicit-gemm-cm", std::move(specialization), {.requiredSubgroupSize = 32u});
 }
 
 // fp16Direct selects the plain fp16 non-CM kernel (preset "direct"), which
 // carries the full constant set regardless of the plan's split/shape state.
-inline eva::ComputePipeline k3s2SpecializedPipeline(PipelinePool& pool, const K3S2Plan& plan, uint32_t ep,
-                                                    Dtype paramType, uint32_t hasScale, uint32_t hasBias,
-                                                    ResidualFusion residual, Dtype typeW, Dtype iDtype, Dtype oDtype,
-                                                    uint32_t requiredSubgroupSize, bool fp16Direct = false)
+inline eva::ComputePipeline k3s2SpecializedPipeline(
+    PipelinePool& pool, const K3S2Plan& plan, uint32_t actType, Dtype paramType, uint32_t hasScale, uint32_t hasBias,
+    ResidualFusion residual, Dtype typeW, Dtype iDtype, Dtype oDtype, uint32_t requiredSubgroupSize,
+    bool fp16Direct = false)
 {
     VAI_ASSERT(plan.valid() && !plan.cooperativeMatrix());
     enum class Preset : uint8_t { FirstLayer, Aligned, Generic, Split, Shape, Direct };
@@ -3371,30 +3385,30 @@ inline eva::ComputePipeline k3s2SpecializedPipeline(PipelinePool& pool, const K3
         bool includeSplitK;
         bool includeSpatialShape;
         bool includeFullShape;
-        bool includeEpilogue;
+        bool includeActType;
     };
     static constexpr std::array<PresetValues, 6> presets{
         {
             {
                 .includeSpatialShape = true,
-                .includeEpilogue = true,
+                .includeActType = true,
             },
             {
-                .includeEpilogue = true,
+                .includeActType = true,
             },
             {
-                .includeEpilogue = true,
+                .includeActType = true,
             },
             {
                 .includeSplitK = true,
             },
             {
                 .includeFullShape = true,
-                .includeEpilogue = true,
+                .includeActType = true,
             },
             {
                 .includeSplitK = true,
-                .includeEpilogue = true,
+                .includeActType = true,
             },
         },
     };
@@ -3432,8 +3446,8 @@ inline eva::ComputePipeline k3s2SpecializedPipeline(PipelinePool& pool, const K3
     if (values.includeSpatialShape || values.includeFullShape)
         withShape(specialization, plan.shape, values.includeFullShape);
     withDTypes(specialization, oDtype, iDtype, paramType, typeW, 0u, {.includeWeight = true});
-    if (values.includeEpilogue)
-        specialization.addConstant(eva::constant_id<SPEC_ID_EPILOGUE>(ep));
+    if (values.includeActType)
+        specialization.addConstant(eva::constant_id<SPEC_ID_ACT_TYPE>(actType));
     specialization.addConstant(eva::constant_id<9>(residual.enabled));
     specialization.addConstant(eva::constant_id<10>(residual.order));
     specialization.addConstant(eva::constant_id<SPEC_ID_HAS_SCALE>(hasScale));
@@ -3484,32 +3498,32 @@ inline eva::ComputePipeline winogradInputTransformPipeline(
         {.requiredSubgroupSize = requiredSubgroupSize});
 }
 
-inline eva::ComputePipeline winogradOutputPipeline(PipelinePool& pool, bool storeMode, Dtype typeW, Dtype paramType,
-                                                   uint32_t ep, ResidualFusion residual, uint32_t hasScale,
-                                                   uint32_t hasBias, Dtype iDtype, Dtype oDtype,
-                                                   uint32_t requiredSubgroupSize)
+inline eva::ComputePipeline winogradOutputPipeline(
+    PipelinePool& pool, bool storeMode, Dtype typeW, Dtype paramType, uint32_t actType, ResidualFusion residual,
+    uint32_t hasScale, uint32_t hasBias, Dtype iDtype, Dtype oDtype, uint32_t requiredSubgroupSize)
 {
     const uint32_t localSize = storeMode ? 128u : 256u;
-    return pool.request("conv-k3s1-winograd-output",
-                        {
-                            eva::constant_id<0>(localSize),
-                            eva::constant_id<3>(residual.enabled),
-                            eva::constant_id<4>(storeMode),
-                            eva::constant_id<5>(residual.order),
-                            eva::constant_id<SPEC_ID_TYPE_O>(oDtype),
-                            eva::constant_id<SPEC_ID_TYPE_I>(iDtype),
-                            eva::constant_id<SPEC_ID_TYPE_W>(typeW),
-                            eva::constant_id<SPEC_ID_TYPE_P>(paramType),
-                            eva::constant_id<SPEC_ID_EPILOGUE>(ep),
-                            eva::constant_id<SPEC_ID_HAS_SCALE>(hasScale),
-                            eva::constant_id<SPEC_ID_HAS_BIAS>(hasBias),
-                        },
-                        { .requiredSubgroupSize = requiredSubgroupSize });
+    return pool.request(
+        "conv-k3s1-winograd-output",
+        {
+            eva::constant_id<0>(localSize),
+            eva::constant_id<3>(residual.enabled),
+            eva::constant_id<4>(storeMode),
+            eva::constant_id<5>(residual.order),
+            eva::constant_id<SPEC_ID_TYPE_O>(oDtype),
+            eva::constant_id<SPEC_ID_TYPE_I>(iDtype),
+            eva::constant_id<SPEC_ID_TYPE_W>(typeW),
+            eva::constant_id<SPEC_ID_TYPE_P>(paramType),
+            eva::constant_id<SPEC_ID_ACT_TYPE>(actType),
+            eva::constant_id<SPEC_ID_HAS_SCALE>(hasScale),
+            eva::constant_id<SPEC_ID_HAS_BIAS>(hasBias),
+        },
+        { .requiredSubgroupSize = requiredSubgroupSize });
 }
 
-inline eva::ComputePipeline bnReducePipeline(PipelinePool& pool, Dtype typeW, Dtype typeP, uint32_t hasScale,
-                                             uint32_t hasBias, uint32_t ep, ResidualFusion residual,
-                                             Dtype residualDtype, bool aligned4, Dtype oDtype, bool reorder = false)
+inline eva::ComputePipeline bnReducePipeline(
+    PipelinePool& pool, Dtype typeW, Dtype typeP, uint32_t hasScale, uint32_t hasBias, uint32_t actType,
+    ResidualFusion residual, Dtype residualDtype, bool aligned4, Dtype oDtype, bool reorder = false)
 {
     eva::SpecializationConstant specialization{
         eva::constant_id<3>(aligned4),
@@ -3521,7 +3535,7 @@ inline eva::ComputePipeline bnReducePipeline(PipelinePool& pool, Dtype typeW, Dt
     specialization.addConstant(eva::constant_id<SPEC_ID_TYPE_I>(residualDtype));
     specialization.addConstant(eva::constant_id<SPEC_ID_TYPE_W>(typeW));
     specialization.addConstant(eva::constant_id<SPEC_ID_TYPE_P>(typeP));
-    withFusion(specialization, ep, hasScale, hasBias);
+    withFusion(specialization, actType, hasScale, hasBias);
 
     return pool.request("bn-reduce", std::move(specialization));
 }
@@ -4088,7 +4102,7 @@ inline Convolution::Convolution(Config config)
     VAI_ASSERT(config_.inChannels != 0u && config_.outChannels != 0u);
     VAI_ASSERT(config_.kernelSize != 0u && config_.kernelSize % 2u != 0u);
     VAI_ASSERT(config_.stride != 0u);
-    VAI_ASSERT(config_.epilogue < Epilogue::Max);
+    VAI_ASSERT(config_.actType < vai::ActType::Max);
     addSlot("out0", NodeSlot::output);
     addSlot("in0", NodeSlot::input);
     addSlot("weight", NodeSlot::persistent);
@@ -5444,7 +5458,7 @@ inline ConvPlan selectConvPlan(const eva::Device& device, const ConvolutionCaps&
 
 inline void Convolution::prepareK1S1Split(TiledResources& tiled, const Workload& workload)
 {
-    const auto [iDtype, oDtype, affineDtype, hasScale, epilogue] = makeFusionSpec(workload);
+    const auto [iDtype, oDtype, affineDtype, hasScale, actType] = makeFusionSpec(workload);
     const Dtype weightType = workload.wDtype;
 
     VAI_ASSERT(weightType != Dtype::None && iDtype != Dtype::None && oDtype != Dtype::None);
@@ -5463,16 +5477,17 @@ inline void Convolution::prepareK1S1Split(TiledResources& tiled, const Workload&
                                                    plan_.splitRequiredSubgroupSize));
 
     VAI_ASSERT(plan_.k1s1.splitK <= 16u);
-    tiled.reduce = makePipelineBinding(bnReducePipeline(pipelinePool(),
-                                                        Dtype::Fp32,
-                                                        affineDtype,
-                                                        1u,
-                                                        hasBias(),
-                                                        epilogue,
-                                                        residualFusion(),
-                                                        iDtype,
-                                                        (workload.spatialSize() % 4u) == 0u,
-                                                        oDtype));
+    tiled.reduce = makePipelineBinding(bnReducePipeline(
+        pipelinePool(),
+        Dtype::Fp32,
+        affineDtype,
+        1u,
+        hasBias(),
+        actType,
+        residualFusion(),
+        iDtype,
+        (workload.spatialSize() % 4u) == 0u,
+        oDtype));
 }
 
 inline void Convolution::prepareK1S1(const Workload& workload)
@@ -5483,7 +5498,7 @@ inline void Convolution::prepareK1S1(const Workload& workload)
     VAI_ASSERT(plan_.path == ConvPlan::Path::K1S1);
     const uint32_t Ci = workload.ci;
     const Dtype weightType = workload.wDtype;
-    const auto [iDtype, oDtype, affineDtype, hasScale, epilogue] = makeFusionSpec(workload);
+    const auto [iDtype, oDtype, affineDtype, hasScale, actType] = makeFusionSpec(workload);
     const uint32_t requiredSubgroupSize = plan_.requiredSubgroupSize;
 
     if (plan_.wDtype == Dtype::Fp32)
@@ -5494,18 +5509,19 @@ inline void Convolution::prepareK1S1(const Workload& workload)
             return;
         }
 
-        tiled.main = makePipelineBinding(k1s1Pipeline(pipelinePool(),
-                                                      plan_.k1s1,
-                                                      weightType,
-                                                      affineDtype,
-                                                      epilogue,
-                                                      hasScale,
-                                                      hasBias(),
-                                                      residualFusion(),
-                                                      iDtype,
-                                                      oDtype,
-                                                      0u,
-                                                      requiredSubgroupSize));
+        tiled.main = makePipelineBinding(k1s1Pipeline(
+            pipelinePool(),
+            plan_.k1s1,
+            weightType,
+            affineDtype,
+            actType,
+            hasScale,
+            hasBias(),
+            residualFusion(),
+            iDtype,
+            oDtype,
+            0u,
+            requiredSubgroupSize));
         return;
     }
     else if (plan_.wDtype == Dtype::Fp16)
@@ -5516,17 +5532,18 @@ inline void Convolution::prepareK1S1(const Workload& workload)
             VAI_ASSERT(plan.splitK == 1u || plan.accType == 0u);
             const uint32_t cmRequiredSubgroupSize = plan.sgSize;
             const uint32_t kPerSplit = plan.splitK > 1u ? ROUNDUP(Ci / plan.splitK, 16u) : 0u;
-            tiled.main = makePipelineBinding(k1s1CMPipeline(pipelinePool(),
-                                                            plan,
-                                                            kPerSplit,
-                                                            epilogue,
-                                                            affineDtype,
-                                                            hasScale,
-                                                            hasBias(),
-                                                            plan.splitK > 1u ? ResidualFusion{} : residualFusion(),
-                                                            iDtype,
-                                                            oDtype,
-                                                            cmRequiredSubgroupSize));
+            tiled.main = makePipelineBinding(k1s1CMPipeline(
+                pipelinePool(),
+                plan,
+                kPerSplit,
+                actType,
+                affineDtype,
+                hasScale,
+                hasBias(),
+                plan.splitK > 1u ? ResidualFusion{} : residualFusion(),
+                iDtype,
+                oDtype,
+                cmRequiredSubgroupSize));
 
             if (plan.reorder)
             {
@@ -5536,16 +5553,17 @@ inline void Convolution::prepareK1S1(const Workload& workload)
 
             if (plan.splitK > 1u)
             {
-                cm.reduce = makePipelineBinding(bnReducePipeline(pipelinePool(),
-                                                                 Dtype::Fp16,
-                                                                 affineDtype,
-                                                                 1u,
-                                                                 hasBias(),
-                                                                 epilogue,
-                                                                 residualFusion(),
-                                                                 iDtype,
-                                                                 true,
-                                                                 oDtype));
+                cm.reduce = makePipelineBinding(bnReducePipeline(
+                    pipelinePool(),
+                    Dtype::Fp16,
+                    affineDtype,
+                    1u,
+                    hasBias(),
+                    actType,
+                    residualFusion(),
+                    iDtype,
+                    true,
+                    oDtype));
             }
         }
         else
@@ -5556,18 +5574,19 @@ inline void Convolution::prepareK1S1(const Workload& workload)
             }
             else
             {
-                tiled.main = makePipelineBinding(k1s1Pipeline(pipelinePool(),
-                                                              plan_.k1s1,
-                                                              weightType,
-                                                              affineDtype,
-                                                              epilogue,
-                                                              hasScale,
-                                                              hasBias(),
-                                                              residualFusion(),
-                                                              iDtype,
-                                                              oDtype,
-                                                              0u,
-                                                              requiredSubgroupSize));
+                tiled.main = makePipelineBinding(k1s1Pipeline(
+                    pipelinePool(),
+                    plan_.k1s1,
+                    weightType,
+                    affineDtype,
+                    actType,
+                    hasScale,
+                    hasBias(),
+                    residualFusion(),
+                    iDtype,
+                    oDtype,
+                    0u,
+                    requiredSubgroupSize));
             }
         }
         return;
@@ -5585,7 +5604,7 @@ inline void Convolution::prepareK3S1(const Workload& workload)
     VAI_ASSERT(plan_.path == ConvPlan::Path::K3S1);
     const uint32_t Ci = workload.ci;
     VAI_ASSERT(workload.kernel == 3u && workload.stride == 1u);
-    const auto [iDtype, oDtype, affineDtype, hasScale, epilogue] = makeFusionSpec(workload);
+    const auto [iDtype, oDtype, affineDtype, hasScale, actType] = makeFusionSpec(workload);
     const uint32_t requiredSubgroupSize = plan_.requiredSubgroupSize;
 
     switch (plan_.k3s1.algorithm)
@@ -5595,35 +5614,36 @@ inline void Convolution::prepareK3S1(const Workload& workload)
         if (plan_.useCM)
         {
             constexpr uint32_t implicitSubgroupSize = 32u;
-            implicit.gemm = makePipelineBinding(k3s1ImplicitGemmPipeline(pipelinePool(),
-                                                                         plan_.k3s1,
-                                                                         epilogue,
-                                                                         affineDtype,
-                                                                         hasScale,
-                                                                         hasBias(),
-                                                                         iDtype,
-                                                                         oDtype,
-                                                                         residualFusion(),
-                                                                         device().deviceID() == kAMDStrixHaloDeviceId &&
-                                                                             plan_.k3s1.flatSpatial &&
-                                                                             useHaloK3S1DirectOutput(workload),
-                                                                         implicitSubgroupSize));
+            implicit.gemm = makePipelineBinding(k3s1ImplicitGemmPipeline(
+                pipelinePool(),
+                plan_.k3s1,
+                actType,
+                affineDtype,
+                hasScale,
+                hasBias(),
+                iDtype,
+                oDtype,
+                residualFusion(),
+                device().deviceID() == kAMDStrixHaloDeviceId && plan_.k3s1.flatSpatial &&
+                    useHaloK3S1DirectOutput(workload),
+                implicitSubgroupSize));
             implicit.weightTransform = makePipelineBinding(
                 cmTransformPipeline(
                     pipelinePool(), 3u, implicitSubgroupSize));
         }
         else
         {
-            implicit.gemm = makePipelineBinding(ConvPipeline(pipelinePool(),
-                                                             plan_.implicit,
-                                                             workload,
-                                                             epilogue,
-                                                             affineDtype,
-                                                             hasScale,
-                                                             hasBias(),
-                                                             residualFusion(),
-                                                             true,
-                                                             plan_.requiredSubgroupSize));
+            implicit.gemm = makePipelineBinding(convPipeline(
+                pipelinePool(),
+                plan_.implicit,
+                workload,
+                actType,
+                affineDtype,
+                hasScale,
+                hasBias(),
+                residualFusion(),
+                true,
+                plan_.requiredSubgroupSize));
         }
         break;
     }
@@ -5637,17 +5657,18 @@ inline void Convolution::prepareK3S1(const Workload& workload)
             winograd.inputTransform = makePipelineBinding(winogradInputTransformPipeline(
                 pipelinePool(), wDtype, iDtype, requiredSubgroupSize));
 
-            winograd.outputTransform = makePipelineBinding(winogradOutputPipeline(pipelinePool(),
-                                                                                  plan_.k3s1.outputStoreMode,
-                                                                                  wDtype,
-                                                                                  affineDtype,
-                                                                                  epilogue,
-                                                                                  residualFusion(),
-                                                                                  hasScale,
-                                                                                  hasBias(),
-                                                                                  iDtype,
-                                                                                  oDtype,
-                                                                                  requiredSubgroupSize));
+            winograd.outputTransform = makePipelineBinding(winogradOutputPipeline(
+                pipelinePool(),
+                plan_.k3s1.outputStoreMode,
+                wDtype,
+                affineDtype,
+                actType,
+                residualFusion(),
+                hasScale,
+                hasBias(),
+                iDtype,
+                oDtype,
+                requiredSubgroupSize));
 
             winograd.gemm = makePipelineBinding(winogradPipeline(
                 pipelinePool(), plan_.k3s1, wDtype, requiredSubgroupSize));
@@ -5672,17 +5693,18 @@ inline void Convolution::prepareK3S1(const Workload& workload)
                         pipelinePool(), Dtype::Fp16, iDtype, cmRequiredSubgroupSize,
                         plan_.k3s1.inputReorder));
 
-                    winograd.outputTransform = makePipelineBinding(winogradOutputPipeline(pipelinePool(),
-                                                                                          false,
-                                                                                          Dtype::Fp16,
-                                                                                          affineDtype,
-                                                                                          epilogue,
-                                                                                          residualFusion(),
-                                                                                          hasScale,
-                                                                                          hasBias(),
-                                                                                          iDtype,
-                                                                                          oDtype,
-                                                                                          cmRequiredSubgroupSize));
+                    winograd.outputTransform = makePipelineBinding(winogradOutputPipeline(
+                        pipelinePool(),
+                        false,
+                        Dtype::Fp16,
+                        affineDtype,
+                        actType,
+                        residualFusion(),
+                        hasScale,
+                        hasBias(),
+                        iDtype,
+                        oDtype,
+                        cmRequiredSubgroupSize));
 
                     winograd.gemm = makePipelineBinding(winogradCMPipeline(
                         pipelinePool(), plan_.k3s1, plan_.k3s1.wgN, 0u, 0u, false));
@@ -5728,17 +5750,18 @@ inline void Convolution::prepareK3S1(const Workload& workload)
                                                                          true));
                     }
 
-                    winograd.outputTransform = makePipelineBinding(winogradOutputPipeline(pipelinePool(),
-                                                                                          plan_.k3s1.outputStoreMode,
-                                                                                          Dtype::Fp16,
-                                                                                          affineDtype,
-                                                                                          epilogue,
-                                                                                          residualFusion(),
-                                                                                          hasScale,
-                                                                                          hasBias(),
-                                                                                          iDtype,
-                                                                                          oDtype,
-                                                                                          cmRequiredSubgroupSize));
+                    winograd.outputTransform = makePipelineBinding(winogradOutputPipeline(
+                        pipelinePool(),
+                        plan_.k3s1.outputStoreMode,
+                        Dtype::Fp16,
+                        affineDtype,
+                        actType,
+                        residualFusion(),
+                        hasScale,
+                        hasBias(),
+                        iDtype,
+                        oDtype,
+                        cmRequiredSubgroupSize));
                 }
                 else
                 {
@@ -5770,7 +5793,7 @@ inline void Convolution::prepareK3S2(const Workload& workload)
     TiledResources& tiled = resources.tiled;
     VAI_ASSERT(plan_.path == ConvPlan::Path::K3S2);
     const uint32_t spatialSize = workload.spatialSize();
-    const auto [iDtype, oDtype, affineDtype, hasScale, epilogue] = makeFusionSpec(workload);
+    const auto [iDtype, oDtype, affineDtype, hasScale, actType] = makeFusionSpec(workload);
     const uint32_t requiredSubgroupSize = plan_.requiredSubgroupSize;
     const K3S2Plan& plan = plan_.k3s2;
 
@@ -5778,29 +5801,31 @@ inline void Convolution::prepareK3S2(const Workload& workload)
     // branch keeps the dispatch order intact.
     if (workload.wDtype == Dtype::Fp32 || plan.firstLayer())
     {
-        tiled.main = makePipelineBinding(k3s2SpecializedPipeline(pipelinePool(),
-                                                                 plan,
-                                                                 epilogue,
-                                                                 affineDtype,
-                                                                 hasScale,
-                                                                 hasBias(),
-                                                                 plan.split() ? ResidualFusion{} : residualFusion(),
-                                                                 workload.wDtype,
-                                                                 iDtype,
-                                                                 oDtype,
-                                                                 requiredSubgroupSize));
+        tiled.main = makePipelineBinding(k3s2SpecializedPipeline(
+            pipelinePool(),
+            plan,
+            actType,
+            affineDtype,
+            hasScale,
+            hasBias(),
+            plan.split() ? ResidualFusion{} : residualFusion(),
+            workload.wDtype,
+            iDtype,
+            oDtype,
+            requiredSubgroupSize));
         if (plan.split())
         {
-            tiled.reduce = makePipelineBinding(bnReducePipeline(pipelinePool(),
-                                                                Dtype::Fp32,
-                                                                affineDtype,
-                                                                hasScale,
-                                                                hasBias(),
-                                                                epilogue,
-                                                                residualFusion(),
-                                                                iDtype,
-                                                                (spatialSize % 4u) == 0u,
-                                                                oDtype));
+            tiled.reduce = makePipelineBinding(bnReducePipeline(
+                pipelinePool(),
+                Dtype::Fp32,
+                affineDtype,
+                hasScale,
+                hasBias(),
+                actType,
+                residualFusion(),
+                iDtype,
+                (spatialSize % 4u) == 0u,
+                oDtype));
         }
         return;
     }
@@ -5808,16 +5833,17 @@ inline void Convolution::prepareK3S2(const Workload& workload)
     if (plan_.useCM)
     {
         constexpr uint32_t cmRequiredSubgroupSize = 32u;
-        tiled.main = makePipelineBinding(k3s2CMPipeline(pipelinePool(),
-                                                        plan,
-                                                        epilogue,
-                                                        affineDtype,
-                                                        hasScale,
-                                                        hasBias(),
-                                                        plan.split() ? ResidualFusion{} : residualFusion(),
-                                                        iDtype,
-                                                        oDtype,
-                                                        cmRequiredSubgroupSize));
+        tiled.main = makePipelineBinding(k3s2CMPipeline(
+            pipelinePool(),
+            plan,
+            actType,
+            affineDtype,
+            hasScale,
+            hasBias(),
+            plan.split() ? ResidualFusion{} : residualFusion(),
+            iDtype,
+            oDtype,
+            cmRequiredSubgroupSize));
 
         if (plan.packedWeights)
         {
@@ -5826,30 +5852,32 @@ inline void Convolution::prepareK3S2(const Workload& workload)
 
             if (plan.split())
             {
-                tiled.reduce = makePipelineBinding(bnReducePipeline(pipelinePool(),
-                                                                    Dtype::Fp16,
-                                                                    affineDtype,
-                                                                    hasScale,
-                                                                    hasBias(),
-                                                                    epilogue,
-                                                                    residualFusion(),
-                                                                    iDtype,
-                                                                    true,
-                                                                    oDtype));
+                tiled.reduce = makePipelineBinding(bnReducePipeline(
+                    pipelinePool(),
+                    Dtype::Fp16,
+                    affineDtype,
+                    hasScale,
+                    hasBias(),
+                    actType,
+                    residualFusion(),
+                    iDtype,
+                    true,
+                    oDtype));
             }
         }
         else if (plan.split())
         {
-            tiled.reduce = makePipelineBinding(bnReducePipeline(pipelinePool(),
-                                                                oDtype,
-                                                                affineDtype,
-                                                                hasScale,
-                                                                hasBias(),
-                                                                epilogue,
-                                                                residualFusion(),
-                                                                iDtype,
-                                                                (spatialSize % 4u) == 0u,
-                                                                oDtype));
+            tiled.reduce = makePipelineBinding(bnReducePipeline(
+                pipelinePool(),
+                oDtype,
+                affineDtype,
+                hasScale,
+                hasBias(),
+                actType,
+                residualFusion(),
+                iDtype,
+                (spatialSize % 4u) == 0u,
+                oDtype));
         }
         return;
     }
@@ -5870,31 +5898,33 @@ inline void Convolution::prepareK3S2(const Workload& workload)
                                                                   requiredSubgroupSize,
                                                                   true));
 
-        tiled.reduce = makePipelineBinding(bnReducePipeline(pipelinePool(),
-                                                            Dtype::Fp32,
-                                                            affineDtype,
-                                                            hasScale,
-                                                            hasBias(),
-                                                            epilogue,
-                                                            residualFusion(),
-                                                            iDtype,
-                                                            (spatialSize % 4u) == 0u,
-                                                            oDtype));
+        tiled.reduce = makePipelineBinding(bnReducePipeline(
+            pipelinePool(),
+            Dtype::Fp32,
+            affineDtype,
+            hasScale,
+            hasBias(),
+            actType,
+            residualFusion(),
+            iDtype,
+            (spatialSize % 4u) == 0u,
+            oDtype));
         return;
     }
 
-    tiled.main = makePipelineBinding(k3s2SpecializedPipeline(pipelinePool(),
-                                                             plan,
-                                                             epilogue,
-                                                             affineDtype,
-                                                             hasScale,
-                                                             hasBias(),
-                                                             residualFusion(),
-                                                             workload.wDtype,
-                                                             iDtype,
-                                                             oDtype,
-                                                             requiredSubgroupSize,
-                                                             true));
+    tiled.main = makePipelineBinding(k3s2SpecializedPipeline(
+        pipelinePool(),
+        plan,
+        actType,
+        affineDtype,
+        hasScale,
+        hasBias(),
+        residualFusion(),
+        workload.wDtype,
+        iDtype,
+        oDtype,
+        requiredSubgroupSize,
+        true));
 }
 
 inline void Convolution::prepareImplicit(const Workload& workload)
@@ -5902,20 +5932,20 @@ inline void Convolution::prepareImplicit(const Workload& workload)
     ImplicitResources& implicit = std::get<ImplicitResources>(prepared_);
     VAI_ASSERT(plan_.path == ConvPlan::Path::General);
     VAI_ASSERT(plan_.algorithm() == ConvAlgorithm::Implicit);
-    const auto [iDtype, oDtype, affineDtype, hasScale, epilogue] = makeFusionSpec(workload);
+    const auto [iDtype, oDtype, affineDtype, hasScale, actType] = makeFusionSpec(workload);
     const ImplicitGemmPlan& plan = plan_.implicit;
 
     if (plan_.useCM)
     {
-        implicit.gemm = makePipelineBinding(ConvCMPipeline(
-            pipelinePool(), plan, workload, epilogue, affineDtype, hasScale, hasBias(), residualFusion()));
+        implicit.gemm = makePipelineBinding(convCMPipeline(
+            pipelinePool(), plan, workload, actType, affineDtype, hasScale, hasBias(), residualFusion()));
         implicit.weightTransform = makePipelineBinding(
             cmTransformPipeline(pipelinePool(), 4u, 32u));
     }
     else
     {
-        implicit.gemm = makePipelineBinding(ConvPipeline(
-            pipelinePool(), plan, workload, epilogue, affineDtype, hasScale, hasBias(), residualFusion(), false));
+        implicit.gemm = makePipelineBinding(convPipeline(
+            pipelinePool(), plan, workload, actType, affineDtype, hasScale, hasBias(), residualFusion(), false));
     }
 }
 
@@ -6063,11 +6093,7 @@ inline void Convolution::prepareTensorStorage(const Workload& workload)
 inline void Convolution::prepare()
 {
     const eva::Device currentDevice = device();
-    const uint32_t vendorId = currentDevice.vendorID();
-    const ConvolutionCaps caps{
-        .hasCM = hasCooperativeMatrixUnit(vendorId, currentDevice.architectureID()),
-        .accFP16 = supportsCMShape(currentDevice, Dtype::Fp16, Dtype::Fp16),
-    };
+    const ConvolutionCaps caps = convolutionCaps(currentDevice);
     const Workload workload = makeWorkload();
     validateInputs(workload);
 
