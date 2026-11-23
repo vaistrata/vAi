@@ -26,22 +26,22 @@ void bindRegisteredNodes(nb::module_& m, const std::string& modelName)
 
 void bindNodes(nb::module_& m)
 {
-    // Epilogue, ResidualOrder and KVCacheCounter are argument types of nodes below:
+    // vai::ActType, ResidualOrder and KVCacheCounter are argument types of nodes below:
     // register them first.
-    nb::enum_<vai::Epilogue>(m, "Epilogue")
-        .value("NONE",      vai::Epilogue::None)
-        .value("RELU",      vai::Epilogue::Relu)
-        .value("GELU",      vai::Epilogue::Gelu,     "Exact, through erf.")
-        .value("GELU_TANH", vai::Epilogue::GeluTanh, "The tanh approximation (gelu_pytorch_tanh).")
-        .value("SILU",      vai::Epilogue::Silu)
-        .value("SIGMOID",   vai::Epilogue::Sigmoid);
+    nb::enum_<vai::ActType>(m, "ActType")
+        .value("NONE", vai::ActType::None)
+        .value("RELU", vai::ActType::Relu)
+        .value("GELU", vai::ActType::Gelu, "Exact, through erf.")
+        .value("GELU_TANH", vai::ActType::GeluTanh, "The tanh approximation (gelu_pytorch_tanh).")
+        .value("SILU", vai::ActType::Silu)
+        .value("SIGMOID", vai::ActType::Sigmoid);
 
     nb::enum_<vai::ResidualOrder>(
-        m, "ResidualOrder", "Where a node adds its `residual` input, relative to the epilogue.")
-        .value("AFTER_EPILOGUE", vai::ResidualOrder::AfterEpilogue, "epilogue(x) + residual, a following add.")
-        .value("BEFORE_EPILOGUE",
-               vai::ResidualOrder::BeforeEpilogue,
-               "epilogue(x + residual), an add ahead of the activation.");
+        m, "ResidualOrder", "Where a node adds its `residual` input, relative to the activation.")
+        .value("AFTER_ACTIVATION", vai::ResidualOrder::AfterActivation, "activation(x) + residual, a following add.")
+        .value("BEFORE_ACTIVATION",
+               vai::ResidualOrder::BeforeActivation,
+               "activation(x + residual), an add ahead of the activation.");
 
     bindKVCacheCounter(m);
 

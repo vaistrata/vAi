@@ -25,7 +25,7 @@ layout(constant_id = 8) const bool shortcut = false;
 layout(constant_id = 9) const bool structuredInputLoad = false;
 layout(constant_id = 10) const bool padA = true;
 layout(constant_id = 11) const bool wideFp32Tile = false;
-layout(constant_id = 12) const uint residualOrder = 0u;  // 0: after the epilogue, 1: before it
+layout(constant_id = 12) const uint residualOrder = 0u;  // 0: after the activation, 1: before it
 layout(constant_id = SPEC_ID_TYPE_CI) const uint CI_SPEC = 0u;
 layout(constant_id = SPEC_ID_TYPE_CO) const uint CO_SPEC = 0u;
 layout(constant_id = SPEC_ID_TYPE_HI) const uint HI_SPEC = 0u;
@@ -145,7 +145,7 @@ float finishOutput(uint channel, uint index, float value)
         : fma(value, readScale(channel), readBias(channel));
     if (shortcut && residualOrder == 1u)
         value += readResidual(index);
-    value = applyEpilogue(value);
+    value = applyActivation(value);
     if (shortcut && residualOrder == 0u)
         value += readResidual(index);
     return value;
@@ -260,7 +260,7 @@ vec4 finishWideOutput(uint channel, uint outputIndex, vec4 value)
         : fma(value, vec4(bufferScale_f32[channel]), vec4(bias));
     if (shortcut && residualOrder == 1u)
         value += bufferRes_4f32[(imageOutputBase + outputIndex) / 4u];
-    value = applyEpilogue(value);
+    value = applyActivation(value);
     if (shortcut && residualOrder == 0u)
         value += bufferRes_4f32[(imageOutputBase + outputIndex) / 4u];
     return value;

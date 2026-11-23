@@ -27,8 +27,8 @@ TRANS = (1e-4, 1e-5)  # exp / tanh / erf in fp32
 # index or tail still misses by far more than this.
 FP16 = (1e-3, 5e-3)
 
-# The kernels' epilogues (vai/shaders/common/activation.h), by pyvai.Epilogue name.
-EPILOGUES = {
+# The kernels' activations (vai/shaders/common/activation.h), by pyvai.ActType name.
+ACTIVATIONS = {
     "NONE": lambda x: x,
     "RELU": F.relu,
     "GELU": F.gelu,
@@ -108,7 +108,7 @@ def _tensor(array):
 def _net(make, slots, params):
     class Net(pyvai.NeuralNet):
         def __init__(self):
-            super().__init__(w_default_dtype=pyvai.Dtype.F32)
+            super().__init__(w_default_dtype=pyvai.Dtype.F32, o_default_dtype=pyvai.Dtype.F32)
             self.node = make()
             self.input(slots[0]) - slots[0] / self.node - self.output("out0")
             for slot in slots[1:]:

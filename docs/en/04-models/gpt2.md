@@ -14,7 +14,7 @@ auto modelCfg = gpt2::ModelConfig::_124M();
 gpt2::Net net({
     .device        = device,
     .wDefaultDtype = Dtype::Fp16,
-    .oDefaultDtype = Dtype::Fp32,
+    .oDefaultDtype = Dtype::Fp16,
 }, modelCfg);
 ```
 

@@ -20,6 +20,13 @@ pip install pre-commit && pre-commit install               # format and lint at 
 python .github/scripts/clang-tidy-staged.py --setup        # if you change C++: turns the clang-tidy hook on
 ```
 
+## Contributor License Agreement
+
+Sign the [Contributor License Agreement](CLA.md) once, on your first pull
+request. The CLA assistant posts a signing link on the pull request, and its
+`license/cla` check passes after you sign. A pull request is merged only after
+this check passes.
+
 ## Branches, commits and pull requests
 
 - **Branch**: `<type>/<short-description>` from `master`, for example

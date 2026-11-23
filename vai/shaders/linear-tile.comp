@@ -28,7 +28,12 @@
 
  Split-K: workgroup z owns the K span [z * splitSize, min(K, (z + 1) *
  splitSize)) and writes its partials to P[z, M, N] on binding 0;
- linear-reduce.comp folds the partials and applies bias / epilogue.
+ linear-reduce.comp folds the partials and applies bias / activation.
+
+ glu (Linear's GLU, no split): W's rows come gate and up in adjacent pairs
+ (linear-glu-rows, G = 1), so a thread's columns n and n + 1 (n even) are the
+ gate and the up of output n / 2; O is [M, N / 2]:
+   O[m, n / 2] = activation(C[m, n]) * C[m, n + 1]
 
  Dispatch (host): (ceil(N / wgN), ceil(M / wgM), ceil(K / splitSize))
 =============================================================================*/
@@ -54,6 +59,7 @@ layout(constant_id = 9)  const uint sgpMIter = 2;    // pieces per subgroup tile
 layout(constant_id = 10) const uint sgpNIter = 2;    // pieces per subgroup tile along N (= sgN / sgpN)
 layout(constant_id = 11) const uint accType  = 0;    // accumulator dtype (0: fp32, 1: fp16)
 layout(constant_id = 12) const uint robustBufferAccess  = 0;    // robust buffer access (0: disabled, 1: enabled)
+layout(constant_id = 13) const uint glu = 0;    // 1: O = activation(gate) * up (see the header)
 
 layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0;  // O (output) dtype
 layout(constant_id = SPEC_ID_TYPE_I) const uint typeI = 0;  // I (input) dtype
@@ -96,6 +102,11 @@ float16_t readI(uint i)   { return (typeI == DTYPE_F32) ? float16_t(bufferI_f32[
 float16_t readW(uint i)   { return (typeW == DTYPE_F32) ? float16_t(bufferW_f32[i]) : bufferW_f16[i]; }
 void writeO(uint i, float v) { if (typeO == DTYPE_F32) bufferO_f32[i] = v; else bufferO_f16[i] = float16_t(v); }
 void writeO(uint i, float16_t v) { if (typeO == DTYPE_F32) bufferO_f32[i] = float(v); else bufferO_f16[i] = v; }
+
+// The epilogue (bias / activation / scale / residual, the GLU) when K is not split.
+#define LINEAR_STORE_BIAS_BINDING 3
+#define LINEAR_STORE_RESIDUAL_BINDING 4
+#include "common/linear-store.h"
 
 // One k-block of W rows (tileA) and I rows (tileB) in 2-element slots: fp16
 // (fp32 sources are rounded here) or, with stageF32, fp32. The unused set is one slot.
@@ -341,6 +352,26 @@ void main()
                 {
                     const uint sums_idx = (pm * tM + cm) * sgpNIter * (tN / 2) + pn * (tN / 2) + cn;
                     const uint o_idx    = (m_sgp + cm) * N + n_sgp + 2 * cn;
+
+                    if (glu != 0u)
+                    {
+                        const float gate = (accType == DTYPE_F32) ? sums_f32[sums_idx].x : float(sums_f16[sums_idx].x);
+                        const float up = (accType == DTYPE_F32) ? sums_f32[sums_idx].y : float(sums_f16[sums_idx].y);
+                        if (m_sgp + cm < M && n_sgp + 2 * cn < N)
+                            writeO((m_sgp + cm) * (N / 2u) + (n_sgp + 2 * cn) / 2u, linearStoreGlu(m_sgp + cm, (n_sgp + 2 * cn) / 2u, N, gate, up));
+                        continue;
+                    }
+
+                    if (!linearStoreIdentity)
+                    {
+                        const float x = (accType == DTYPE_F32) ? sums_f32[sums_idx].x : float(sums_f16[sums_idx].x);
+                        const float y = (accType == DTYPE_F32) ? sums_f32[sums_idx].y : float(sums_f16[sums_idx].y);
+                        if (m_sgp + cm < M && n_sgp + 2 * cn < N)
+                            writeO(o_idx, linearStore(o_idx, x));
+                        if (m_sgp + cm < M && n_sgp + 2 * cn + 1 < N)
+                            writeO(o_idx + 1, linearStore(o_idx + 1, y));
+                        continue;
+                    }
 
                     if (m_sgp + cm < M && n_sgp + 2 * cn < N)
                         if (accType == DTYPE_F32)  writeO(zOff + o_idx, sums_f32[sums_idx].x);

@@ -11,7 +11,7 @@ namespace vai::group {
 // Input: in0 [..., inDim], optional residual [..., outDim]
 // Output: out0 [..., outDim] = fc2(activation(fc1(in0)))
 //
-// The activation rides fc1's epilogue, so the hidden tensor is written once.
+// The activation rides fc1's activation, so the hidden tensor is written once.
 //
 // acceptResidual opens "residual" for the block's skip and folds the add into fc2.
 // A block that normalizes its branch output has to add outside instead, and
@@ -26,12 +26,12 @@ struct FeedForward : public vai::NodeGroup
         uint32_t inDim;
         uint32_t hiddenDim;
         uint32_t outDim;
-        vai::Epilogue activation = vai::Epilogue::None;
+        vai::ActType actType = vai::ActType::None;
         bool acceptResidual = false;   // open "residual" and fold its addend into fc2
     };
 
     FeedForward(Config config)
-    : fc1({ .inDim = config.inDim, .outDim = config.hiddenDim, .epilogue = config.activation })
+    : fc1({ .inDim = config.inDim, .outDim = config.hiddenDim, .actType = config.actType })
     , fc2({ .inDim = config.hiddenDim, .outDim = config.outDim, .acceptResidual = config.acceptResidual })
     {
         // clang-format off

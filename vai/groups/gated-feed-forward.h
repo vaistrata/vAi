@@ -19,6 +19,9 @@ namespace vai::group {
 // acceptResidual opens "residual" for the block's skip and folds the add into the
 // output projection. A block that normalizes its branch output has to add
 // outside instead, and leaves it false: no slot is opened.
+//
+// fuseGlu runs the gating inside gateValue (Linear's glu: in the GEMM's store
+// on Xe3, a second pass elsewhere) and leaves gatedMul out of the graph.
 /////////////////////////////////////////////////////////////////////////////////////////
 struct GatedFeedForward : public vai::NodeGroup
 {
@@ -30,20 +33,25 @@ struct GatedFeedForward : public vai::NodeGroup
         uint32_t inDim;
         uint32_t hiddenDim;
         uint32_t outDim;
-        vai::Epilogue activation = vai::Epilogue::Silu;   // the GLU variant
+        vai::ActType actType = vai::ActType::Silu;   // the GLU variant
         bool acceptResidual = false;   // open "residual" and fold its addend into the output projection
+        bool fuseGlu = false;          // the gating inside gateValue (Linear::Config::glu), no gatedMul node
     };
 
     GatedFeedForward(Config config)
-    : gateValue({.inDim = config.inDim, .outDim = 2 * config.hiddenDim})
-    , gatedMul({config.activation})
-    , out({
-        .inDim = config.hiddenDim,
-        .outDim = config.outDim,
-        .acceptResidual = config.acceptResidual})
+    : gateValue(
+          { .inDim = config.inDim,
+            .outDim = 2 * config.hiddenDim,
+            .actType = config.fuseGlu ? config.actType : vai::ActType::None,   // fused: the gate's
+            .glu = config.fuseGlu })
+    , gatedMul({ config.actType })
+    , out({ .inDim = config.hiddenDim, .outDim = config.outDim, .acceptResidual = config.acceptResidual })
     {
         // clang-format off
-        gateValue - gatedMul - out;
+        if (config.fuseGlu)
+            gateValue - out;
+        else
+            gateValue - gatedMul - out;
         // clang-format on
 
         defineSlot("in0", gateValue.slot("in0"));

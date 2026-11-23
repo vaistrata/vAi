@@ -32,7 +32,7 @@ layout(local_size_x = 256) in;
 layout(constant_id = 3) const bool alignedN = false;    // N % 4 == 0
 layout(constant_id = 4) const bool reorder = false;
 layout(constant_id = 5) const bool shortcut = false;
-layout(constant_id = 6) const uint residualOrder = 0u;  // 0: after the epilogue, 1: before it
+layout(constant_id = 6) const uint residualOrder = 0u;  // 0: after the activation, 1: before it
 layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0u;
 layout(constant_id = SPEC_ID_TYPE_I) const uint typeI = 0u;   // the residual's, the convolution input's
 layout(constant_id = SPEC_ID_TYPE_W) const uint typeW = 0u;
@@ -126,7 +126,7 @@ float applyOutput(uint m, uint index, float sum)
     float value = applyAffine(m, sum);
     if (shortcut && residualOrder == 1u)
         value += readResidual(index);
-    value = applyEpilogue(value);
+    value = applyActivation(value);
     if (shortcut && residualOrder == 0u)
         value += readResidual(index);
     return value;
@@ -138,7 +138,7 @@ vec4 applyOutput(uint m, uint base, vec4 sum)
     vec4 value = applyAffine(m, sum);
     if (shortcut && residualOrder == 1u)
         value += readResidual4(base);
-    value = applyEpilogue(value);
+    value = applyActivation(value);
     if (shortcut && residualOrder == 0u)
         value += readResidual4(base);
     return value;

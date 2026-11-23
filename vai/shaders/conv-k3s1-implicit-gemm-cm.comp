@@ -27,7 +27,7 @@ layout(constant_id = 6) const bool shortcut = false;
 layout(constant_id = 7) const bool flatSpatial = false;
 layout(constant_id = 8) const uint panelK = 64u;
 layout(constant_id = 9) const bool directOutput = false;
-layout(constant_id = 10) const uint residualOrder = 0u;  // 0: after the epilogue, 1: before it
+layout(constant_id = 10) const uint residualOrder = 0u;  // 0: after the activation, 1: before it
 layout(constant_id = SPEC_ID_TYPE_CI) const uint CI_SPEC = 0u;
 layout(constant_id = SPEC_ID_TYPE_CO) const uint CO_SPEC = 0u;
 layout(constant_id = SPEC_ID_TYPE_HI) const uint HI_SPEC = 0u;
@@ -150,7 +150,7 @@ float applyOutput(
         : fma(value, scale, bias);
     if (shortcut && residualOrder == 1u)
         value += readResidual(offset);
-    value = applyEpilogue(value);
+    value = applyActivation(value);
     if (shortcut && residualOrder == 0u)
         value += readResidual(offset);
     return value;
@@ -167,7 +167,7 @@ vec4 applyOutput4(
         : fma(value, vec4(scale), vec4(bias));
     if (shortcut && residualOrder == 1u)
         value += readResidual4(offset);
-    value = applyEpilogue(value);
+    value = applyActivation(value);
     if (shortcut && residualOrder == 0u)
         value += readResidual4(offset);
     return value;
@@ -366,7 +366,7 @@ void writeOutputTileDirect(
             : fma(acc[element], scaleValues[element], biasValues[element]);
         if (shortcut && residualOrder == 1u)
             value += residualValues[element];
-        value = applyEpilogue(value);
+        value = applyActivation(value);
         if (shortcut && residualOrder == 0u)
             value += residualValues[element];
         acc[element] = value;

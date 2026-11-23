@@ -12,7 +12,7 @@ struct FeedForward : public vai::NodeGroup {
     // ... Config 정의
 
     FeedForward(Config config)
-    : fc1({ .inDim = config.inDim, .outDim = config.hiddenDim, .epilogue = config.activation })
+    : fc1({ .inDim = config.inDim, .outDim = config.hiddenDim, .actType = config.actType })
     , fc2({ .inDim = config.hiddenDim, .outDim = config.outDim, .acceptResidual = config.acceptResidual })
     {
         fc1 - fc2;                            // 2

@@ -1,8 +1,8 @@
 /*=============================================================================
  activation.comp:
-     O[i] = epilogue(I[i])     (element-wise; epilogue via spec constant)
+     O[i] = activation(I[i])     (element-wise; activation via spec constant)
 
- - epilogue : 0 none, 1 relu, 2 gelu, 3 silu, 4 sigmoid
+ - actType : 0 none, 1 relu, 2 gelu, 3 silu, 4 sigmoid
  - inPlace : when 1, reads from and writes to the output buffer (in0 unbound)
  - O (typeO) and I (typeI) are fp32 or fp16, accessed through same-binding
    buffer aliases. Dispatch (host): dispatch2(N).
@@ -37,5 +37,5 @@ void main()
     if (i >= N) return;
 
     float x = (inPlace != 0u) ? readO(i) : readI(i);
-    writeO(i, applyEpilogue(x));
+    writeO(i, applyActivation(x));
 }

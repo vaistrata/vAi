@@ -95,6 +95,12 @@ Problems on untouched lines do not cause the PR to fail.
 Checks on the first PR from a fork start after a maintainer approves the run.
 Until then, the checks are shown as pending.
 
+### 3.4 Contributor License Agreement
+
+Sign the [Contributor License Agreement](../../../CLA.md) (CLA) once, on your first PR.
+The CLA assistant posts a signing link on the PR. After you sign, the `license/cla` check passes on this PR and on later ones. If the agreement changes, you sign again.
+A PR is merged only after this check passes.
+
 ## 4. Fixing failed checks
 
 Tool versions are pinned in the [CI configuration](../../../.github/workflows/ci.yml). All three tools can be installed with `pip install`.
@@ -261,6 +267,7 @@ Change existing calls to load_model(path, format).
 | PR title | Use the commit subject format in [6.2](#62-commit-messages). With a squash merge, this title becomes the commit subject on `master`. |
 | PR description | Describe the changes and how they were verified. Also mention any checks that failed for reasons unrelated to the changes. For an incompatible change, include a `BREAKING CHANGE:` paragraph. |
 | Approval | Two approvals from the maintainer team are required. Changes to paths listed in [`CODEOWNERS`](../../../.github/CODEOWNERS) must include approval from the relevant code owner. |
+| CLA | The `license/cla` check must pass. See [3.4](#34-contributor-license-agreement). |
 | Merge method: PRs from forks | Use squash merge. The PR's commits enter `master` as one commit. |
 | Merge method: PRs from branches of this repository | Use a merge commit. The PR's commits enter `master` as they are, so every commit must follow [6.2](#62-commit-messages). Otherwise, use squash merge. |
 | After merging | Delete the merged working branch. |

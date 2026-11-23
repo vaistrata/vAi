@@ -135,8 +135,8 @@ struct Net : public vai::NeuralNet
           .inDim = modelCfg.actionTrf.embedDim,
           .outDim = modelCfg.actionTrf.embedDim,
           .acceptResidual = true,
-          .residualOrder = vai::ResidualOrder::BeforeEpilogue,
-          .epilogue = vai::Epilogue::Silu,
+          .residualOrder = vai::ResidualOrder::BeforeActivation,
+          .actType = vai::ActType::Silu,
       })
     , actionTimeOut({
           .inDim = modelCfg.actionTrf.embedDim,

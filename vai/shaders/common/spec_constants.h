@@ -25,9 +25,16 @@
 #define SPEC_ID_TYPE_ACC 105
 
 // Common operation specialization constants: 110+.
-#define SPEC_ID_EPILOGUE 110
+#define SPEC_ID_ACT_TYPE 110
 #define SPEC_ID_HAS_SCALE 111
 #define SPEC_ID_HAS_BIAS 112
+// The Linear kernels' epilogue (common/linear-store.h): 113-118.
+#define SPEC_ID_BIAS_ELEMS 113
+#define SPEC_ID_TYPE_B 114
+#define SPEC_ID_HAS_RESIDUAL 115
+#define SPEC_ID_RESIDUAL_ELEMS 116
+#define SPEC_ID_RESIDUAL_ORDER 117
+#define SPEC_ID_SCALE_BITS 118
 
 // Shared shape limits: sized arrays a push-constant or uniform block and its host
 // mirror must agree on.

@@ -1,0 +1,5 @@
+{
+  "runtime": {
+    "weight_dtype": "f16"
+  }
+}

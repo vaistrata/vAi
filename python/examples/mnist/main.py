@@ -32,11 +32,11 @@ class MnistNet(pyvai.NeuralNet):
     def __init__(self, profile: bool = False):
         super().__init__(w_default_dtype=WEIGHT_DTYPE)
         self.conv0 = nodes.ConvolutionNode(
-            in_channels=1, out_channels=32, kernel_size=3, stride=1, epilogue=pyvai.Epilogue.RELU
+            in_channels=1, out_channels=32, kernel_size=3, stride=1, act_type=pyvai.ActType.RELU
         )
         self.pool0 = nodes.MaxPool2dNode(kernel_size=2, stride=2)
         self.conv1 = nodes.ConvolutionNode(
-            in_channels=32, out_channels=64, kernel_size=3, stride=1, epilogue=pyvai.Epilogue.RELU
+            in_channels=32, out_channels=64, kernel_size=3, stride=1, act_type=pyvai.ActType.RELU
         )
         self.pool1 = nodes.MaxPool2dNode(kernel_size=2, stride=2)
         self.reshape = nodes.ReshapeNode([7 * 7 * 64])

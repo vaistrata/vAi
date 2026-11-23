@@ -8,7 +8,7 @@
  stride-2 reads are unit-stride across lanes. W is the [CI*KS*KS][CO] fp32
  copy conv-k7s2-direct-weight writes: every lane reads the same weights,
  which the compiler loads once per subgroup as scalars.
- out = epilogue(scale * conv + bias), fp32 input, output and arithmetic.
+ out = activation(scale * conv + bias), fp32 input, output and arithmetic.
  Bindings: O=0, I=1, W=2 (transformed), BIAS=3, SCALE=4.
  Dispatch: x=ceil(Wo / TX), y=ceil(Ho / TY), z=pc.batch images.
  Push constants: PushConstants.
@@ -135,7 +135,7 @@ void main()
             {
                 const uint co = coBase + k;
                 bufferO[outputBase + (co * pc.ho + oy) * pc.wo + ox] =
-                    applyEpilogue(fma(acc[k], readScale(co), readBias(co)));
+                    applyActivation(fma(acc[k], readScale(co), readBias(co)));
             }
         }
     }

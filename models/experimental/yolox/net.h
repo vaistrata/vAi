@@ -122,6 +122,9 @@ struct Net : public vai::NeuralNet
         // clang-format off
         detector - output("out0");
         // clang-format on
+
+        // The detections go to the host's postprocess as fp32, whatever oDefaultDtype is.
+        detector.decode.setODtype(vai::Dtype::Fp32, dtypeKey());
     }
 };
 

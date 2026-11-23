@@ -14,7 +14,7 @@ auto modelCfg = llama3::ModelConfig::_3_2_1B();
 llama3::Net net({
     .device        = device,
     .wDefaultDtype = Dtype::Fp16,
-    .oDefaultDtype = Dtype::Fp32,
+    .oDefaultDtype = Dtype::Fp16,
 }, modelCfg, {
     .maxRuntimeContext = 4096,
 });

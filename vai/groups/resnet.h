@@ -37,9 +37,9 @@ namespace vai::group {
 // Input : in0 [..., Ci, H, W], residual [..., Co, H / stride, W / stride] when accepted
 // Output: out0 [..., Co, H / stride, W / stride]
 //
-// out0 = epilogue(norm(conv(in0)) + residual)
+// out0 = activation(norm(conv(in0)) + residual)
 //
-// With BatchNorm the conv takes the residual and the epilogue; with GroupNorm
+// With BatchNorm the conv takes the residual and the activation; with GroupNorm
 // the norm node does.
 /////////////////////////////////////////////////////////////////////////////////////////
 struct ConvNorm : public vai::NodeGroup
@@ -48,7 +48,7 @@ struct ConvNorm : public vai::NodeGroup
     std::optional<vai::node::GroupNorm> norm;
 
     ConvNorm(const ResNetConfig& config, uint32_t inChannels, uint32_t outChannels, uint32_t kernelSize,
-             uint32_t stride, vai::Epilogue epilogue, bool acceptResidual = false)
+             uint32_t stride, vai::ActType actType, bool acceptResidual = false)
     : conv(config.norm == ResNetNorm::BatchNorm
         ? vai::node::Convolution::Config{
             .inChannels = inChannels,
@@ -56,8 +56,8 @@ struct ConvNorm : public vai::NodeGroup
             .kernelSize = kernelSize,
             .stride = stride,
             .acceptResidual = acceptResidual,
-            .residualOrder = vai::ResidualOrder::BeforeEpilogue,
-            .epilogue = epilogue,
+            .residualOrder = vai::ResidualOrder::BeforeActivation,
+            .actType = actType,
         }
         : vai::node::Convolution::Config{
             .inChannels = inChannels,
@@ -72,8 +72,8 @@ struct ConvNorm : public vai::NodeGroup
                 .groups = outChannels / config.groupNormWidth,
                 .eps = config.normEps,
                 .acceptResidual = acceptResidual,
-                .residualOrder = vai::ResidualOrder::BeforeEpilogue,
-                .epilogue = epilogue,
+                .residualOrder = vai::ResidualOrder::BeforeActivation,
+                .actType = actType,
             });
         }
 
@@ -107,11 +107,11 @@ struct BasicBlock : public vai::NodeGroup
     std::optional<ConvNorm> shortcut;   // empty: in0 itself
 
     BasicBlock(const ResNetConfig& config, uint32_t inChannels, uint32_t planes, uint32_t stride)
-    : conv1(config, inChannels, planes, 3, stride, vai::Epilogue::Relu)
-    , conv2(config, planes, planes, 3, 1, vai::Epilogue::Relu, true)
+    : conv1(config, inChannels, planes, 3, stride, vai::ActType::Relu)
+    , conv2(config, planes, planes, 3, 1, vai::ActType::Relu, true)
     {
         if (stride != 1u || inChannels != planes)
-            shortcut.emplace(config, inChannels, planes, 1, stride, vai::Epilogue::None);
+            shortcut.emplace(config, inChannels, planes, 1, stride, vai::ActType::None);
 
         // clang-format off
         input - conv1 -               conv2;
@@ -145,12 +145,12 @@ struct Bottleneck : public vai::NodeGroup
     std::optional<ConvNorm> shortcut;   // empty: in0 itself
 
     Bottleneck(const ResNetConfig& config, uint32_t inChannels, uint32_t planes, uint32_t stride)
-    : conv1(config, inChannels, planes, 1, 1, vai::Epilogue::Relu)
-    , conv2(config, planes, planes, 3, stride, vai::Epilogue::Relu)
-    , conv3(config, planes, planes * expansion, 1, 1, vai::Epilogue::Relu, true)
+    : conv1(config, inChannels, planes, 1, 1, vai::ActType::Relu)
+    , conv2(config, planes, planes, 3, stride, vai::ActType::Relu)
+    , conv3(config, planes, planes * expansion, 1, 1, vai::ActType::Relu, true)
     {
         if (stride != 1u || inChannels != planes * expansion)
-            shortcut.emplace(config, inChannels, planes * expansion, 1, stride, vai::Epilogue::None);
+            shortcut.emplace(config, inChannels, planes * expansion, 1, stride, vai::ActType::None);
 
         // clang-format off
         input - conv1 - conv2 -       conv3;
@@ -180,7 +180,7 @@ struct ResNet : public vai::NodeGroup
     std::vector<Block> blocks;   // layer1 .. layer4, in order
 
     explicit ResNet(const ResNetConfig& config = {})
-    : conv1(config, 3, 64, 7, 2, vai::Epilogue::Relu)
+    : conv1(config, 3, 64, 7, 2, vai::ActType::Relu)
     , maxPool({ .kernelSize = 3, .stride = 2, .padding = 1 })
     {
         // Built in place: a block's slots point back at it, so it cannot move.

@@ -8,6 +8,7 @@
                  from  huggingface.co/datasets/suz22/RoboTwin_clean
 =============================================================================*/
 
+#include <cstdlib>
 #include "net.h"
 #include "lerobot-weights.h"
 #include "processing.h"
