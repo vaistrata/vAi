@@ -71,102 +71,6 @@ using MaxPool2d = Pool2d<PoolMode::Max>;
 using AvgPool2d = Pool2d<PoolMode::Avg>;
 
 
-// pool2d.comp over an input of dims {B, C, H, W} (also with channelsLast). Pool2d runs it
-// through these, and so does a Convolution whose fused max pool runs as a pass after the
-// convolution (Convolution::Config::fuseMaxPool).
-
-// The pooled size of an input side.
-template <PoolMode mode>
-inline uint32_t pool2dOutSize(const typename Pool2d<mode>::Config& config, uint32_t in)
-{
-    uint32_t K = config.kernelSize;
-    uint32_t S = config.stride;
-    uint32_t P = config.padding;
-
-    uint32_t span = in + 2 * P - K;
-    uint32_t out = (config.ceilMode ? CEIL_DIV(span, S) : span / S) + 1;
-    if (config.ceilMode && (out - 1) * S >= in + P)
-        --out;
-    return out;
-}
-
-// The pipeline for the input on this device: the bounds-check-free loop over interior
-// windows where it was measured faster, the general one anywhere else.
-template <PoolMode mode>
-inline typename Pool2d<mode>::PipeParams pool2dPipeParams(
-    const eva::Device& device, const typename Pool2d<mode>::Config& config, std::array<uint32_t, 4> dims, Dtype iDtype,
-    Dtype oDtype)
-{
-    auto [B, C, H, W] = dims;
-    const bool interior =
-        mode == PoolMode::Max && !config.channelsLast && !config.ceilMode && config.kernelSize == 3u &&
-        config.stride == 2u && config.padding == 1u && B == 1u && C == 64u && H == 240u && W == 320u &&
-        iDtype == Dtype::Fp32 && oDtype == Dtype::Fp32 && device.vendorID() == eva::VENDOR_ID::NVIDIA &&
-        device.deviceID() == 0x2b85u && device.computeBlockCount() == 170u &&
-        device.maxComputeWorkGroupInvocations() >= 256u;
-    return {
-        .aligned = config.channelsLast && C % 4 == 0,
-        .wgSize = interior ? 256u : 64u,
-        .interior = interior,
-        .iDtype = iDtype,
-        .oDtype = oDtype,
-    };
-}
-
-template <PoolMode mode>
-inline eva::ComputePipeline pool2dPipeline(
-    PipelinePool& pool, const typename Pool2d<mode>::Config& config, const typename Pool2d<mode>::PipeParams& p)
-{
-    // clang-format off
-    return pool.request("pool2d", {
-        eva::constant_id<7>(p.wgSize), eva::constant_id<8>(p.interior),
-        eva::constant_id<0>(config.channelsLast ? 1u : 0u),       // channelsLast
-        eva::constant_id<1>(config.kernelSize),                   // K
-        eva::constant_id<2>(config.stride),                       // S
-        eva::constant_id<3>(config.padding),                      // P
-        eva::constant_id<4>(static_cast<uint32_t>(mode)),         // poolMode
-        eva::constant_id<5>(config.ceilMode ? 1u : 0u),           // ceilMode
-        eva::constant_id<6>(config.countIncludePad ? 1u : 0u),    // countIncludePad
-        eva::constant_id<SPEC_ID_ALIGNED>(p.aligned ? 1u : 0u),   // aligned (vec4 over C)
-        eva::constant_id<SPEC_ID_TYPE_O>(p.oDtype),               // typeO
-        eva::constant_id<SPEC_ID_TYPE_I>(p.iDtype)                // typeI
-    });
-    // clang-format on
-}
-
-// Pools in into out and makes out readable by the next kernel.
-template <PoolMode mode>
-inline void recordPool2d(
-    eva::CommandBuffer cmdBuff, const eva::ComputePipeline& pipe, eva::DescriptorSet& descSet,
-    const typename Pool2d<mode>::Config& config, const typename Pool2d<mode>::PipeParams& p,
-    std::array<uint32_t, 4> dims, eva::BufferRange out, eva::BufferRange in)
-{
-    descSet.write({ out, in });
-
-    auto [B, C, Hi, Wi] = dims;
-    uint32_t Ho = pool2dOutSize<mode>(config, Hi);
-    uint32_t Wo = pool2dOutSize<mode>(config, Wi);
-
-    // CHW: the leading axes fold into the planes, [..., C] -> B * C.
-    if (!config.channelsLast)
-        C *= B;
-
-    struct
-    {
-        uint32_t Hi, Wi, Ho, Wo, C;
-    } constants = { Hi, Wi, Ho, Wo, C };
-
-    cmdBuff.bindPipeline(pipe).bindDescSets({ descSet }).setPushConstants(0, sizeof(constants), &constants);
-
-    if (config.channelsLast)
-        cmdBuff.dispatch(CEIL_DIV(p.aligned ? C / 4 : C, p.wgSize), Wo, B * Ho);
-    else
-        cmdBuff.dispatch(CEIL_DIV(Ho * Wo, p.wgSize), C);
-
-    cmdBuff.barrier(eva::SYNC_SCOPE::COMPUTE_WRITE / out / eva::SYNC_SCOPE::COMPUTE_READ);
-}
-
-
 template<PoolMode mode>
 inline Pool2d<mode>::Pool2d(Config config)
 : config_(config)
@@ -192,7 +96,15 @@ inline std::array<uint32_t, 4> Pool2d<mode>::dims()
 template<PoolMode mode>
 inline uint32_t Pool2d<mode>::outSize(uint32_t in) const
 {
-    return pool2dOutSize<mode>(config_, in);
+    uint32_t K = config_.kernelSize;
+    uint32_t S = config_.stride;
+    uint32_t P = config_.padding;
+
+    uint32_t span = in + 2 * P - K;
+    uint32_t out = (config_.ceilMode ? CEIL_DIV(span, S) : span / S) + 1;
+    if (config_.ceilMode && (out - 1) * S >= in + P)
+        --out;
+    return out;
 }
 
 template<PoolMode mode>
@@ -200,6 +112,7 @@ inline void Pool2d<mode>::prepare()
 {
     const Dtype oDtype = (oDtype_ == Dtype::None) ? oDefaultDtype() : oDtype_;
     uint32_t K = config_.kernelSize;
+    uint32_t S = config_.stride;
     uint32_t P = config_.padding;
 
     const Tensor& inTen = (*this)["in0"];
@@ -217,11 +130,36 @@ inline void Pool2d<mode>::prepare()
     else                      { outShape[r - 2] = Ho; outShape[r - 1] = Wo; }
     (*this)["out0"] = Tensor(outShape, oDtype);
 
-    const PipeParams p = pool2dPipeParams<mode>(device(), config_, { B, C, H, W }, iDtype, oDtype);
+    const bool interior =
+        mode == PoolMode::Max && !config_.channelsLast && !config_.ceilMode && K == 3u && S == 2u && P == 1u &&
+        B == 1u && C == 64u && H == 240u && W == 320u && iDtype == Dtype::Fp32 && oDtype == Dtype::Fp32 &&
+        device().vendorID() == eva::VENDOR_ID::NVIDIA && device().deviceID() == 0x2b85u &&
+        device().computeBlockCount() == 170u && device().maxComputeWorkGroupInvocations() >= 256u;
+    const PipeParams p = {
+        .aligned = config_.channelsLast && C % 4 == 0,
+        .wgSize = interior ? 256u : 64u,
+        .interior = interior,
+        .iDtype = iDtype,
+        .oDtype = oDtype,
+    };
     if (!pipe || p != pipeParams)
     {
         pipeParams = p;
-        pipe = pool2dPipeline<mode>(pipelinePool(), config_, p);
+        // clang-format off
+        pipe = pipelinePool().request("pool2d", {
+            eva::constant_id<7>(p.wgSize), eva::constant_id<8>(p.interior),
+            eva::constant_id<0>(config_.channelsLast ? 1u : 0u),      // channelsLast
+            eva::constant_id<1>(K),                                   // K
+            eva::constant_id<2>(S),                                   // S
+            eva::constant_id<3>(P),                                   // P
+            eva::constant_id<4>(static_cast<uint32_t>(mode)),         // poolMode
+            eva::constant_id<5>(config_.ceilMode ? 1u : 0u),          // ceilMode
+            eva::constant_id<6>(config_.countIncludePad ? 1u : 0u),   // countIncludePad
+            eva::constant_id<SPEC_ID_ALIGNED>(p.aligned ? 1u : 0u),   // aligned (vec4 over C)
+            eva::constant_id<SPEC_ID_TYPE_O>(oDtype),         // typeO
+            eva::constant_id<SPEC_ID_TYPE_I>(iDtype)                  // typeI
+        });
+        // clang-format on
 
         if (!descSet)
             descSet = gVaiDestSetPool(pipe.descSetLayout(0));
@@ -231,8 +169,34 @@ inline void Pool2d<mode>::prepare()
 template<PoolMode mode>
 inline void Pool2d<mode>::run(eva::CommandBuffer cmdBuff)
 {
-    recordPool2d<mode>(
-        cmdBuff, pipe, descSet, config_, pipeParams, dims(), (*this)["out0"].buffer(), (*this)["in0"].buffer());
+    auto outBuf = (*this)["out0"].buffer();
+    auto inBuf  = (*this)["in0"].buffer();
+
+    descSet.write({ outBuf, inBuf });
+
+    auto [B, C, Hi, Wi] = dims();
+    uint32_t Ho = outSize(Hi);
+    uint32_t Wo = outSize(Wi);
+
+    // CHW: the leading axes fold into the planes, [..., C] -> B * C.
+    if (!config_.channelsLast)
+        C *= B;
+
+    struct {
+        uint32_t Hi, Wi, Ho, Wo, C;
+    } constants = { Hi, Wi, Ho, Wo, C };
+
+    cmdBuff
+        .bindPipeline(pipe)
+        .bindDescSets({descSet})
+        .setPushConstants(0, sizeof(constants), &constants);
+
+    if (config_.channelsLast)
+        cmdBuff.dispatch(CEIL_DIV(pipeParams.aligned ? C / 4 : C, pipeParams.wgSize), Wo, B * Ho);
+    else
+        cmdBuff.dispatch(CEIL_DIV(Ho * Wo, pipeParams.wgSize), C);
+
+    cmdBuff.barrier(eva::SYNC_SCOPE::COMPUTE_WRITE / outBuf / eva::SYNC_SCOPE::COMPUTE_READ);
 }
 
 }   // namespace vai::node

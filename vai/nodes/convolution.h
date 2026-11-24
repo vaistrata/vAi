@@ -16,7 +16,6 @@
 #include <vector>
 
 #include "common.h"
-#include "pool2d.h"
 
 namespace vai::node {
 /////////////////////////////////////////////////////////////////////////////////////////
@@ -165,7 +164,6 @@ struct Workload {
     Dtype wDtype = Dtype::None;
     ConvolutionFusion fusion = ConvolutionFusion::Bias;
     bool residual = false;
-    bool maxPool = false;   // conv-k7s2-direct fuses the 3x3/2 max pool; ho and wo stay the conv's
 
     constexpr uint32_t spatialSize() const { return ho * wo; }
     constexpr uint32_t winogradTileCount() const  // winograd tile count for 3x3 kernel, stride=1, padding=1
@@ -3036,10 +3034,9 @@ struct K7S2ExactRule
     uint32_t batch;
     ShapeSpec shape;
     ImplicitGemmPlan plan;
-    bool maxPool = false;   // the plan fuses Config::fuseMaxPool's pool: odd tile sides
 };
 
-constexpr std::array<K7S2ExactRule, 7> kK7S2ExactTable{
+constexpr std::array<K7S2ExactRule, 5> kK7S2ExactTable{
     {
         { eva::VENDOR_ID::NVIDIA,
           0x2b85u,
@@ -3096,32 +3093,6 @@ constexpr std::array<K7S2ExactRule, 7> kK7S2ExactTable{
           1u,
           { 480u, 640u, 240u, 320u, 3u, 64u },
           { .wgSize = 128u, .wgN = 32u, .tM = 8u, .directK7S2 = true } },
-        // The same stem with ResNet's 3x3/2 max pool fused: 33 x 9 conv outputs pool to
-        // 16 x 4 in shared memory, so the 240 x 320 x 64 activation is never written.
-        // In the ACT forward the pair takes 0.40 ms against 0.71 ms (stem 0.42 + pool 0.30)
-        // with fp16 output, 0.41 ms against 1.30 ms (0.71 + 0.60) with fp32 output.
-        { eva::VENDOR_ID::AMD,
-          kAMDStrixPointDeviceId,
-          16u,
-          Dtype::Fp32,
-          Dtype::Fp16,
-          Dtype::Fp16,
-          ConvolutionFusion::Scale,
-          1u,
-          { 480u, 640u, 240u, 320u, 3u, 64u },
-          { .wgSize = 297u, .wgN = 33u, .tM = 8u, .directK7S2 = true },
-          true },
-        { eva::VENDOR_ID::AMD,
-          kAMDStrixPointDeviceId,
-          16u,
-          Dtype::Fp32,
-          Dtype::Fp32,
-          Dtype::Fp16,
-          ConvolutionFusion::Scale,
-          1u,
-          { 480u, 640u, 240u, 320u, 3u, 64u },
-          { .wgSize = 297u, .wgN = 33u, .tM = 8u, .directK7S2 = true },
-          true },
     },
 };
 
@@ -3135,8 +3106,7 @@ inline const K7S2ExactRule* findK7S2ExactRule(const eva::Device& device, const W
         if (rule.vendorId == device.vendorID() && rule.deviceId == device.deviceID() &&
             rule.computeBlockCount == device.computeBlockCount() && rule.inputDtype == workload.iDtype &&
             rule.outputDtype == workload.oDtype && rule.weightDtype == workload.wDtype &&
-            rule.fusion == workload.fusion && rule.batch == workload.batch && rule.shape.matchShape(workload) &&
-            rule.maxPool == workload.maxPool)
+            rule.fusion == workload.fusion && rule.batch == workload.batch && rule.shape.matchShape(workload))
             return &rule;
     }
     return nullptr;
@@ -3153,10 +3123,6 @@ inline const K7S2ExactRule* findK7S2ExactRule(const eva::Device& device, const W
   output size is ceil(inputSize / stride).
   acceptResidual opens the "residual" input (input dtype), added after the activation
   or, with ResidualOrder::BeforeActivation, before it.
-  fuseMaxPool makes out0 the 3x3/2 pad-1 max pool of the activation (a ResNet
-  stem's), [..., Co, (Ho - 1) / 2 + 1, (Wo - 1) / 2 + 1]. conv-k7s2-direct pools
-  in shared memory where a fused rule covers the workload; anywhere else the
-  convolution writes the temporary "unpooled" and pool2d runs after it.
   The axes ahead of Ci are a batch of images. The plan is one image's; every
   dispatch stacks the images on its z axis, and each kernel offsets its buffers
   to its image.
@@ -3173,7 +3139,6 @@ public:
         bool acceptResidual = false;   // input "residual"
         vai::ResidualOrder residualOrder = vai::ResidualOrder::AfterActivation;
         vai::ActType actType = vai::ActType::None;
-        bool fuseMaxPool = false;   // out0 is the 3x3/2 pad-1 max pool of the activation
     };
 
     Convolution(Config config);
@@ -3193,9 +3158,6 @@ private:
     void prepareK3S2(const Workload& workload);
     void prepareImplicit(const Workload& workload);
     void prepareTensorStorage(const Workload& workload);
-    // fuseMaxPool: whether the plan for the workload pools, and the pass after a plan that does not.
-    bool planPoolsMaxPool(Workload workload);
-    void prepareMaxPoolPass(const Workload& workload);
     bool hasPendingWeightTransforms() const;
     bool recordK3S1WeightTransforms(eva::CommandBuffer cmdBuff, const Workload& workload);
     bool recordK1S1WeightTransform(eva::CommandBuffer cmdBuff, const Workload& workload);
@@ -3208,14 +3170,8 @@ private:
     void runK1S1(eva::CommandBuffer cmdBuff, const Workload& workload);
     void runK3S2(eva::CommandBuffer cmdBuff, const Workload& workload);
     void runConv(eva::CommandBuffer cmdBuff, const Workload& workload);
-    // Where the convolution writes: out0, or "unpooled" when fuseMaxPool runs as a pass after it.
-    Tensor& convOutput(const Workload& workload);
 
     ConvPlan plan_;
-    // fuseMaxPool's pass, pool2d over "unpooled", for a workload no fused plan covers.
-    PipelineBinding maxPool_;
-    MaxPool2d::PipeParams maxPoolParams_;
-    static constexpr MaxPool2d::Config maxPoolConfig{ .kernelSize = 3u, .stride = 2u, .padding = 1u };
     ShapeSpec preparedShape_;
     bool planPrepared_ = false;
 
@@ -3675,41 +3631,23 @@ inline uint32_t convSharedMemoryBytes(const ImplicitGemmPlan& plan, Dtype weight
         : elements * sizeof(float) + 2u * sizeof(uint16_t);
 }
 
-// conv-k7s2-direct's shared memory: the input patch with its halo, columns split by
-// parity, and with the fused pool the activation tile of a channel block.
-inline uint32_t directK7S2SharedMemoryBytes(const ImplicitGemmPlan& plan, const Workload& workload)
+// conv-k7s2-direct's shared memory: the input patch with its halo, columns split by parity.
+inline uint32_t directK7S2SharedMemoryBytes(const ImplicitGemmPlan& plan, uint32_t ci, uint32_t kernel)
 {
-    const uint32_t rows = 2u * (plan.wgSize / plan.wgN) + workload.kernel - 2u;
-    const uint32_t columns = 2u * plan.wgN + workload.kernel - 2u;
-    return workload.ci * rows * 2u * ((columns + 1u) / 2u) * uint32_t(sizeof(float)) +
-           (workload.maxPool ? plan.tM * plan.wgSize * uint32_t(sizeof(float)) : 0u);
-}
-
-// conv-k7s2-direct's workgroups: wgN x wgSize / wgN conv outputs each, or with the
-// fused pool (wgN - 1) / 2 x (wgSize / wgN - 1) / 2 pooled ones.
-inline std::array<uint32_t, 2> directK7S2Groups(const ImplicitGemmPlan& plan, const Workload& workload)
-{
-    const uint32_t rows = plan.wgSize / plan.wgN;
-    if (!workload.maxPool)
-        return { CEIL_DIV(workload.wo, plan.wgN), CEIL_DIV(workload.ho, rows) };
-    const uint32_t pooledHo = (workload.ho - 1u) / 2u + 1u;
-    const uint32_t pooledWo = (workload.wo - 1u) / 2u + 1u;
-    return { CEIL_DIV(pooledWo, (plan.wgN - 1u) / 2u), CEIL_DIV(pooledHo, (rows - 1u) / 2u) };
+    const uint32_t rows = 2u * (plan.wgSize / plan.wgN) + kernel - 2u;
+    const uint32_t columns = 2u * plan.wgN + kernel - 2u;
+    return ci * rows * 2u * ((columns + 1u) / 2u) * uint32_t(sizeof(float));
 }
 
 // The workloads conv-k7s2-direct runs: stride 2, an odd kernel over a few input
-// channels, fp32 input, fp32 or fp16 output, no residual, Co a multiple of the channel
-// block, and with the fused max pool odd tile sides. Its shared memory is checked
-// with the launch (deriveConvLaunch).
+// channels, fp32 input, fp32 or fp16 output, no residual, Co a multiple of the
+// channel block. Its shared memory is checked with the launch (deriveConvLaunch).
 inline bool validDirectK7S2(const ImplicitGemmPlan& plan, const Workload& workload)
 {
     return plan.directK7S2 && plan.wgN != 0u && plan.wgSize % plan.wgN == 0u && plan.tM != 0u &&
            workload.co % plan.tM == 0u && workload.stride == 2u && workload.kernel >= 3u &&
            workload.kernel % 2u == 1u && workload.ci <= 4u && !workload.residual && workload.iDtype == Dtype::Fp32 &&
-           (workload.oDtype == Dtype::Fp32 || workload.oDtype == Dtype::Fp16) &&
-           (!workload.maxPool ||
-            (plan.wgN % 2u == 1u && plan.wgN >= 3u && (plan.wgSize / plan.wgN) % 2u == 1u &&
-             plan.wgSize / plan.wgN >= 3u));
+           (workload.oDtype == Dtype::Fp32 || workload.oDtype == Dtype::Fp16);
 }
 
 inline bool validImplicitGemmPlan(
@@ -4114,7 +4052,6 @@ inline eva::ComputePipeline convK7S2DirectPipeline(
         eva::constant_id<1>(plan.wgSize / plan.wgN),
         eva::constant_id<2>(plan.tM),
         eva::constant_id<3>(workload.kernel),
-        eva::constant_id<4>(workload.maxPool),
         eva::constant_id<SPEC_ID_TYPE_CI>(workload.ci),
         eva::constant_id<SPEC_ID_TYPE_CO>(workload.co),
         eva::constant_id<SPEC_ID_TYPE_P>(paramType),
@@ -4656,10 +4593,9 @@ inline ConvLaunch deriveConvLaunch(const ConvPlan& convPlan, const Workload& wor
         {
             if (plan.wgN == 0u || plan.wgSize < plan.wgN)
                 return ConvLaunch{ .dispatchRepresentable = false };
-            const std::array<uint32_t, 2> groups = directK7S2Groups(plan, workload);
             return ConvLaunch{
-                .groupCount = { groups[0], groups[1], 1u },
-                .sharedMemoryBytes = directK7S2SharedMemoryBytes(plan, workload)
+                .groupCount = { convWorkgroupCount(Wo, plan.wgN), convWorkgroupCount(Ho, plan.wgSize / plan.wgN), 1u },
+                .sharedMemoryBytes = directK7S2SharedMemoryBytes(plan, workload.ci, workload.kernel)
             };
         }
         const uint8_t cmFeatures = convPlan.useCM
@@ -4906,7 +4842,6 @@ inline Convolution::Convolution(Config config)
     addSlot("scale", NodeSlot::persistent);
     if (config_.acceptResidual)
         addSlot("residual", NodeSlot::input);
-    VAI_ASSERT(!(config_.fuseMaxPool && config_.acceptResidual));
 
     // Path-specific scratch tensors are assigned only when the selected plan
     // needs them. Registering the slots here keeps slot ownership in the
@@ -4914,7 +4849,6 @@ inline Convolution::Convolution(Config config)
     addSlot("winV", NodeSlot::temporary);
     addSlot("winM", NodeSlot::temporary);
     addSlot("split", NodeSlot::temporary);
-    addSlot("unpooled", NodeSlot::temporary);
 }
 
 inline Workload Convolution::makeWorkload()
@@ -4933,7 +4867,7 @@ inline Workload Convolution::makeWorkload()
     const uint32_t inputWidth = inputShape[rank - 1u];
     VAI_ASSERT(batch != 0u && inputHeight != 0u && inputWidth != 0u);
 
-    Workload workload{
+    return {
         .ci = config_.inChannels,
         .co = config_.outChannels,
         .kernel = kernel,
@@ -4951,8 +4885,6 @@ inline Workload Convolution::makeWorkload()
         .fusion = hasScale() ? ConvolutionFusion::Scale : ConvolutionFusion::Bias,
         .residual = config_.acceptResidual,
     };
-    workload.maxPool = config_.fuseMaxPool && planPoolsMaxPool(workload);
-    return workload;
 }
 
 inline void Convolution::validateInputs(const Workload& workload)
@@ -6837,19 +6769,7 @@ inline void Convolution::prepareTensorStorage(const Workload& workload)
 
     const std::vector<uint32_t>& inputShape = (*this)["in0"].shape();
     std::vector<uint32_t> outputShape(inputShape.begin(), inputShape.end() - 3);
-    if (config_.fuseMaxPool)
-    {
-        VAI_ASSERT(!workload.maxPool || (plan_.path == ConvPlan::Path::General && plan_.implicit.directK7S2));
-        std::vector<uint32_t> convShape = outputShape;
-        convShape.insert(convShape.end(), { Co, Ho, Wo });
-        outputShape.insert(
-            outputShape.end(),
-            { Co, pool2dOutSize<PoolMode::Max>(maxPoolConfig, Ho), pool2dOutSize<PoolMode::Max>(maxPoolConfig, Wo) });
-        if (!workload.maxPool)
-            (*this)["unpooled"] = Tensor(convShape, workload.oDtype);
-    }
-    else
-        outputShape.insert(outputShape.end(), { Co, Ho, Wo });
+    outputShape.insert(outputShape.end(), { Co, Ho, Wo });
     (*this)["out0"] = Tensor(outputShape, workload.oDtype);
     if (config_.acceptResidual)
     {
@@ -6947,36 +6867,6 @@ inline void Convolution::prepare()
     const ConvPlan nextPlan = selectConvPlan(currentDevice, caps, workload);
     preparePlan(workload, nextPlan);
     prepareTensorStorage(workload);
-    prepareMaxPoolPass(workload);
-}
-
-// The plan selected for the workload with the pool fused: only a K7S2 rule with maxPool
-// gives one that pools, and only where it passes the plan's checks; any other plan
-// runs without the pool, which the pass then does.
-inline bool Convolution::planPoolsMaxPool(Workload workload)
-{
-    workload.maxPool = true;
-    const eva::Device currentDevice = device();
-    const ConvPlan plan = selectConvPlan(currentDevice, convolutionCaps(currentDevice), workload);
-    return plan.path == ConvPlan::Path::General && plan.implicit.directK7S2;
-}
-
-// pool2d's pipeline as MaxPool2d would pick it for the conv output.
-inline void Convolution::prepareMaxPoolPass(const Workload& workload)
-{
-    if (!config_.fuseMaxPool || workload.maxPool)
-        return;
-    const MaxPool2d::PipeParams p = pool2dPipeParams<PoolMode::Max>(
-        device(),
-        maxPoolConfig,
-        { workload.batch, workload.co, workload.ho, workload.wo },
-        workload.oDtype,
-        workload.oDtype);
-    if (!maxPool_.pipeline || p != maxPoolParams_)
-    {
-        maxPoolParams_ = p;
-        maxPool_ = makePipelineBinding(pool2dPipeline<PoolMode::Max>(pipelinePool(), maxPoolConfig, p));
-    }
 }
 
 inline bool Convolution::hasPendingWeightTransforms() const
@@ -7157,7 +7047,7 @@ inline void Convolution::runK3S1Implicit(eva::CommandBuffer cmdBuff, const Workl
     ImplicitResources& implicit = resources.implicit;
     VAI_ASSERT(config_.kernelSize == 3u && config_.stride == 1u);
     VAI_ASSERT(plan_.k3s1.algorithm == ConvAlgorithm::Implicit);
-    Tensor& outTen = convOutput(workload);
+    Tensor& outTen = (*this)["out0"];
     Tensor& inTen = (*this)["in0"];
     const auto weight = (*this)["weight"].buffer();
     const AffineBindings affine = convAffineBindings(*this, hasBias(), hasScale());
@@ -7208,7 +7098,7 @@ inline void Convolution::runK3S1Winograd(eva::CommandBuffer cmdBuff, const Workl
     const uint32_t Ci = workload.ci;
     const uint32_t Co = workload.co;
     const uint32_t numTiles = workload.winogradTileCount();
-    Tensor& outTen = convOutput(workload);
+    Tensor& outTen = (*this)["out0"];
     Tensor& inTen = (*this)["in0"];
     Tensor& winV = (*this)["winV"];
     Tensor& winM = (*this)["winM"];
@@ -7359,7 +7249,7 @@ inline void Convolution::runK1S1(eva::CommandBuffer cmdBuff, const Workload& wor
     TiledResources& tiled = resources.tiled;
     const uint32_t Co = workload.co;
     const uint32_t N = workload.spatialSize();
-    Tensor& outTen = convOutput(workload);
+    Tensor& outTen = (*this)["out0"];
     Tensor& inTen = (*this)["in0"];
     const eva::BufferRange weight = (*this)["weight"].buffer();
     const AffineBindings affine = convAffineBindings(*this, hasBias(), hasScale());
@@ -7472,7 +7362,7 @@ inline void Convolution::runK3S2(eva::CommandBuffer cmdBuff, const Workload& wor
     TiledResources& tiled = resources.tiled;
     const uint32_t Co = workload.co;
     const uint32_t N = workload.spatialSize();
-    Tensor& outTen = convOutput(workload);
+    Tensor& outTen = (*this)["out0"];
     Tensor& inTen = (*this)["in0"];
     const eva::BufferRange weight = (*this)["weight"].buffer();
     const AffineBindings affine = convAffineBindings(*this, hasBias(), hasScale());
@@ -7536,7 +7426,7 @@ inline void Convolution::runConv(eva::CommandBuffer cmdBuff, const Workload& wor
     ImplicitResources& implicit = std::get<ImplicitResources>(prepared_);
     const ImplicitGemmPlan& plan = plan_.implicit;
 
-    Tensor& outTen = convOutput(workload);
+    Tensor& outTen = (*this)["out0"];
     Tensor& inTen = (*this)["in0"];
     const eva::BufferRange weight = (*this)["weight"].buffer();
     const AffineBindings affine = convAffineBindings(*this, hasBias(), hasScale());
@@ -7553,8 +7443,8 @@ inline void Convolution::runConv(eva::CommandBuffer cmdBuff, const Workload& wor
             cmdBuff,
             implicit.gemm,
             makePushConstants(workload),
-            directK7S2Groups(plan, workload)[0],
-            directK7S2Groups(plan, workload)[1]);
+            CEIL_DIV(workload.wo, plan.wgN),
+            CEIL_DIV(workload.ho, plan.wgSize / plan.wgN));
         cmdBuff.barrier(eva::SYNC_SCOPE::COMPUTE_WRITE / outTen.buffer() / eva::SYNC_SCOPE::COMPUTE_READ);
         return;
     }
@@ -7587,11 +7477,6 @@ inline void Convolution::runConv(eva::CommandBuffer cmdBuff, const Workload& wor
     cmdBuff.barrier(eva::SYNC_SCOPE::COMPUTE_WRITE / outTen.buffer() / eva::SYNC_SCOPE::COMPUTE_READ);
 }
 
-inline Tensor& Convolution::convOutput(const Workload& workload)
-{
-    return (*this)[config_.fuseMaxPool && !workload.maxPool ? "unpooled" : "out0"];
-}
-
 inline void Convolution::run(eva::CommandBuffer cmdBuff)
 {
     const Workload workload = makeWorkload();
@@ -7600,7 +7485,7 @@ inline void Convolution::run(eva::CommandBuffer cmdBuff)
     {
         case ConvPlan::Path::K1S1:
             runK1S1(cmdBuff, workload);
-            break;
+            return;
 
         case ConvPlan::Path::K3S1:
             if (plan_.algorithm() == ConvAlgorithm::Implicit)
@@ -7611,26 +7496,16 @@ inline void Convolution::run(eva::CommandBuffer cmdBuff)
             {
                 runK3S1Winograd(cmdBuff, workload);
             }
-            break;
+            return;
 
         case ConvPlan::Path::K3S2:
             runK3S2(cmdBuff, workload);
-            break;
+            return;
 
         case ConvPlan::Path::General:
             runConv(cmdBuff, workload);
-            break;
+            return;
     }
-    if (config_.fuseMaxPool && !workload.maxPool)
-        recordPool2d<PoolMode::Max>(
-            cmdBuff,
-            maxPool_.pipeline,
-            maxPool_.descriptorSet,
-            maxPoolConfig,
-            maxPoolParams_,
-            { workload.batch, workload.co, workload.ho, workload.wo },
-            (*this)["out0"].buffer(),
-            (*this)["unpooled"].buffer());
 }
 
 }   // namespace vai::node
