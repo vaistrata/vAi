@@ -1288,7 +1288,7 @@ struct K1S2ExactRule
     ImplicitGemmPlan plan;
 };
 
-constexpr std::array<K1S2ExactRule, 9> kK1S2ExactTable{
+constexpr std::array<K1S2ExactRule, 15> kK1S2ExactTable{
     {
         { eva::VENDOR_ID::NVIDIA,
           0x2b85u,
@@ -1410,6 +1410,115 @@ constexpr std::array<K1S2ExactRule, 9> kK1S2ExactTable{
             .wgK = 0u,
             .tM = 0u,
             .panelK = 64u,
+            .cooperativeMatrix = true } },
+        // ACT ResNet-18 downsampling shortcuts, fp16 or fp32 activations, in the full forward
+        { eva::VENDOR_ID::AMD,
+          kAMDStrixPointDeviceId,
+          16u,
+          Dtype::Fp16,
+          Dtype::Fp16,
+          Dtype::Fp16,
+          ConvolutionFusion::Scale,
+          1u,
+          { 120u, 160u, 60u, 80u, 64u, 128u },
+          { .wgSize = 256u,
+            .wgM = 128u,
+            .wgN = 16u,
+            .sgM = 16u,
+            .sgN = 16u,
+            .wgK = 0u,
+            .tM = 0u,
+            .panelK = 16u,
+            .cooperativeMatrix = true } },
+        { eva::VENDOR_ID::AMD,
+          kAMDStrixPointDeviceId,
+          16u,
+          Dtype::Fp16,
+          Dtype::Fp16,
+          Dtype::Fp16,
+          ConvolutionFusion::Scale,
+          1u,
+          { 60u, 80u, 30u, 40u, 128u, 256u },
+          { .wgSize = 256u,
+            .wgM = 128u,
+            .wgN = 16u,
+            .sgM = 16u,
+            .sgN = 16u,
+            .wgK = 0u,
+            .tM = 0u,
+            .panelK = 128u,
+            .cooperativeMatrix = true } },
+        { eva::VENDOR_ID::AMD,
+          kAMDStrixPointDeviceId,
+          16u,
+          Dtype::Fp16,
+          Dtype::Fp16,
+          Dtype::Fp16,
+          ConvolutionFusion::Scale,
+          1u,
+          { 30u, 40u, 15u, 20u, 256u, 512u },
+          { .wgSize = 256u,
+            .wgM = 128u,
+            .wgN = 16u,
+            .sgM = 16u,
+            .sgN = 16u,
+            .wgK = 0u,
+            .tM = 0u,
+            .panelK = 128u,
+            .cooperativeMatrix = true } },
+        { eva::VENDOR_ID::AMD,
+          kAMDStrixPointDeviceId,
+          16u,
+          Dtype::Fp32,
+          Dtype::Fp32,
+          Dtype::Fp16,
+          ConvolutionFusion::Scale,
+          1u,
+          { 120u, 160u, 60u, 80u, 64u, 128u },
+          { .wgSize = 256u,
+            .wgM = 128u,
+            .wgN = 16u,
+            .sgM = 16u,
+            .sgN = 16u,
+            .wgK = 0u,
+            .tM = 0u,
+            .panelK = 16u,
+            .cooperativeMatrix = true } },
+        { eva::VENDOR_ID::AMD,
+          kAMDStrixPointDeviceId,
+          16u,
+          Dtype::Fp32,
+          Dtype::Fp32,
+          Dtype::Fp16,
+          ConvolutionFusion::Scale,
+          1u,
+          { 60u, 80u, 30u, 40u, 128u, 256u },
+          { .wgSize = 256u,
+            .wgM = 128u,
+            .wgN = 16u,
+            .sgM = 16u,
+            .sgN = 16u,
+            .wgK = 0u,
+            .tM = 0u,
+            .panelK = 128u,
+            .cooperativeMatrix = true } },
+        { eva::VENDOR_ID::AMD,
+          kAMDStrixPointDeviceId,
+          16u,
+          Dtype::Fp32,
+          Dtype::Fp32,
+          Dtype::Fp16,
+          ConvolutionFusion::Scale,
+          1u,
+          { 30u, 40u, 15u, 20u, 256u, 512u },
+          { .wgSize = 256u,
+            .wgM = 128u,
+            .wgN = 16u,
+            .sgM = 16u,
+            .sgN = 16u,
+            .wgK = 0u,
+            .tM = 0u,
+            .panelK = 128u,
             .cooperativeMatrix = true } },
     },
 };
@@ -2250,7 +2359,7 @@ struct K3S1CMExactImplicitRule
     K3S1CMImplicitGeometry geometry;
 };
 
-constexpr std::array<K3S1CMExactImplicitRule, 33> kK3S1CMExactImplicitTable{
+constexpr std::array<K3S1CMExactImplicitRule, 36> kK3S1CMExactImplicitTable{
     {
         { eva::VENDOR_ID::AMD,
           kAMDStrixPointDeviceId,
@@ -2450,6 +2559,25 @@ constexpr std::array<K3S1CMExactImplicitRule, 33> kK3S1CMExactImplicitTable{
           Dtype::Fp16,
           { 20u, 20u, 20u, 20u, 512u, 512u },
           { .wgSize = 256u, .wgM = 256u, .wgN = 16u, .sgM = 32u, .sgN = 16u, .panelK = 288u } },
+        // ACT ResNet-18 layer1, 3 and 4, fp16 or fp32 activations, in the full forward
+        { eva::VENDOR_ID::AMD,
+          kAMDStrixPointDeviceId,
+          16u,
+          Dtype::Fp16,
+          { 120u, 160u, 120u, 160u, 64u, 64u },
+          { .wgSize = 64u, .wgM = 64u, .wgN = 16u, .sgM = 32u, .sgN = 16u, .panelK = 144u } },
+        { eva::VENDOR_ID::AMD,
+          kAMDStrixPointDeviceId,
+          16u,
+          Dtype::Fp16,
+          { 30u, 40u, 30u, 40u, 256u, 256u },
+          { .wgSize = 128u, .wgM = 256u, .wgN = 16u, .sgM = 64u, .sgN = 16u, .panelK = 144u } },
+        { eva::VENDOR_ID::AMD,
+          kAMDStrixPointDeviceId,
+          16u,
+          Dtype::Fp16,
+          { 15u, 20u, 15u, 20u, 512u, 512u },
+          { .wgSize = 128u, .wgM = 256u, .wgN = 16u, .sgM = 64u, .sgN = 16u, .panelK = 288u } },
     },
 };
 
@@ -2509,10 +2637,11 @@ struct K3S2ExactRule
     bool useCM;
     ShapeSpec shape;
     K3S2Plan plan;
-    uint32_t batch = 0u;   // 0: any image batch
+    uint32_t batch = 0u;                  // 0: any image batch
+    Dtype inputDtype = Dtype::None;   // None: any input
 };
 
-constexpr std::array<K3S2ExactRule, 25> kK3S2ExactTable{
+constexpr std::array<K3S2ExactRule, 28> kK3S2ExactTable{
     {
         { eva::VENDOR_ID::AMD,
           kAMDStrixHaloDeviceId,
@@ -2820,6 +2949,63 @@ constexpr std::array<K3S2ExactRule, 25> kK3S2ExactTable{
             .shape = { .wo = 20u },
             .packedWeights = true,
             .directOutput = true } },
+        // ACT ResNet-18 layer2-4 downsampling, fp16 activations, in the full forward. With fp32
+        // activations the first two keep the general plan, faster there.
+        { eva::VENDOR_ID::AMD,
+          kAMDStrixPointDeviceId,
+          16u,
+          Dtype::Fp16,
+          true,
+          { 120u, 160u, 60u, 80u, 64u, 128u },
+          { .splitK = 1u,
+            .wgSize = 64u,
+            .wgM = 128u,
+            .wgN = 16u,
+            .sgM = 64u,
+            .sgN = 16u,
+            .shape = { .wo = 80u },
+            .accType = 1u,
+            .packedWeights = true,
+            .directOutput = true },
+          1u,
+          Dtype::Fp16 },
+        // layer3
+        { eva::VENDOR_ID::AMD,
+          kAMDStrixPointDeviceId,
+          16u,
+          Dtype::Fp16,
+          true,
+          { 60u, 80u, 30u, 40u, 128u, 256u },
+          { .splitK = 1u,
+            .wgSize = 64u,
+            .wgM = 128u,
+            .wgN = 16u,
+            .sgM = 64u,
+            .sgN = 16u,
+            .shape = { .wo = 40u },
+            .accType = 1u,
+            .packedWeights = true,
+            .directOutput = true },
+          1u,
+          Dtype::Fp16 },
+        // layer4, fp16 or fp32 activations
+        { eva::VENDOR_ID::AMD,
+          kAMDStrixPointDeviceId,
+          16u,
+          Dtype::Fp16,
+          true,
+          { 30u, 40u, 15u, 20u, 256u, 512u },
+          { .splitK = 1u,
+            .wgSize = 64u,
+            .wgM = 128u,
+            .wgN = 16u,
+            .sgM = 64u,
+            .sgN = 16u,
+            .shape = { .wo = 20u },
+            .accType = 1u,
+            .packedWeights = true },
+          1u,
+          Dtype::None },
     },
 };
 
@@ -2829,7 +3015,8 @@ inline const K3S2ExactRule* findK3S2ExactRule(const eva::Device& device, const W
     {
         if (rule.vendorId == device.vendorID() && rule.deviceId == device.deviceID() &&
             rule.computeBlockCount == device.computeBlockCount() && rule.weightDtype == workload.wDtype &&
-            rule.shape.matchShape(workload) && (rule.batch == 0u || rule.batch == workload.batch))
+            rule.shape.matchShape(workload) && (rule.batch == 0u || rule.batch == workload.batch) &&
+            (rule.inputDtype == Dtype::None || rule.inputDtype == workload.iDtype))
             return &rule;
     }
     return nullptr;
@@ -2849,7 +3036,7 @@ struct K7S2ExactRule
     ImplicitGemmPlan plan;
 };
 
-constexpr std::array<K7S2ExactRule, 3> kK7S2ExactTable{
+constexpr std::array<K7S2ExactRule, 5> kK7S2ExactTable{
     {
         { eva::VENDOR_ID::NVIDIA,
           0x2b85u,
@@ -2884,6 +3071,28 @@ constexpr std::array<K7S2ExactRule, 3> kK7S2ExactTable{
           1u,
           { 480u, 640u, 240u, 320u, 3u, 64u },
           { .wgSize = 512u, .wgN = 32u, .tM = 16u, .directK7S2 = true } },
+        // The ACT stem on Strix Point, fp16 weights: fp16 output 0.42 ms against the
+        // implicit GEMM's 0.99 ms, fp32 output 0.71 ms against 1.09 ms, in the full forward.
+        { eva::VENDOR_ID::AMD,
+          kAMDStrixPointDeviceId,
+          16u,
+          Dtype::Fp32,
+          Dtype::Fp16,
+          Dtype::Fp16,
+          ConvolutionFusion::Scale,
+          1u,
+          { 480u, 640u, 240u, 320u, 3u, 64u },
+          { .wgSize = 512u, .wgN = 64u, .tM = 8u, .directK7S2 = true } },
+        { eva::VENDOR_ID::AMD,
+          kAMDStrixPointDeviceId,
+          16u,
+          Dtype::Fp32,
+          Dtype::Fp32,
+          Dtype::Fp16,
+          ConvolutionFusion::Scale,
+          1u,
+          { 480u, 640u, 240u, 320u, 3u, 64u },
+          { .wgSize = 128u, .wgN = 32u, .tM = 8u, .directK7S2 = true } },
     },
 };
 
@@ -3431,14 +3640,14 @@ inline uint32_t directK7S2SharedMemoryBytes(const ImplicitGemmPlan& plan, uint32
 }
 
 // The workloads conv-k7s2-direct runs: stride 2, an odd kernel over a few input
-// channels, fp32 input and output, no residual, Co a multiple of the channel
-// block. Its shared memory is checked with the launch (deriveConvLaunch).
+// channels, fp32 input, fp32 or fp16 output, no residual, Co a multiple of the
+// channel block. Its shared memory is checked with the launch (deriveConvLaunch).
 inline bool validDirectK7S2(const ImplicitGemmPlan& plan, const Workload& workload)
 {
     return plan.directK7S2 && plan.wgN != 0u && plan.wgSize % plan.wgN == 0u && plan.tM != 0u &&
            workload.co % plan.tM == 0u && workload.stride == 2u && workload.kernel >= 3u &&
            workload.kernel % 2u == 1u && workload.ci <= 4u && !workload.residual && workload.iDtype == Dtype::Fp32 &&
-           workload.oDtype == Dtype::Fp32;
+           (workload.oDtype == Dtype::Fp32 || workload.oDtype == Dtype::Fp16);
 }
 
 inline bool validImplicitGemmPlan(
@@ -3846,6 +4055,7 @@ inline eva::ComputePipeline convK7S2DirectPipeline(
         eva::constant_id<SPEC_ID_TYPE_CI>(workload.ci),
         eva::constant_id<SPEC_ID_TYPE_CO>(workload.co),
         eva::constant_id<SPEC_ID_TYPE_P>(paramType),
+        eva::constant_id<SPEC_ID_TYPE_O>(workload.oDtype),
     };
     withFusion(specialization, actType, hasScale, hasBias);
     return pool.request("conv-k7s2-direct", std::move(specialization));
