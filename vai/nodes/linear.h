@@ -1539,6 +1539,29 @@ inline AmdHaloPick amdHaloPick(
         if (M == 100u && K == 3200u && N == 512u)
             return AmdHaloPick{ 16, 64, 128, 16, 32, 64, 4, 0, 32, stream };   // decoder FFN down
     }
+    // The same layers on fp16 activations, measured in the full forward: smaller tiles at
+    // wave32, mostly streaming the input. The Linear layers take 0.84 -> 0.60 ms.
+    if (!accF16 && io16 && (M == 100u || M == 300u || M == 302u) && (K == 512u || K == 3200u))
+    {
+        if (M == 302u && K == 512u && N == 1536u)
+            return AmdHaloPick{ 32, 64, 64, 32, 16, 128, 1, 0, 32, stream };   // encoder q, k, v
+        if (M == 302u && K == 512u && N == 512u)
+            return AmdHaloPick{ 16, 32, 64, 16, 32, 32, 1, 0, 32, stream };   // encoder o
+        if (M == 300u && K == 512u && N == 512u)
+            return AmdHaloPick{ 16, 32, 128, 16, 32, 64, 1, 0, 64, stream };   // image projection
+        if (M == 302u && K == 512u && N == 3200u)
+            return AmdHaloPick{ 32, 64, 32, 32, 32, 64, 1, 0, 32, stream };   // encoder FFN up
+        if (M == 302u && K == 3200u && N == 512u)
+            return AmdHaloPick{ 16, 64, 64, 16, 64, 32, 4, 0, 32, stream };   // encoder FFN down
+        if (M == 302u && K == 512u && N == 1024u)
+            return AmdHaloPick{ 16, 32, 64, 16, 32, 64, 1, 0, 64, stream };   // decoder k, v
+        if (M == 100u && K == 512u && N == 512u)
+            return AmdHaloPick{ 16, 16, 64, 16, 16, 32, 1, 8, 32, prefetch };   // decoder o
+        if (M == 100u && K == 512u && N == 3200u)
+            return AmdHaloPick{ 64, 32, 32, 16, 32, 128, 1, 8, 32, prefetchVec };   // decoder FFN up
+        if (M == 100u && K == 3200u && N == 512u)
+            return AmdHaloPick{ 16, 32, 128, 16, 16, 64, 1, 0, 32, prefetchVec2 };   // decoder FFN down
+    }
 
     if (M >= 32u && M <= 64u)
     {

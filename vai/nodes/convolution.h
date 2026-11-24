@@ -1288,7 +1288,7 @@ struct K1S2ExactRule
     ImplicitGemmPlan plan;
 };
 
-constexpr std::array<K1S2ExactRule, 15> kK1S2ExactTable{
+constexpr std::array<K1S2ExactRule, 18> kK1S2ExactTable{
     {
         { eva::VENDOR_ID::NVIDIA,
           0x2b85u,
@@ -1393,6 +1393,7 @@ constexpr std::array<K1S2ExactRule, 15> kK1S2ExactTable{
             .tM = 0u,
             .panelK = 64u,
             .cooperativeMatrix = true } },
+        // layer4 with panels of 128: 0.018 -> 0.014 ms in the forward
         { eva::VENDOR_ID::AMD,
           kAMDStrixHaloDeviceId,
           40u,
@@ -1409,7 +1410,63 @@ constexpr std::array<K1S2ExactRule, 15> kK1S2ExactTable{
             .sgN = 16u,
             .wgK = 0u,
             .tM = 0u,
+            .panelK = 128u,
+            .cooperativeMatrix = true } },
+        // fp16 activations (fp16 in and out), in the full forward: 0.020 / 0.019 / 0.029 ms on the
+        // general tile -> 0.013 / 0.011 / 0.012 ms
+        { eva::VENDOR_ID::AMD,
+          kAMDStrixHaloDeviceId,
+          40u,
+          Dtype::Fp16,
+          Dtype::Fp16,
+          Dtype::Fp16,
+          ConvolutionFusion::Scale,
+          1u,
+          { 120u, 160u, 60u, 80u, 64u, 128u },
+          { .wgSize = 256u,
+            .wgM = 128u,
+            .wgN = 16u,
+            .sgM = 16u,
+            .sgN = 16u,
+            .wgK = 0u,
+            .tM = 0u,
             .panelK = 64u,
+            .cooperativeMatrix = true } },
+        { eva::VENDOR_ID::AMD,
+          kAMDStrixHaloDeviceId,
+          40u,
+          Dtype::Fp16,
+          Dtype::Fp16,
+          Dtype::Fp16,
+          ConvolutionFusion::Scale,
+          1u,
+          { 60u, 80u, 30u, 40u, 128u, 256u },
+          { .wgSize = 256u,
+            .wgM = 128u,
+            .wgN = 16u,
+            .sgM = 16u,
+            .sgN = 16u,
+            .wgK = 0u,
+            .tM = 0u,
+            .panelK = 128u,
+            .cooperativeMatrix = true } },
+        { eva::VENDOR_ID::AMD,
+          kAMDStrixHaloDeviceId,
+          40u,
+          Dtype::Fp16,
+          Dtype::Fp16,
+          Dtype::Fp16,
+          ConvolutionFusion::Scale,
+          1u,
+          { 30u, 40u, 15u, 20u, 256u, 512u },
+          { .wgSize = 256u,
+            .wgM = 128u,
+            .wgN = 16u,
+            .sgM = 16u,
+            .sgN = 16u,
+            .wgK = 0u,
+            .tM = 0u,
+            .panelK = 128u,
             .cooperativeMatrix = true } },
         // ACT ResNet-18 downsampling shortcuts, fp16 or fp32 activations, in the full forward
         { eva::VENDOR_ID::AMD,
@@ -2641,7 +2698,7 @@ struct K3S2ExactRule
     Dtype inputDtype = Dtype::None;   // None: any input
 };
 
-constexpr std::array<K3S2ExactRule, 28> kK3S2ExactTable{
+constexpr std::array<K3S2ExactRule, 29> kK3S2ExactTable{
     {
         { eva::VENDOR_ID::AMD,
           kAMDStrixHaloDeviceId,
@@ -2675,6 +2732,24 @@ constexpr std::array<K3S2ExactRule, 28> kK3S2ExactTable{
             .packedWeights = true,
             .directOutput = true },
           1u },
+        // layer4 on fp16 activations: 64-row tiles of one subgroup, 0.062 -> 0.055 ms in the forward
+        { eva::VENDOR_ID::AMD,
+          kAMDStrixHaloDeviceId,
+          40u,
+          Dtype::Fp16,
+          true,
+          { 30u, 40u, 15u, 20u, 256u, 512u },
+          { .splitK = 3u,
+            .wgSize = 32u,
+            .wgM = 64u,
+            .wgN = 16u,
+            .sgM = 64u,
+            .sgN = 16u,
+            .shape = { .wo = 20u },
+            .accType = 1u,
+            .packedWeights = true },
+          1u,
+          Dtype::Fp16 },
         { eva::VENDOR_ID::AMD,
           kAMDStrixHaloDeviceId,
           40u,
@@ -3036,7 +3111,7 @@ struct K7S2ExactRule
     ImplicitGemmPlan plan;
 };
 
-constexpr std::array<K7S2ExactRule, 5> kK7S2ExactTable{
+constexpr std::array<K7S2ExactRule, 6> kK7S2ExactTable{
     {
         { eva::VENDOR_ID::NVIDIA,
           0x2b85u,
@@ -3071,6 +3146,17 @@ constexpr std::array<K7S2ExactRule, 5> kK7S2ExactTable{
           1u,
           { 480u, 640u, 240u, 320u, 3u, 64u },
           { .wgSize = 512u, .wgN = 32u, .tM = 16u, .directK7S2 = true } },
+        // fp16 output (fp16 activations): 0.107 ms against the cooperative-matrix tile's 0.31 ms.
+        { eva::VENDOR_ID::AMD,
+          kAMDStrixHaloDeviceId,
+          40u,
+          Dtype::Fp32,
+          Dtype::Fp16,
+          Dtype::Fp16,
+          ConvolutionFusion::Scale,
+          1u,
+          { 480u, 640u, 240u, 320u, 3u, 64u },
+          { .wgSize = 512u, .wgN = 32u, .tM = 8u, .directK7S2 = true } },
         // The ACT stem on Strix Point, fp16 weights: fp16 output 0.42 ms against the
         // implicit GEMM's 0.99 ms, fp32 output 0.71 ms against 1.09 ms, in the full forward.
         { eva::VENDOR_ID::AMD,
