@@ -2639,7 +2639,7 @@ struct K3S2ExactRule
     bool useCM;
     ShapeSpec shape;
     K3S2Plan plan;
-    uint32_t batch = 0u;                  // 0: any image batch
+    uint32_t batch = 0u;              // 0: any image batch
     Dtype inputDtype = Dtype::None;   // None: any input
 };
 
@@ -3173,7 +3173,7 @@ public:
         bool acceptResidual = false;   // input "residual"
         vai::ResidualOrder residualOrder = vai::ResidualOrder::AfterActivation;
         vai::ActType actType = vai::ActType::None;
-        bool fuseMaxPool = false;      // out0 is the 3x3/2 pad-1 max pool of the activation
+        bool fuseMaxPool = false;   // out0 is the 3x3/2 pad-1 max pool of the activation
     };
 
     Convolution(Config config);
@@ -3707,8 +3707,9 @@ inline bool validDirectK7S2(const ImplicitGemmPlan& plan, const Workload& worklo
            workload.co % plan.tM == 0u && workload.stride == 2u && workload.kernel >= 3u &&
            workload.kernel % 2u == 1u && workload.ci <= 4u && !workload.residual && workload.iDtype == Dtype::Fp32 &&
            (workload.oDtype == Dtype::Fp32 || workload.oDtype == Dtype::Fp16) &&
-           (!workload.maxPool || (plan.wgN % 2u == 1u && plan.wgN >= 3u && (plan.wgSize / plan.wgN) % 2u == 1u &&
-                                  plan.wgSize / plan.wgN >= 3u));
+           (!workload.maxPool ||
+            (plan.wgN % 2u == 1u && plan.wgN >= 3u && (plan.wgSize / plan.wgN) % 2u == 1u &&
+             plan.wgSize / plan.wgN >= 3u));
 }
 
 inline bool validImplicitGemmPlan(
@@ -4138,8 +4139,9 @@ inline eva::ComputePipeline convCMPipeline(
         eva::constant_id<0>(plan.wgSize),      eva::constant_id<1>(plan.wgM),       eva::constant_id<2>(plan.wgN),
         eva::constant_id<3>(plan.panelK),      eva::constant_id<4>(plan.sgM),       eva::constant_id<5>(plan.sgN),
         eva::constant_id<6>(residual.enabled), eva::constant_id<7>(residual.order),
-        eva::constant_id<8>(workload.kernel),  eva::constant_id<9>(workload.stride),
     };
+    specialization.addConstant(eva::constant_id<8>(workload.kernel));   // KERNEL_SPEC
+    specialization.addConstant(eva::constant_id<9>(workload.stride));   // STRIDE_SPEC
     withShape(specialization, shape, true);
     withDTypes(specialization, workload.oDtype, workload.iDtype, paramType,
                Dtype::Fp32, plan.accType, {.includeAcc = true});
