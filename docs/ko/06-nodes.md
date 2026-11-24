@@ -334,6 +334,7 @@ Off, every input is required, so a recording that cannot supply one drops this n
 | `scale` | persistent |  |
 | `weight` | persistent |  |
 | `split` | temporary |  |
+| `unpooled` | temporary |  |
 | `winM` | temporary |  |
 | `winV` | temporary |  |
 
@@ -348,6 +349,7 @@ Off, every input is required, so a recording that cannot supply one drops this n
 | `acceptResidual` | `bool` | `false` | input "residual" |
 | `residualOrder` | `vai::ResidualOrder` | `vai::ResidualOrder::AfterActivation` |  |
 | `actType` | `vai::ActType` | `vai::ActType::None` |  |
+| `fuseMaxPool` | `bool` | `false` | out0 is the 3x3/2 pad-1 max pool of the activation |
 
 **동작 및 제약**
 
@@ -356,6 +358,10 @@ loader filled it. Odd kernels use symmetric same-padding, so each spatial
 output size is ceil(inputSize / stride).
 acceptResidual opens the "residual" input (input dtype), added after the activation
 or, with ResidualOrder::BeforeActivation, before it.
+fuseMaxPool makes out0 the 3x3/2 pad-1 max pool of the activation (a ResNet
+stem's), [..., Co, (Ho - 1) / 2 + 1, (Wo - 1) / 2 + 1]. conv-k7s2-direct pools
+in shared memory where a fused rule covers the workload; anywhere else the
+convolution writes the temporary "unpooled" and pool2d runs after it.
 The axes ahead of Ci are a batch of images. The plan is one image's; every
 dispatch stacks the images on its z axis, and each kernel offsets its buffers
 to its image.
@@ -967,6 +973,8 @@ The rank is a specialization constant, so the pool holds one pipeline per rank.
 
 channelsLast reads a token grid as it is laid out (rows of embedDim, e.g. a
 ViT's patches viewed as [G, G, D]), so no transpose is needed around the pool.
+Kernel is the dispatch without the node: a Convolution whose fused max pool
+runs as a pass after the convolution records one too.
 
 **커널**
 

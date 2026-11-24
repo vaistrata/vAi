@@ -9,8 +9,14 @@
  copy conv-k7s2-direct-weight writes: every lane reads the same weights,
  which the compiler loads once per subgroup as scalars.
  out = activation(scale * conv + bias), fp32 input and arithmetic, fp32 or fp16 output (typeO).
+ POOL fuses a 3x3/2 pad-1 max pool after the activation (a ResNet stem's), so O is
+ [CO, (Ho - 1) / 2 + 1, (Wo - 1) / 2 + 1] and the conv output never leaves the
+ workgroup: its TX x TY tile, TX and TY odd, pools in shared memory to
+ (TX - 1) / 2 x (TY - 1) / 2 outputs, and neighbouring tiles both compute the
+ conv row and column they share. pc.ho and pc.wo stay the conv's.
  Bindings: O=0, I=1, W=2 (transformed), BIAS=3, SCALE=4.
- Dispatch: x=ceil(Wo / TX), y=ceil(Ho / TY), z=pc.batch images.
+ Dispatch: x=ceil(Wo / TX), y=ceil(Ho / TY), z=pc.batch images; with POOL,
+ x=ceil(pooled Wo / ((TX - 1) / 2)), y=ceil(pooled Ho / ((TY - 1) / 2)).
  Push constants: PushConstants.
 =============================================================================*/
 #version 450
@@ -25,6 +31,7 @@ layout(constant_id = 0) const uint TX = 32u;         // output columns per workg
 layout(constant_id = 1) const uint TY = 16u;         // output rows per workgroup
 layout(constant_id = 2) const uint CO_BLOCK = 16u;   // output channels per pass over the taps
 layout(constant_id = 3) const uint KS = 7u;          // kernel size, odd; padding KS / 2
+layout(constant_id = 4) const bool POOL = false;     // a 3x3/2 pad-1 max pool after the activation
 layout(constant_id = SPEC_ID_TYPE_CI) const uint CI = 3u;
 layout(constant_id = SPEC_ID_TYPE_CO) const uint CO = 64u;
 layout(constant_id = SPEC_ID_TYPE_P) const uint typeP = 0u;
@@ -61,6 +68,14 @@ const uint PATCH_COLS = 2u * TX + KS - 2u;
 const uint PARITY_COLS = (PATCH_COLS + 1u) / 2u;
 shared float inputPatch[CI * PATCH_ROWS * 2u * PARITY_COLS];
 
+// POOL: the TX x TY conv outputs start at (2 * PTX * x - 1, 2 * PTY * y - 1) and pool
+// to PTX x PTY outputs; neighbouring tiles share one conv row and column, which
+// each computes. TX and TY are odd. The pool skips conv outputs outside the image.
+const uint PTX = (TX - 1u) / 2u;
+const uint PTY = (TY - 1u) / 2u;
+shared float poolTile[POOL ? CO_BLOCK * TY * TX : 1u];
+#define FLT_LOWEST -3.402823466e+38
+
 uint patchIndex(uint c, uint row, uint parity, uint column)
 {
     return ((c * PATCH_ROWS + row) * 2u + parity) * PARITY_COLS + column;
@@ -86,10 +101,13 @@ void main()
     const uint image = gl_WorkGroupID.z;
     const uint inputBase = image * CI * pc.hi * pc.wi;
     const uint outputBase = image * CO * pc.ho * pc.wo;
-    const uint ox0 = gl_WorkGroupID.x * TX;
-    const uint oy0 = gl_WorkGroupID.y * TY;
-    const int iy0 = int(oy0 * 2u) - int(PAD);
-    const int ix0 = int(ox0 * 2u) - int(PAD);
+    const int ox0 = POOL ? int(gl_WorkGroupID.x * PTX * 2u) - 1 : int(gl_WorkGroupID.x * TX);
+    const int oy0 = POOL ? int(gl_WorkGroupID.y * PTY * 2u) - 1 : int(gl_WorkGroupID.y * TY);
+    const int iy0 = oy0 * 2 - int(PAD);
+    const int ix0 = ox0 * 2 - int(PAD);
+    const uint pho = (pc.ho - 1u) / 2u + 1u;   // POOL's output
+    const uint pwo = (pc.wo - 1u) / 2u + 1u;
+    const uint poolOutputBase = image * CO * pho * pwo;
 
     // Stage the patch, zero outside the image.
     for (uint i = thread; i < CI * PATCH_ROWS * PATCH_COLS; i += TX * TY)
@@ -107,8 +125,9 @@ void main()
     }
     barrier();
 
-    const uint oy = oy0 + ty;
-    const uint ox = ox0 + tx;
+    const int oy = oy0 + int(ty);
+    const int ox = ox0 + int(tx);
+    const bool inside = oy >= 0 && ox >= 0 && oy < int(pc.ho) && ox < int(pc.wo);
 
     for (uint coBase = 0u; coBase < CO; coBase += CO_BLOCK)
     {
@@ -131,12 +150,43 @@ void main()
             }
         }
 
-        if (oy < pc.ho && ox < pc.wo)
+        if (POOL)
         {
             [[unroll]] for (uint k = 0u; k < CO_BLOCK; ++k)
             {
                 const uint co = coBase + k;
-                const uint index = outputBase + (co * pc.ho + oy) * pc.wo + ox;
+                poolTile[(k * TY + ty) * TX + tx] =
+                    inside ? applyActivation(fma(acc[k], readScale(co), readBias(co))) : FLT_LOWEST;
+            }
+            barrier();
+            for (uint i = thread; i < CO_BLOCK * PTY * PTX; i += TX * TY)
+            {
+                const uint k = i / (PTY * PTX);
+                const uint rem = i - k * (PTY * PTX);
+                const uint py = rem / PTX;
+                const uint px = rem - py * PTX;
+                const uint gy = gl_WorkGroupID.y * PTY + py;
+                const uint gx = gl_WorkGroupID.x * PTX + px;
+                if (gy >= pho || gx >= pwo) continue;
+                const uint base = (k * TY + 2u * py) * TX + 2u * px;
+                float value = FLT_LOWEST;
+                [[unroll]] for (uint dy = 0u; dy < 3u; ++dy)
+                    [[unroll]] for (uint dx = 0u; dx < 3u; ++dx)
+                        value = max(value, poolTile[base + dy * TX + dx]);
+                const uint index = poolOutputBase + ((coBase + k) * pho + gy) * pwo + gx;
+                if (typeO == DTYPE_F32)
+                    bufferO[index] = value;
+                else
+                    bufferO_f16[index] = float16_t(value);
+            }
+            barrier();
+        }
+        else if (inside)
+        {
+            [[unroll]] for (uint k = 0u; k < CO_BLOCK; ++k)
+            {
+                const uint co = coBase + k;
+                const uint index = outputBase + (co * pc.ho + uint(oy)) * pc.wo + uint(ox);
                 const float value = applyActivation(fma(acc[k], readScale(co), readBias(co)));
                 if (typeO == DTYPE_F32)
                     bufferO[index] = value;

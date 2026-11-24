@@ -40,7 +40,8 @@ namespace vai::group {
 // out0 = activation(norm(conv(in0)) + residual)
 //
 // With BatchNorm the conv takes the residual and the activation; with GroupNorm
-// the norm node does.
+// the norm node does. fuseMaxPool (BatchNorm only) makes out0 the 3x3/2 max pool
+// of it, which the conv runs.
 /////////////////////////////////////////////////////////////////////////////////////////
 struct ConvNorm : public vai::NodeGroup
 {
@@ -48,7 +49,7 @@ struct ConvNorm : public vai::NodeGroup
     std::optional<vai::node::GroupNorm> norm;
 
     ConvNorm(const ResNetConfig& config, uint32_t inChannels, uint32_t outChannels, uint32_t kernelSize,
-             uint32_t stride, vai::ActType actType, bool acceptResidual = false)
+             uint32_t stride, vai::ActType actType, bool acceptResidual = false, bool fuseMaxPool = false)
     : conv(config.norm == ResNetNorm::BatchNorm
         ? vai::node::Convolution::Config{
             .inChannels = inChannels,
@@ -58,6 +59,7 @@ struct ConvNorm : public vai::NodeGroup
             .acceptResidual = acceptResidual,
             .residualOrder = vai::ResidualOrder::BeforeActivation,
             .actType = actType,
+            .fuseMaxPool = fuseMaxPool,
         }
         : vai::node::Convolution::Config{
             .inChannels = inChannels,
@@ -66,6 +68,7 @@ struct ConvNorm : public vai::NodeGroup
             .stride = stride,
         })
     {
+        VAI_ASSERT(!fuseMaxPool || config.norm == ResNetNorm::BatchNorm);
         if (config.norm == ResNetNorm::GroupNorm)
         {
             norm.emplace(vai::node::GroupNorm::Config{
@@ -175,14 +178,17 @@ struct ResNet : public vai::NodeGroup
     static constexpr uint32_t outChannels = 512 * Block::expansion;
     static constexpr std::array<uint32_t, 4> depths{ blocksPerLayer... };
 
+    // The stem: with BatchNorm conv1 runs the 3x3/2 max pool too, with GroupNorm maxPool does.
     ConvNorm conv1;
-    vai::node::MaxPool2d maxPool;
+    std::optional<vai::node::MaxPool2d> maxPool;
     std::vector<Block> blocks;   // layer1 .. layer4, in order
 
     explicit ResNet(const ResNetConfig& config = {})
-    : conv1(config, 3, 64, 7, 2, vai::ActType::Relu)
-    , maxPool({ .kernelSize = 3, .stride = 2, .padding = 1 })
+    : conv1(config, 3, 64, 7, 2, vai::ActType::Relu, false, config.norm == ResNetNorm::BatchNorm)
     {
+        if (config.norm != ResNetNorm::BatchNorm)
+            maxPool.emplace(vai::node::MaxPool2d::Config{ .kernelSize = 3, .stride = 2, .padding = 1 });
+
         // Built in place: a block's slots point back at it, so it cannot move.
         blocks.reserve(depths[0] + depths[1] + depths[2] + depths[3]);
         uint32_t inChannels = 64;

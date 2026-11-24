@@ -42,8 +42,9 @@ void setProfileTags(act::Net& net)
     const uint32_t D = modelCfg.embedDim;         // 512
     const uint32_t Dff = modelCfg.ffnHiddenDim;   // 3200
 
-    tagConv(net.imageEncoder.conv1.conv);
-    net.imageEncoder.maxPool.setProfileTag("Vision.MaxPool");
+    tagConv(net.imageEncoder.conv1.conv);   // the stem, its max pool included
+    if (net.imageEncoder.maxPool)
+        net.imageEncoder.maxPool->setProfileTag("Vision.MaxPool");
     for (auto& b : net.imageEncoder.blocks)
     {
         tagConv(b.conv1.conv);
