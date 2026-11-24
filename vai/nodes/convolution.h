@@ -446,6 +446,7 @@ struct K3S1Plan {
     uint32_t tM = 0u;
     uint32_t tN = 0u;
     uint32_t panelK = 0u;
+    bool prefetchPanel = false;   // Implicit CM: K3S1CMImplicitGeometry::prefetchPanel
     uint32_t accType = 1u;
     uint32_t splitK = 1u;
     uint32_t tailNOffset = 0u;
@@ -2377,6 +2378,7 @@ struct K3S1CMImplicitGeometry
     uint32_t sgM;
     uint32_t sgN;
     uint32_t panelK;
+    bool prefetchPanel = false;   // read the next input panel during the multiply (conv-k3s1-implicit-gemm-cm)
 };
 
 struct K3S1CMImplicitRule
@@ -2416,7 +2418,7 @@ struct K3S1CMExactImplicitRule
     K3S1CMImplicitGeometry geometry;
 };
 
-constexpr std::array<K3S1CMExactImplicitRule, 36> kK3S1CMExactImplicitTable{
+constexpr std::array<K3S1CMExactImplicitRule, 38> kK3S1CMExactImplicitTable{
     {
         { eva::VENDOR_ID::AMD,
           kAMDStrixPointDeviceId,
@@ -2604,6 +2606,21 @@ constexpr std::array<K3S1CMExactImplicitRule, 36> kK3S1CMExactImplicitTable{
           Dtype::Fp16,
           { 120u, 160u, 120u, 160u, 64u, 64u },
           { .wgSize = 32u, .wgM = 64u, .wgN = 16u, .sgM = 64u, .sgN = 16u, .panelK = 144u } },
+        // ACT layer2 and layer3 read the next input panel during the multiply, in the full
+        // forward: 0.057 -> 0.053 and 0.051 -> 0.047 ms (fp16 activations), 0.063 -> 0.059
+        // and 0.058 -> 0.053 ms (fp32)
+        { eva::VENDOR_ID::AMD,
+          kAMDStrixHaloDeviceId,
+          40u,
+          Dtype::Fp16,
+          { 60u, 80u, 60u, 80u, 128u, 128u },
+          { .wgSize = 256u, .wgM = 128u, .wgN = 64u, .sgM = 32u, .sgN = 32u, .panelK = 144u, .prefetchPanel = true } },
+        { eva::VENDOR_ID::AMD,
+          kAMDStrixHaloDeviceId,
+          40u,
+          Dtype::Fp16,
+          { 30u, 40u, 30u, 40u, 256u, 256u },
+          { .wgSize = 256u, .wgM = 256u, .wgN = 16u, .sgM = 32u, .sgN = 16u, .panelK = 576u, .prefetchPanel = true } },
         { eva::VENDOR_ID::AMD,
           kAMDStrixHaloDeviceId,
           40u,
@@ -4083,7 +4100,7 @@ inline eva::ComputePipeline k3s1ImplicitGemmPipeline(
         eva::constant_id<4>(plan.sgN),         eva::constant_id<5>(rowAlignedFlatSpatial),
         eva::constant_id<6>(residual.enabled), eva::constant_id<7>(plan.flatSpatial),
         eva::constant_id<8>(plan.panelK),      eva::constant_id<9>(directOutput),
-        eva::constant_id<10>(residual.order),
+        eva::constant_id<10>(residual.order),  eva::constant_id<11>(plan.prefetchPanel),
     };
     withShape(specialization, plan.shape, true);
     withDTypes(specialization, oDtype, iDtype, paramType, Dtype::Fp32, 0u, {});
@@ -5419,6 +5436,7 @@ inline std::optional<K3S1Plan> selectK3S1ImplicitCMPlan(
         .sgM = rule->sgM,
         .sgN = rule->sgN,
         .panelK = rule->panelK,
+        .prefetchPanel = rule->prefetchPanel,
         .accType = 1u,
         .shape = ShapeSpec::fromWorkload(workload),
     };
