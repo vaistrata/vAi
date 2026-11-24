@@ -4076,6 +4076,7 @@ inline eva::ComputePipeline convCMPipeline(
         eva::constant_id<0>(plan.wgSize),      eva::constant_id<1>(plan.wgM),       eva::constant_id<2>(plan.wgN),
         eva::constant_id<3>(plan.panelK),      eva::constant_id<4>(plan.sgM),       eva::constant_id<5>(plan.sgN),
         eva::constant_id<6>(residual.enabled), eva::constant_id<7>(residual.order),
+        eva::constant_id<8>(workload.kernel),  eva::constant_id<9>(workload.stride),
     };
     withShape(specialization, shape, true);
     withDTypes(specialization, workload.oDtype, workload.iDtype, paramType,
