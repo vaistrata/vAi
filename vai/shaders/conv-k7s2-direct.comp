@@ -39,7 +39,7 @@ layout(constant_id = SPEC_ID_HAS_SCALE) const uint hasScale = 0u;
 layout(constant_id = SPEC_ID_HAS_BIAS) const uint hasBias = 1u;
 layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0u;   // O dtype: DTYPE_F32 or DTYPE_F16
 
-layout(set = 0, binding = 0) restrict writeonly buffer O_BUF { float bufferO[]; };
+layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_F32 { float bufferO_f32[]; };
 layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_F16 { float16_t bufferO_f16[]; };
 layout(set = 0, binding = 1) restrict readonly buffer I_BUF { float bufferI[]; };
 layout(set = 0, binding = 2) restrict readonly buffer W_BUF { float bufferW[]; };
@@ -91,6 +91,12 @@ float readScale(uint co)
 {
     if (hasScale == 0u) return 1.0;
     return typeP == DTYPE_F32 ? bufferScale_f32[co] : float(bufferScale_f16[co]);
+}
+
+void writeO(uint index, float value)
+{
+    if (typeO == DTYPE_F32) bufferO_f32[index] = value;
+    else bufferO_f16[index] = float16_t(value);
 }
 
 void main()
@@ -173,11 +179,7 @@ void main()
                 [[unroll]] for (uint dy = 0u; dy < 3u; ++dy)
                     [[unroll]] for (uint dx = 0u; dx < 3u; ++dx)
                         value = max(value, poolTile[base + dy * TX + dx]);
-                const uint index = poolOutputBase + ((coBase + k) * pho + gy) * pwo + gx;
-                if (typeO == DTYPE_F32)
-                    bufferO[index] = value;
-                else
-                    bufferO_f16[index] = float16_t(value);
+                writeO(poolOutputBase + ((coBase + k) * pho + gy) * pwo + gx, value);
             }
             barrier();
         }
@@ -186,12 +188,8 @@ void main()
             [[unroll]] for (uint k = 0u; k < CO_BLOCK; ++k)
             {
                 const uint co = coBase + k;
-                const uint index = outputBase + (co * pc.ho + uint(oy)) * pc.wo + uint(ox);
-                const float value = applyActivation(fma(acc[k], readScale(co), readBias(co)));
-                if (typeO == DTYPE_F32)
-                    bufferO[index] = value;
-                else
-                    bufferO_f16[index] = float16_t(value);
+                writeO(outputBase + (co * pc.ho + uint(oy)) * pc.wo + uint(ox),
+                       applyActivation(fma(acc[k], readScale(co), readBias(co))));
             }
         }
     }
