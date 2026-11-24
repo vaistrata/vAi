@@ -448,6 +448,7 @@ struct K3S1Plan {
     uint32_t panelK = 0u;
     bool prefetchPanel = false;   // Implicit CM: K3S1CMImplicitGeometry::prefetchPanel
     uint32_t stride = 1u;         // Implicit CM: 2 runs a 3x3/2 workload (an exact K3S1CM row)
+    bool directOutput = false;    // Implicit CM: K3S1CMImplicitGeometry::directOutput
     uint32_t accType = 1u;
     uint32_t splitK = 1u;
     uint32_t tailNOffset = 0u;
@@ -2380,6 +2381,7 @@ struct K3S1CMImplicitGeometry
     uint32_t sgN;
     uint32_t panelK;
     bool prefetchPanel = false;   // read the next input panel during the multiply (conv-k3s1-implicit-gemm-cm)
+    bool directOutput = false;    // store the accumulators straight to O (flat spatial tiles only)
 };
 
 struct K3S1CMImplicitRule
@@ -2607,15 +2609,15 @@ constexpr std::array<K3S1CMExactImplicitRule, 41> kK3S1CMExactImplicitTable{
           Dtype::Fp16,
           { 120u, 160u, 120u, 160u, 64u, 64u },
           { .wgSize = 32u, .wgM = 64u, .wgN = 16u, .sgM = 64u, .sgN = 16u, .panelK = 144u } },
-        // ACT layer2 and layer3 read the next input panel during the multiply, in the full
-        // forward: 0.057 -> 0.053 and 0.051 -> 0.047 ms (fp16 activations), 0.063 -> 0.059
-        // and 0.058 -> 0.053 ms (fp32)
+        // ACT layer2 stores its accumulators straight to O, and layer3 reads the next input
+        // panel during the multiply, in the full forward: 0.057 -> 0.049 and 0.051 -> 0.047 ms
+        // (fp16 activations), 0.063 -> 0.052 and 0.058 -> 0.053 ms (fp32)
         { eva::VENDOR_ID::AMD,
           kAMDStrixHaloDeviceId,
           40u,
           Dtype::Fp16,
           { 60u, 80u, 60u, 80u, 128u, 128u },
-          { .wgSize = 256u, .wgM = 128u, .wgN = 64u, .sgM = 32u, .sgN = 32u, .panelK = 144u, .prefetchPanel = true } },
+          { .wgSize = 128u, .wgM = 128u, .wgN = 16u, .sgM = 32u, .sgN = 16u, .panelK = 144u, .directOutput = true } },
         { eva::VENDOR_ID::AMD,
           kAMDStrixHaloDeviceId,
           40u,
@@ -2623,21 +2625,21 @@ constexpr std::array<K3S1CMExactImplicitRule, 41> kK3S1CMExactImplicitTable{
           { 30u, 40u, 30u, 40u, 256u, 256u },
           { .wgSize = 256u, .wgM = 256u, .wgN = 16u, .sgM = 32u, .sgN = 16u, .panelK = 576u, .prefetchPanel = true } },
         // ACT's 3x3/2 convolutions (layer2-4 downsampling) at stride 2, whose rows of 8 outputs
-        // gather with vector loads, in the full forward against the K3S2 path's packed tiles:
-        // 0.037 -> 0.030, 0.040 -> 0.028 and 0.056 -> 0.041 ms (fp16 activations), 0.043 -> 0.035,
-        // 0.049 -> 0.035 and 0.079 -> 0.047 ms (fp32)
+        // gather with vector loads (layer2 and 3 storing straight to O), in the full forward
+        // against the K3S2 path's packed tiles: 0.037 -> 0.028, 0.040 -> 0.027 and 0.056 -> 0.041
+        // ms (fp16 activations), 0.043 -> 0.033, 0.049 -> 0.034 and 0.079 -> 0.047 ms (fp32)
         { eva::VENDOR_ID::AMD,
           kAMDStrixHaloDeviceId,
           40u,
           Dtype::Fp16,
           { 120u, 160u, 60u, 80u, 64u, 128u },
-          { .wgSize = 128u, .wgM = 128u, .wgN = 32u, .sgM = 64u, .sgN = 16u, .panelK = 144u } },
+          { .wgSize = 64u, .wgM = 128u, .wgN = 16u, .sgM = 64u, .sgN = 16u, .panelK = 144u, .directOutput = true } },
         { eva::VENDOR_ID::AMD,
           kAMDStrixHaloDeviceId,
           40u,
           Dtype::Fp16,
           { 60u, 80u, 30u, 40u, 128u, 256u },
-          { .wgSize = 256u, .wgM = 256u, .wgN = 16u, .sgM = 32u, .sgN = 16u, .panelK = 288u } },
+          { .wgSize = 256u, .wgM = 256u, .wgN = 16u, .sgM = 32u, .sgN = 16u, .panelK = 576u, .directOutput = true } },
         { eva::VENDOR_ID::AMD,
           kAMDStrixHaloDeviceId,
           40u,
@@ -5406,6 +5408,7 @@ inline std::optional<K3S1Plan> selectK3S1ImplicitCMPlan(
     candidate.flatSpatial = device.vendorID() == eva::VENDOR_ID::AMD && device.deviceID() == kAMDStrixHaloDeviceId &&
                             device.computeBlockCount() == 40u && (workload.wo % 8u) == 0u &&
                             (workload.spatialSize() % candidate.wgN) == 0u;
+    candidate.directOutput = rule->directOutput && candidate.flatSpatial;
     return candidate;
 }
 
@@ -6473,8 +6476,9 @@ inline void Convolution::prepareK3S1(const Workload& workload)
                 iDtype,
                 oDtype,
                 residualFusion(),
-                device().deviceID() == kAMDStrixHaloDeviceId && plan_.k3s1.flatSpatial &&
-                    useHaloK3S1DirectOutput(workload),
+                plan_.k3s1.flatSpatial &&
+                    (plan_.k3s1.directOutput ||
+                     (device().deviceID() == kAMDStrixHaloDeviceId && useHaloK3S1DirectOutput(workload))),
                 implicitSubgroupSize));
             implicit.weightTransform = makePipelineBinding(
                 cmTransformPipeline(
