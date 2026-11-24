@@ -975,8 +975,6 @@ Source: [`vai/nodes/pool2d.h`](../../vai/nodes/pool2d.h)
 
 channelsLast reads a token grid as it is laid out (rows of embedDim, e.g. a
 ViT's patches viewed as [G, G, D]), so no transpose is needed around the pool.
-Kernel is the dispatch without the node: a Convolution whose fused max pool
-runs as a pass after the convolution records one too.
 
 **Kernels**
 

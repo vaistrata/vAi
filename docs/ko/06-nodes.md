@@ -975,8 +975,6 @@ The rank is a specialization constant, so the pool holds one pipeline per rank.
 
 channelsLast reads a token grid as it is laid out (rows of embedDim, e.g. a
 ViT's patches viewed as [G, G, D]), so no transpose is needed around the pool.
-Kernel is the dispatch without the node: a Convolution whose fused max pool
-runs as a pass after the convolution records one too.
 
 **커널**
 

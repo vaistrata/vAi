@@ -28,13 +28,24 @@ namespace vai::node {
 
   channelsLast reads a token grid as it is laid out (rows of embedDim, e.g. a
   ViT's patches viewed as [G, G, D]), so no transpose is needed around the pool.
-  Kernel is the dispatch without the node: a Convolution whose fused max pool
-  runs as a pass after the convolution records one too.
 =============================================================================*/
 template<PoolMode mode>
 class Pool2d : public vai::Node
 {
+    eva::ComputePipeline pipe;
+    eva::DescriptorSet descSet;
+
 public:
+    struct PipeParams {
+        bool aligned = false;
+        uint32_t wgSize = 64u;
+        bool interior = false;
+        vai::Dtype iDtype = vai::Dtype::None;
+        vai::Dtype oDtype = vai::Dtype::None;
+
+        bool operator==(const PipeParams&) const = default;
+    };
+
     struct Config {
         uint32_t kernelSize;
         uint32_t stride;
@@ -44,35 +55,6 @@ public:
         bool channelsLast = false;
     } config_;
 
-    // pool2d.comp over an input of dims {B, C, H, W} (also with channelsLast).
-    class Kernel
-    {
-    public:
-        struct PipeParams {
-            bool aligned = false;
-            uint32_t wgSize = 64u;
-            bool interior = false;
-            vai::Dtype iDtype = vai::Dtype::None;
-            vai::Dtype oDtype = vai::Dtype::None;
-
-            bool operator==(const PipeParams&) const = default;
-        };
-
-        // The pooled size of an input side.
-        static uint32_t outSize(const Config& config, uint32_t in);
-
-        void prepare(const eva::Device& device, PipelinePool& pool, const Config& config,
-                     std::array<uint32_t, 4> dims, Dtype iDtype, Dtype oDtype);
-        void record(eva::CommandBuffer cmdBuff, eva::BufferRange out, eva::BufferRange in);
-
-    private:
-        eva::ComputePipeline pipe;
-        eva::DescriptorSet descSet;
-        PipeParams pipeParams;
-        Config config_{};
-        std::array<uint32_t, 4> dims_{};
-    };
-
     Pool2d(Config config);
     void prepare() override;
     void run(eva::CommandBuffer cmdBuff) override;
@@ -80,16 +62,22 @@ public:
 private:
     // in0 as {B, C, H, W}: B is the product of the axes ahead of the image.
     std::array<uint32_t, 4> dims();
+    uint32_t outSize(uint32_t in) const;
 
-    Kernel kernel;
+    PipeParams pipeParams;
 };
 
 using MaxPool2d = Pool2d<PoolMode::Max>;
 using AvgPool2d = Pool2d<PoolMode::Avg>;
 
 
-template<PoolMode mode>
-inline uint32_t Pool2d<mode>::Kernel::outSize(const Config& config, uint32_t in)
+// pool2d.comp over an input of dims {B, C, H, W} (also with channelsLast). Pool2d runs it
+// through these, and so does a Convolution whose fused max pool runs as a pass after the
+// convolution (Convolution::Config::fuseMaxPool).
+
+// The pooled size of an input side.
+template <PoolMode mode>
+inline uint32_t pool2dOutSize(const typename Pool2d<mode>::Config& config, uint32_t in)
 {
     uint32_t K = config.kernelSize;
     uint32_t S = config.stride;
@@ -102,81 +90,78 @@ inline uint32_t Pool2d<mode>::Kernel::outSize(const Config& config, uint32_t in)
     return out;
 }
 
-template<PoolMode mode>
-inline void Pool2d<mode>::Kernel::prepare(const eva::Device& device, PipelinePool& pool,
-                                          const Config& config, std::array<uint32_t, 4> dims, Dtype iDtype,
-                                          Dtype oDtype)
+// The pipeline for the input on this device: the bounds-check-free loop over interior
+// windows where it was measured faster, the general one anywhere else.
+template <PoolMode mode>
+inline typename Pool2d<mode>::PipeParams pool2dPipeParams(
+    const eva::Device& device, const typename Pool2d<mode>::Config& config, std::array<uint32_t, 4> dims, Dtype iDtype,
+    Dtype oDtype)
 {
-    config_ = config;
-    dims_ = dims;
-    uint32_t K = config.kernelSize;
-    uint32_t S = config.stride;
-    uint32_t P = config.padding;
     auto [B, C, H, W] = dims;
-    VAI_ASSERT(H + 2 * P >= K && W + 2 * P >= K);
-
     const bool interior =
-        mode == PoolMode::Max && !config.channelsLast && !config.ceilMode && K == 3u && S == 2u && P == 1u &&
-        B == 1u && C == 64u && H == 240u && W == 320u && iDtype == Dtype::Fp32 && oDtype == Dtype::Fp32 &&
-        device.vendorID() == eva::VENDOR_ID::NVIDIA && device.deviceID() == 0x2b85u &&
-        device.computeBlockCount() == 170u && device.maxComputeWorkGroupInvocations() >= 256u;
-    const PipeParams p = {
+        mode == PoolMode::Max && !config.channelsLast && !config.ceilMode && config.kernelSize == 3u &&
+        config.stride == 2u && config.padding == 1u && B == 1u && C == 64u && H == 240u && W == 320u &&
+        iDtype == Dtype::Fp32 && oDtype == Dtype::Fp32 && device.vendorID() == eva::VENDOR_ID::NVIDIA &&
+        device.deviceID() == 0x2b85u && device.computeBlockCount() == 170u &&
+        device.maxComputeWorkGroupInvocations() >= 256u;
+    return {
         .aligned = config.channelsLast && C % 4 == 0,
         .wgSize = interior ? 256u : 64u,
         .interior = interior,
         .iDtype = iDtype,
         .oDtype = oDtype,
     };
-    if (!pipe || p != pipeParams)
-    {
-        pipeParams = p;
-        // clang-format off
-        pipe = pool.request("pool2d", {
-            eva::constant_id<7>(p.wgSize), eva::constant_id<8>(p.interior),
-            eva::constant_id<0>(config.channelsLast ? 1u : 0u),       // channelsLast
-            eva::constant_id<1>(K),                                   // K
-            eva::constant_id<2>(S),                                   // S
-            eva::constant_id<3>(P),                                   // P
-            eva::constant_id<4>(static_cast<uint32_t>(mode)),         // poolMode
-            eva::constant_id<5>(config.ceilMode ? 1u : 0u),           // ceilMode
-            eva::constant_id<6>(config.countIncludePad ? 1u : 0u),    // countIncludePad
-            eva::constant_id<SPEC_ID_ALIGNED>(p.aligned ? 1u : 0u),   // aligned (vec4 over C)
-            eva::constant_id<SPEC_ID_TYPE_O>(oDtype),                 // typeO
-            eva::constant_id<SPEC_ID_TYPE_I>(iDtype)                  // typeI
-        });
-        // clang-format on
-
-        if (!descSet)
-            descSet = gVaiDestSetPool(pipe.descSetLayout(0));
-    }
 }
 
-template<PoolMode mode>
-inline void Pool2d<mode>::Kernel::record(eva::CommandBuffer cmdBuff, eva::BufferRange out, eva::BufferRange in)
+template <PoolMode mode>
+inline eva::ComputePipeline pool2dPipeline(
+    PipelinePool& pool, const typename Pool2d<mode>::Config& config, const typename Pool2d<mode>::PipeParams& p)
+{
+    // clang-format off
+    return pool.request("pool2d", {
+        eva::constant_id<7>(p.wgSize), eva::constant_id<8>(p.interior),
+        eva::constant_id<0>(config.channelsLast ? 1u : 0u),       // channelsLast
+        eva::constant_id<1>(config.kernelSize),                   // K
+        eva::constant_id<2>(config.stride),                       // S
+        eva::constant_id<3>(config.padding),                      // P
+        eva::constant_id<4>(static_cast<uint32_t>(mode)),         // poolMode
+        eva::constant_id<5>(config.ceilMode ? 1u : 0u),           // ceilMode
+        eva::constant_id<6>(config.countIncludePad ? 1u : 0u),    // countIncludePad
+        eva::constant_id<SPEC_ID_ALIGNED>(p.aligned ? 1u : 0u),   // aligned (vec4 over C)
+        eva::constant_id<SPEC_ID_TYPE_O>(p.oDtype),               // typeO
+        eva::constant_id<SPEC_ID_TYPE_I>(p.iDtype)                // typeI
+    });
+    // clang-format on
+}
+
+// Pools in into out and makes out readable by the next kernel.
+template <PoolMode mode>
+inline void recordPool2d(
+    eva::CommandBuffer cmdBuff, const eva::ComputePipeline& pipe, eva::DescriptorSet& descSet,
+    const typename Pool2d<mode>::Config& config, const typename Pool2d<mode>::PipeParams& p,
+    std::array<uint32_t, 4> dims, eva::BufferRange out, eva::BufferRange in)
 {
     descSet.write({ out, in });
 
-    auto [B, C, Hi, Wi] = dims_;
-    uint32_t Ho = outSize(config_, Hi);
-    uint32_t Wo = outSize(config_, Wi);
+    auto [B, C, Hi, Wi] = dims;
+    uint32_t Ho = pool2dOutSize<mode>(config, Hi);
+    uint32_t Wo = pool2dOutSize<mode>(config, Wi);
 
     // CHW: the leading axes fold into the planes, [..., C] -> B * C.
-    if (!config_.channelsLast)
+    if (!config.channelsLast)
         C *= B;
 
-    struct {
+    struct
+    {
         uint32_t Hi, Wi, Ho, Wo, C;
     } constants = { Hi, Wi, Ho, Wo, C };
 
-    cmdBuff
-        .bindPipeline(pipe)
-        .bindDescSets({descSet})
-        .setPushConstants(0, sizeof(constants), &constants);
+    cmdBuff.bindPipeline(pipe).bindDescSets({ descSet }).setPushConstants(0, sizeof(constants), &constants);
 
-    if (config_.channelsLast)
-        cmdBuff.dispatch(CEIL_DIV(pipeParams.aligned ? C / 4 : C, pipeParams.wgSize), Wo, B * Ho);
+    if (config.channelsLast)
+        cmdBuff.dispatch(CEIL_DIV(p.aligned ? C / 4 : C, p.wgSize), Wo, B * Ho);
     else
-        cmdBuff.dispatch(CEIL_DIV(Ho * Wo, pipeParams.wgSize), C);
+        cmdBuff.dispatch(CEIL_DIV(Ho * Wo, p.wgSize), C);
 
     cmdBuff.barrier(eva::SYNC_SCOPE::COMPUTE_WRITE / out / eva::SYNC_SCOPE::COMPUTE_READ);
 }
@@ -205,30 +190,49 @@ inline std::array<uint32_t, 4> Pool2d<mode>::dims()
 }
 
 template<PoolMode mode>
+inline uint32_t Pool2d<mode>::outSize(uint32_t in) const
+{
+    return pool2dOutSize<mode>(config_, in);
+}
+
+template<PoolMode mode>
 inline void Pool2d<mode>::prepare()
 {
     const Dtype oDtype = (oDtype_ == Dtype::None) ? oDefaultDtype() : oDtype_;
+    uint32_t K = config_.kernelSize;
+    uint32_t P = config_.padding;
 
     const Tensor& inTen = (*this)["in0"];
     VAI_ASSERT(inTen.shape().size() >= 3);
     const Dtype iDtype = inTen.dtype();
 
-    const std::array<uint32_t, 4> d = dims();
-    uint32_t Ho = Kernel::outSize(config_, d[2]);
-    uint32_t Wo = Kernel::outSize(config_, d[3]);
+    auto [B, C, H, W] = dims();
+    VAI_ASSERT(H + 2 * P >= K && W + 2 * P >= K);
+
+    uint32_t Ho = outSize(H);
+    uint32_t Wo = outSize(W);
     std::vector<uint32_t> outShape = inTen.shape();
     const size_t r = outShape.size();
     if (config_.channelsLast) { outShape[r - 3] = Ho; outShape[r - 2] = Wo; }
     else                      { outShape[r - 2] = Ho; outShape[r - 1] = Wo; }
     (*this)["out0"] = Tensor(outShape, oDtype);
 
-    kernel.prepare(device(), pipelinePool(), config_, d, iDtype, oDtype);
+    const PipeParams p = pool2dPipeParams<mode>(device(), config_, { B, C, H, W }, iDtype, oDtype);
+    if (!pipe || p != pipeParams)
+    {
+        pipeParams = p;
+        pipe = pool2dPipeline<mode>(pipelinePool(), config_, p);
+
+        if (!descSet)
+            descSet = gVaiDestSetPool(pipe.descSetLayout(0));
+    }
 }
 
 template<PoolMode mode>
 inline void Pool2d<mode>::run(eva::CommandBuffer cmdBuff)
 {
-    kernel.record(cmdBuff, (*this)["out0"].buffer(), (*this)["in0"].buffer());
+    recordPool2d<mode>(
+        cmdBuff, pipe, descSet, config_, pipeParams, dims(), (*this)["out0"].buffer(), (*this)["in0"].buffer());
 }
 
 }   // namespace vai::node

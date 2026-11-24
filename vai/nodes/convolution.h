@@ -3193,6 +3193,8 @@ private:
     void prepareK3S2(const Workload& workload);
     void prepareImplicit(const Workload& workload);
     void prepareTensorStorage(const Workload& workload);
+    // fuseMaxPool's pass, after a plan that does not pool.
+    void prepareMaxPoolPass(const Workload& workload);
     bool hasPendingWeightTransforms() const;
     bool recordK3S1WeightTransforms(eva::CommandBuffer cmdBuff, const Workload& workload);
     bool recordK1S1WeightTransform(eva::CommandBuffer cmdBuff, const Workload& workload);
@@ -3209,9 +3211,10 @@ private:
     Tensor& convOutput(const Workload& workload);
 
     ConvPlan plan_;
-    // fuseMaxPool's pass, for a workload no fused plan covers.
-    MaxPool2d::Kernel maxPool_;
-    static constexpr MaxPool2d::Config kMaxPoolConfig{ .kernelSize = 3u, .stride = 2u, .padding = 1u };
+    // fuseMaxPool's pass, pool2d over "unpooled", for a workload no fused plan covers.
+    PipelineBinding maxPool_;
+    MaxPool2d::PipeParams maxPoolParams_;
+    static constexpr MaxPool2d::Config maxPoolConfig{ .kernelSize = 3u, .stride = 2u, .padding = 1u };
     ShapeSpec preparedShape_;
     bool planPrepared_ = false;
 
@@ -6843,14 +6846,11 @@ inline void Convolution::prepareTensorStorage(const Workload& workload)
         VAI_ASSERT(!workload.maxPool || (plan_.path == ConvPlan::Path::General && plan_.implicit.directK7S2));
         std::vector<uint32_t> convShape = outputShape;
         convShape.insert(convShape.end(), { Co, Ho, Wo });
-        outputShape.insert(outputShape.end(), { Co, MaxPool2d::Kernel::outSize(kMaxPoolConfig, Ho),
-                                                MaxPool2d::Kernel::outSize(kMaxPoolConfig, Wo) });
+        outputShape.insert(
+            outputShape.end(),
+            { Co, pool2dOutSize<PoolMode::Max>(maxPoolConfig, Ho), pool2dOutSize<PoolMode::Max>(maxPoolConfig, Wo) });
         if (!workload.maxPool)
-        {
             (*this)["unpooled"] = Tensor(convShape, workload.oDtype);
-            maxPool_.prepare(device(), pipelinePool(), kMaxPoolConfig, { B, Co, Ho, Wo }, workload.oDtype,
-                             workload.oDtype);
-        }
     }
     else
         outputShape.insert(outputShape.end(), { Co, Ho, Wo });
@@ -6951,6 +6951,25 @@ inline void Convolution::prepare()
     const ConvPlan nextPlan = selectConvPlan(currentDevice, caps, workload);
     preparePlan(workload, nextPlan);
     prepareTensorStorage(workload);
+    prepareMaxPoolPass(workload);
+}
+
+// pool2d's pipeline as MaxPool2d would pick it for the conv output.
+inline void Convolution::prepareMaxPoolPass(const Workload& workload)
+{
+    if (!config_.fuseMaxPool || workload.maxPool)
+        return;
+    const MaxPool2d::PipeParams p = pool2dPipeParams<PoolMode::Max>(
+        device(),
+        maxPoolConfig,
+        { workload.batch, workload.co, workload.ho, workload.wo },
+        workload.oDtype,
+        workload.oDtype);
+    if (!maxPool_.pipeline || p != maxPoolParams_)
+    {
+        maxPoolParams_ = p;
+        maxPool_ = makePipelineBinding(pool2dPipeline<PoolMode::Max>(pipelinePool(), maxPoolConfig, p));
+    }
 }
 
 inline bool Convolution::hasPendingWeightTransforms() const
@@ -7596,7 +7615,15 @@ inline void Convolution::run(eva::CommandBuffer cmdBuff)
             break;
     }
     if (config_.fuseMaxPool && !workload.maxPool)
-        maxPool_.record(cmdBuff, (*this)["out0"].buffer(), (*this)["unpooled"].buffer());
+        recordPool2d<PoolMode::Max>(
+            cmdBuff,
+            maxPool_.pipeline,
+            maxPool_.descriptorSet,
+            maxPoolConfig,
+            maxPoolParams_,
+            { workload.batch, workload.co, workload.ho, workload.wo },
+            (*this)["out0"].buffer(),
+            (*this)["unpooled"].buffer());
 }
 
 }   // namespace vai::node
