@@ -1919,9 +1919,9 @@ inline std::optional<Linear::RadvPick> amdHaloPlainTile(
 
 // Strix Point's tile for one shape: amdRefinedTileParams's rule, then the measured
 // picks for linear-cm-amd's cooperative schedule, by the layers they were
-// measured on. A pick never splits and carries its weight layout and dispatch
-// order (t.strix). The picks need fp32 accumulation, the 16x16x16 coopmat at
-// wave64 and pipeline robustness.
+// measured on. A pick never splits and carries its weight layout, dispatch
+// order and schedule options (t.strix). The picks need fp32 accumulation, the
+// 16x16x16 coopmat at wave64 and pipeline robustness.
 inline Linear::PipeParamsTile amdPointLinearTile(
     uint32_t M, uint32_t N, uint32_t K, Dtype iDtype, Dtype wDtype, bool accF16, eva::Device device)
 {
@@ -1931,13 +1931,15 @@ inline Linear::PipeParamsTile amdPointLinearTile(
 
     struct PointTile
     {
-        // ( wgM, wgN, wgK, sgM, sgN, wgSize, groupM, fragments, sgSize )
+        // ( wgM, wgN, wgK, sgM, sgN, wgSize, groupM, fragments, sgSize, schedule )
         uint32_t wgM = 0, wgN = 0, wgK = 0, sgM = 0, sgN = 0, wgSize = 0, groupM = 0;
         bool fragments = false;   // W as Fragments; false: Rows
         uint32_t sgSize = 0;      // 0 keeps the device default
+        uint32_t schedule = 0;    // Linear::StrixSchedule bits (Fragments weights only)
     };
     const PointTile pick = [&]() -> PointTile {
         constexpr PointTile none{};
+        constexpr uint32_t streamCursor = Linear::ScheduleInputStream | Linear::ScheduleRowCursor;
         if (wDtype == Dtype::Fp32)   // ACT (fp32 weights, multiplied in fp16), at M 100, 300 and 302
         {
             if (M >= 256u && M <= 1024u)
@@ -1967,6 +1969,11 @@ inline Linear::PipeParamsTile amdPointLinearTile(
 
         if (M >= 256u && M <= 1024u)   // vision tower and prefix
         {
+            // ACT encoder ffn linear1 (bias + ReLU), measured at M 302 in the full forward;
+            // fp32 input keeps the fp32-weight pick, the fastest there too.
+            if (K == 512u && N == 3200u)
+                return iDtype == Dtype::Fp16 ? PointTile{ 64, 64, 64, 64, 16, 128, 8, true, 32, streamCursor }
+                                             : PointTile{ 64, 64, 32, 64, 32, 128, 8, true };
             const bool fullBands =
                 iDtype == Dtype::Fp16 ? M <= 576u : (M >= 312u && M <= 384u) || (M >= 520u && M <= 576u);
             if (K == 2048u && N == 32768u && iDtype == Dtype::Fp16 && M >= 768u && CEIL_DIV(M, 160u) * 160u - M <= 16u)
@@ -2008,6 +2015,11 @@ inline Linear::PipeParamsTile amdPointLinearTile(
         }
         else if (M >= 32u && M <= 128u)   // action expert
         {
+            // ACT decoder ffn linear1 (bias + ReLU), measured at M 100 in the full forward;
+            // fp32 input keeps the fp32-weight pick.
+            if (K == 512u && N == 3200u)
+                return iDtype == Dtype::Fp16 ? PointTile{ 64, 128, 64, 64, 32, 256, 0, true }
+                                             : PointTile{ 64, 128, 32, 64, 32, 256, 8, true };
             if (K == 1024u && N == 1024u && iDtype == Dtype::Fp32)
                 return { 16, 64, 32, 16, 64, 64, 8, true };
             if (K == 1024u && N == 8192u)   // ex gate+up
@@ -2035,6 +2047,7 @@ inline Linear::PipeParamsTile amdPointLinearTile(
         plan.splits = 1;
         plan.groupM = pick.groupM;
         plan.weights = pick.fragments ? Linear::WeightLayout::Fragments : Linear::WeightLayout::Rows;
+        plan.schedule = pick.schedule;
         t.strix = plan;
     }
     return t;
