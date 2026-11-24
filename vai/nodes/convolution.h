@@ -447,6 +447,7 @@ struct K3S1Plan {
     uint32_t tN = 0u;
     uint32_t panelK = 0u;
     bool prefetchPanel = false;   // Implicit CM: K3S1CMImplicitGeometry::prefetchPanel
+    uint32_t stride = 1u;         // Implicit CM: 2 runs a 3x3/2 workload (an exact K3S1CM row)
     uint32_t accType = 1u;
     uint32_t splitK = 1u;
     uint32_t tailNOffset = 0u;
@@ -2418,7 +2419,7 @@ struct K3S1CMExactImplicitRule
     K3S1CMImplicitGeometry geometry;
 };
 
-constexpr std::array<K3S1CMExactImplicitRule, 38> kK3S1CMExactImplicitTable{
+constexpr std::array<K3S1CMExactImplicitRule, 41> kK3S1CMExactImplicitTable{
     {
         { eva::VENDOR_ID::AMD,
           kAMDStrixPointDeviceId,
@@ -2621,6 +2622,28 @@ constexpr std::array<K3S1CMExactImplicitRule, 38> kK3S1CMExactImplicitTable{
           Dtype::Fp16,
           { 30u, 40u, 30u, 40u, 256u, 256u },
           { .wgSize = 256u, .wgM = 256u, .wgN = 16u, .sgM = 32u, .sgN = 16u, .panelK = 576u, .prefetchPanel = true } },
+        // ACT's 3x3/2 convolutions (layer2-4 downsampling) at stride 2, whose rows of 8 outputs
+        // gather with vector loads, in the full forward against the K3S2 path's packed tiles:
+        // 0.037 -> 0.030, 0.040 -> 0.028 and 0.056 -> 0.041 ms (fp16 activations), 0.043 -> 0.035,
+        // 0.049 -> 0.035 and 0.079 -> 0.047 ms (fp32)
+        { eva::VENDOR_ID::AMD,
+          kAMDStrixHaloDeviceId,
+          40u,
+          Dtype::Fp16,
+          { 120u, 160u, 60u, 80u, 64u, 128u },
+          { .wgSize = 128u, .wgM = 128u, .wgN = 32u, .sgM = 64u, .sgN = 16u, .panelK = 144u } },
+        { eva::VENDOR_ID::AMD,
+          kAMDStrixHaloDeviceId,
+          40u,
+          Dtype::Fp16,
+          { 60u, 80u, 30u, 40u, 128u, 256u },
+          { .wgSize = 256u, .wgM = 256u, .wgN = 16u, .sgM = 32u, .sgN = 16u, .panelK = 288u } },
+        { eva::VENDOR_ID::AMD,
+          kAMDStrixHaloDeviceId,
+          40u,
+          Dtype::Fp16,
+          { 30u, 40u, 15u, 20u, 256u, 512u },
+          { .wgSize = 256u, .wgM = 256u, .wgN = 16u, .sgM = 32u, .sgN = 16u, .panelK = 576u } },
         { eva::VENDOR_ID::AMD,
           kAMDStrixHaloDeviceId,
           40u,
@@ -2715,74 +2738,8 @@ struct K3S2ExactRule
     Dtype inputDtype = Dtype::None;   // None: any input
 };
 
-constexpr std::array<K3S2ExactRule, 29> kK3S2ExactTable{
+constexpr std::array<K3S2ExactRule, 25> kK3S2ExactTable{
     {
-        { eva::VENDOR_ID::AMD,
-          kAMDStrixHaloDeviceId,
-          40u,
-          Dtype::Fp16,
-          true,
-          { 120u, 160u, 60u, 80u, 64u, 128u },
-          { .wgSize = 128u,
-            .wgM = 128u,
-            .wgN = 16u,
-            .sgM = 32u,
-            .sgN = 16u,
-            .shape = { .wo = 80u },
-            .accType = 1u,
-            .packedWeights = true },
-          1u },
-        { eva::VENDOR_ID::AMD,
-          kAMDStrixHaloDeviceId,
-          40u,
-          Dtype::Fp16,
-          true,
-          { 60u, 80u, 30u, 40u, 128u, 256u },
-          { .splitK = 5u,
-            .wgSize = 64u,
-            .wgM = 128u,
-            .wgN = 32u,
-            .sgM = 64u,
-            .sgN = 32u,
-            .shape = { .wo = 40u },
-            .accType = 1u,
-            .packedWeights = true,
-            .directOutput = true },
-          1u },
-        // layer4 on fp16 activations: 64-row tiles of one subgroup, 0.062 -> 0.055 ms in the forward
-        { eva::VENDOR_ID::AMD,
-          kAMDStrixHaloDeviceId,
-          40u,
-          Dtype::Fp16,
-          true,
-          { 30u, 40u, 15u, 20u, 256u, 512u },
-          { .splitK = 3u,
-            .wgSize = 32u,
-            .wgM = 64u,
-            .wgN = 16u,
-            .sgM = 64u,
-            .sgN = 16u,
-            .shape = { .wo = 20u },
-            .accType = 1u,
-            .packedWeights = true },
-          1u,
-          Dtype::Fp16 },
-        { eva::VENDOR_ID::AMD,
-          kAMDStrixHaloDeviceId,
-          40u,
-          Dtype::Fp16,
-          true,
-          { 30u, 40u, 15u, 20u, 256u, 512u },
-          { .splitK = 9u,
-            .wgSize = 128u,
-            .wgM = 128u,
-            .wgN = 16u,
-            .sgM = 32u,
-            .sgN = 16u,
-            .shape = { .wo = 20u },
-            .accType = 1u,
-            .packedWeights = true },
-          1u },
         { eva::VENDOR_ID::AMD,
           kAMDStrixHaloDeviceId,
           40u,
@@ -3550,6 +3507,8 @@ inline bool validK3S1Plan(const K3S1Plan& plan, const eva::Device& device, bool 
 
         case ConvAlgorithm::Implicit:
         {
+            if (plan.stride != workload.stride || (plan.stride != 1u && plan.stride != 2u))
+                return false;
             if (!useCooperativeMatrix || plan.accType != 1u ||
                 !validCMTopology(plan.wgSize, plan.wgM, plan.wgN, plan.sgM, plan.sgN, plan.sgSize) ||
                 plan.sgSize != 32u ||
@@ -4101,6 +4060,7 @@ inline eva::ComputePipeline k3s1ImplicitGemmPipeline(
         eva::constant_id<6>(residual.enabled), eva::constant_id<7>(plan.flatSpatial),
         eva::constant_id<8>(plan.panelK),      eva::constant_id<9>(directOutput),
         eva::constant_id<10>(residual.order),  eva::constant_id<11>(plan.prefetchPanel),
+        eva::constant_id<12>(plan.stride),
     };
     withShape(specialization, plan.shape, true);
     withDTypes(specialization, oDtype, iDtype, paramType, Dtype::Fp32, 0u, {});
@@ -5424,7 +5384,9 @@ inline std::optional<K3S1Plan> selectK3S1ImplicitCMPlan(
     const Workload& workload)
 {
     const K3S1CMImplicitGeometry* rule = findK3S1CMExactImplicitRule(device, workload);
-    if (rule == nullptr) rule = findK3S1CMImplicitRule(workload);
+    // A 3x3/2 workload takes only an exact row: its shape key names its stride.
+    if (rule == nullptr && workload.stride == 1u)
+        rule = findK3S1CMImplicitRule(workload);
     if (rule == nullptr) return std::nullopt;
 
     K3S1Plan candidate{
@@ -5437,6 +5399,7 @@ inline std::optional<K3S1Plan> selectK3S1ImplicitCMPlan(
         .sgN = rule->sgN,
         .panelK = rule->panelK,
         .prefetchPanel = rule->prefetchPanel,
+        .stride = workload.stride,
         .accType = 1u,
         .shape = ShapeSpec::fromWorkload(workload),
     };
@@ -5806,6 +5769,27 @@ inline std::optional<ConvPlan> selectK3S1Candidate(
         candidate.requiredSubgroupSize =
             device.deviceID() == kAMDStrixHaloDeviceId ? 64u : 32u;
     }
+    return candidate;
+}
+
+// A 3x3/2 workload with an exact K3S1CM row runs conv-k3s1-implicit-gemm-cm at
+// stride 2, which gathers each row of 8 outputs with vector loads; otherwise the
+// K3S2 path.
+inline std::optional<ConvPlan> selectK3S2ImplicitCMCandidate(
+    const eva::Device& device, const ConvolutionCaps& caps, const Workload& workload, const ConvPlan& basePlan)
+{
+    if (workload.kernel != 3u || workload.stride != 2u || workload.wDtype != Dtype::Fp16 || !enableCM(device, caps) ||
+        !subgroupSizeInRange(device, 32u) || (workload.co % 16u) != 0u || ((workload.ci * 9u) % 16u) != 0u)
+        return std::nullopt;
+    const auto plan = selectK3S1ImplicitCMPlan(device, workload);
+    if (!plan || k3s1SharedMemoryBytes(*plan, plan->wgN, workload.wDtype) > device.maxComputeSharedMemorySize() ||
+        !validK3S1Plan(*plan, device, true, workload))
+        return std::nullopt;
+
+    ConvPlan candidate = basePlan;
+    candidate.path = ConvPlan::Path::K3S1;
+    candidate.k3s1 = *plan;
+    candidate.useCM = true;
     return candidate;
 }
 
@@ -6306,7 +6290,11 @@ inline ConvPlan selectConvPlan(const eva::Device& device, const ConvolutionCaps&
     else if (preferredPath == ConvPlan::Path::K3S1)
         candidate = selectK3S1Candidate(device, caps, workload, basePlan);
     else if (preferredPath == ConvPlan::Path::K3S2)
-        candidate = selectK3S2Candidate(device, caps, workload, basePlan);
+    {
+        candidate = selectK3S2ImplicitCMCandidate(device, caps, workload, basePlan);
+        if (!candidate || !validConvLaunches(*candidate, workload, device, caps))
+            candidate = selectK3S2Candidate(device, caps, workload, basePlan);
+    }
 
     if (candidate && validConvLaunches(*candidate, workload, device, caps))
         return *candidate;
@@ -6461,7 +6449,10 @@ inline void Convolution::prepareK3S1(const Workload& workload)
     CooperativeMatrixResources& cm = winograd.cm;
     VAI_ASSERT(plan_.path == ConvPlan::Path::K3S1);
     const uint32_t Ci = workload.ci;
-    VAI_ASSERT(workload.kernel == 3u && workload.stride == 1u);
+    VAI_ASSERT(
+        workload.kernel == 3u &&
+        (workload.stride == 1u ||
+         (plan_.useCM && plan_.k3s1.algorithm == ConvAlgorithm::Implicit && plan_.k3s1.stride == workload.stride)));
     const auto [iDtype, oDtype, affineDtype, hasScale, actType] = makeFusionSpec(workload);
     const uint32_t requiredSubgroupSize = plan_.requiredSubgroupSize;
 
@@ -7149,7 +7140,8 @@ inline void Convolution::runK3S1Implicit(eva::CommandBuffer cmdBuff, const Workl
 {
     K3S1Resources& resources = std::get<K3S1Resources>(prepared_);
     ImplicitResources& implicit = resources.implicit;
-    VAI_ASSERT(config_.kernelSize == 3u && config_.stride == 1u);
+    VAI_ASSERT(config_.kernelSize == 3u && config_.stride == plan_.k3s1.stride);
+    VAI_ASSERT(config_.stride == 1u || plan_.useCM);
     VAI_ASSERT(plan_.k3s1.algorithm == ConvAlgorithm::Implicit);
     Tensor& outTen = (*this)["out0"];
     Tensor& inTen = (*this)["in0"];
