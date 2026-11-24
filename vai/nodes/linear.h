@@ -1975,6 +1975,12 @@ inline Linear::PipeParamsTile amdPointLinearTile(
                 return iDtype == Dtype::Fp16
                            ? PointTile{ 64, 64, 64, 64, 16, 128, 8, true, 32, streamCursor }
                            : PointTile{ 64, 64, 32, 64, 32, 128, 8, true };
+            // ACT encoder self-attention in_proj (q, k, v stacked, bias), measured at M 302 in the
+            // full forward with fp16 and fp32 input. A tile with sgM 80 was 2% faster with fp16
+            // input and one with sgM 160 3% faster with fp32, but linear-cm-amd's prefetch and
+            // stream schedules give NaN at those sgM.
+            if (K == 512u && N == 1536u)
+                return { 32, 192, 64, 32, 48, 128, 8, true, 32 };
             const bool fullBands =
                 iDtype == Dtype::Fp16 ? M <= 576u : (M >= 312u && M <= 384u) || (M >= 520u && M <= 576u);
             if (K == 2048u && N == 32768u && iDtype == Dtype::Fp16 && M >= 768u && CEIL_DIV(M, 160u) * 160u - M <= 16u)
