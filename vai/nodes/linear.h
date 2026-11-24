@@ -1981,6 +1981,18 @@ inline Linear::PipeParamsTile amdPointLinearTile(
             // stream schedules give NaN at those sgM.
             if (K == 512u && N == 1536u)
                 return { 32, 192, 64, 32, 48, 128, 8, true, 32 };
+            // ACT encoder self-attention out_proj (M 302) and image feature projection (M 300),
+            // measured in the full forward, the fastest with fp32 input too.
+            if (K == 512u && N == 512u)
+                return { 32, 64, 64, 32, 16, 128, 8, true, 32, streamCursor };
+            // ACT decoder cross-attention k, v from the encoder output, measured at M 302 in the
+            // full forward with fp16 and fp32 input.
+            if (K == 512u && N == 1024u)
+                return { 32, 128, 32, 32, 32, 128, 8, true, 32 };
+            // ACT encoder ffn linear2, measured at M 302 in the full forward, the fastest with
+            // fp32 input too.
+            if (K == 3200u && N == 512u)
+                return { 32, 64, 32, 32, 32, 64, 8, true, 32, Linear::SchedulePrefetch };
             const bool fullBands =
                 iDtype == Dtype::Fp16 ? M <= 576u : (M >= 312u && M <= 384u) || (M >= 520u && M <= 576u);
             if (K == 2048u && N == 32768u && iDtype == Dtype::Fp16 && M >= 768u && CEIL_DIV(M, 160u) * 160u - M <= 16u)
@@ -2028,6 +2040,10 @@ inline Linear::PipeParamsTile amdPointLinearTile(
                 return iDtype == Dtype::Fp16
                            ? PointTile{ 64, 128, 64, 64, 32, 256, 0, true }
                            : PointTile{ 64, 128, 32, 64, 32, 256, 8, true };
+            // ACT decoder cross-attention out_proj, measured at M 100 in the full forward with
+            // fp16 and fp32 input.
+            if (K == 512u && N == 512u)
+                return { 32, 32, 64, 16, 16, 128, 4, true, 32, Linear::SchedulePrefetch | Linear::ScheduleVectorInput };
             if (K == 1024u && N == 1024u && iDtype == Dtype::Fp32)
                 return { 16, 64, 32, 16, 64, 64, 8, true };
             if (K == 1024u && N == 8192u)   // ex gate+up
