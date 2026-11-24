@@ -3193,7 +3193,8 @@ private:
     void prepareK3S2(const Workload& workload);
     void prepareImplicit(const Workload& workload);
     void prepareTensorStorage(const Workload& workload);
-    // fuseMaxPool's pass, after a plan that does not pool.
+    // fuseMaxPool: whether the plan for the workload pools, and the pass after a plan that does not.
+    bool planPoolsMaxPool(Workload workload);
     void prepareMaxPoolPass(const Workload& workload);
     bool hasPendingWeightTransforms() const;
     bool recordK3S1WeightTransforms(eva::CommandBuffer cmdBuff, const Workload& workload);
@@ -4948,14 +4949,7 @@ inline Workload Convolution::makeWorkload()
         .fusion = hasScale() ? ConvolutionFusion::Scale : ConvolutionFusion::Bias,
         .residual = config_.acceptResidual,
     };
-    // fuseMaxPool joins the kernel only where a fused rule covers the workload.
-    if (config_.fuseMaxPool)
-    {
-        Workload pooled = workload;
-        pooled.maxPool = true;
-        const K7S2ExactRule* rule = findK7S2ExactRule(device(), pooled);
-        workload.maxPool = rule != nullptr && validDirectK7S2(rule->plan, pooled);
-    }
+    workload.maxPool = config_.fuseMaxPool && planPoolsMaxPool(workload);
     return workload;
 }
 
@@ -6952,6 +6946,17 @@ inline void Convolution::prepare()
     preparePlan(workload, nextPlan);
     prepareTensorStorage(workload);
     prepareMaxPoolPass(workload);
+}
+
+// The plan selected for the workload with the pool fused: only a K7S2 rule with maxPool
+// gives one that pools, and only where it passes the plan's checks; any other plan
+// runs without the pool, which the pass then does.
+inline bool Convolution::planPoolsMaxPool(Workload workload)
+{
+    workload.maxPool = true;
+    const eva::Device currentDevice = device();
+    const ConvPlan plan = selectConvPlan(currentDevice, convolutionCaps(currentDevice), workload);
+    return plan.path == ConvPlan::Path::General && plan.implicit.directK7S2;
 }
 
 // pool2d's pipeline as MaxPool2d would pick it for the conv output.
