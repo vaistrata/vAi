@@ -1,6 +1,8 @@
 #include "python/bindings/nodes/bind-node.h"
 #include "python/bindings/nodes/kvcache-counter.h"
 #include "vai/nodes/rope.h"
+#include <nanobind/stl/array.h>
+#include <array>
 #include <cstdint>
 #include <optional>
 
@@ -8,76 +10,80 @@ namespace pyvai {
 
 namespace {
 
-// The core struct defaults the type and factor only, so the base is spelled
-// here; the frequency bounds sit at Llama 3's values, idle until LLAMA3 reads them.
+// The core struct defaults everything but the base, so it is spelled here.
 const vai::RopeConfig plainRope = {
     .base = 10000.0f,
-    .lowFreqFactor = 1.0f,
-    .highFreqFactor = 4.0f,
-    .originalMaxPos = 8192,
 };
 
 
 // Bound before RopeNode, whose signature refers to them.
 void bindRopeConfig(nb::module_& m)
 {
-    nb::enum_<vai::RopeType>(
+    nb::enum_<vai::RopePosType>(
         m,
-        "RopeType",
-        "How RopeConfig scales the frequencies: DEFAULT divides every frequency "
-        "by factor (1: unscaled), LLAMA3 divides only the long wavelengths and "
-        "interpolates the band between the two frequency bounds.")
-        .value("DEFAULT", vai::RopeType::Default)
-        .value("LLAMA3", vai::RopeType::Llama3);
+        "RopePosType",
+        "Where each rotated pair gets its position: SEQUENTIAL, a start position plus the "
+        "token's index; GRID2D, a ViT's raster grid, half the pairs turning by the row and "
+        "half by the column; MROPE, (t, h, w) per token, the pairs alternating t, h, w.")
+        .value("SEQUENTIAL", vai::RopePosType::Sequential)
+        .value("GRID2D", vai::RopePosType::Grid2D)
+        .value("MROPE", vai::RopePosType::MRoPE);
 
     auto cls =
         nb::class_<vai::RopeConfig>(m, "RopeConfig")
             .def(
                 "__init__",
                 [](vai::RopeConfig* self,
-                   vai::RopeType type,
+                   vai::RopePosType pos_type,
                    float base,
                    float factor,
+                   uint32_t original_max_pos,
                    float low_freq_factor,
                    float high_freq_factor,
-                   uint32_t original_max_pos) {
+                   std::array<uint32_t, 3> mrope_section) {
                     new (self) vai::RopeConfig{
-                        .type = type,
+                        .posType = pos_type,
                         .base = base,
                         .factor = factor,
+                        .originalMaxPos = original_max_pos,
                         .lowFreqFactor = low_freq_factor,
                         .highFreqFactor = high_freq_factor,
-                        .originalMaxPos = original_max_pos,
+                        .mropeSection = mrope_section,
                     };
                 },
-                nb::arg("type") = plainRope.type,
+                nb::arg("pos_type") = plainRope.posType,
                 nb::arg("base") = plainRope.base,
                 nb::arg("factor") = plainRope.factor,
+                nb::arg("original_max_pos") = plainRope.originalMaxPos,
                 nb::arg("low_freq_factor") = plainRope.lowFreqFactor,
                 nb::arg("high_freq_factor") = plainRope.highFreqFactor,
-                nb::arg("original_max_pos") = plainRope.originalMaxPos,
-                "RoPE frequencies of a model. The frequency bounds and original_max_pos "
-                "are read by LLAMA3 only. Consumers require base > 0, factor > 0, and "
-                "low_freq_factor != high_freq_factor for LLAMA3.")
-            .def_rw("type", &vai::RopeConfig::type)
+                nb::arg("mrope_section") = plainRope.mropeSection,
+                "RoPE parameters of a model, HF's rope_parameters. factor 1 leaves the "
+                "frequencies alone, any other divides them; a nonzero original_max_pos makes "
+                "it Llama 3's band, read with the two frequency bounds. mrope_section gives "
+                "MROPE's pairs on (t, h, w). Consumers require base > 0, factor > 0, and "
+                "low_freq_factor != high_freq_factor when original_max_pos is set.")
+            .def_rw("pos_type", &vai::RopeConfig::posType)
             .def_rw("base", &vai::RopeConfig::base)
             .def_rw("factor", &vai::RopeConfig::factor)
+            .def_rw("original_max_pos", &vai::RopeConfig::originalMaxPos)
             .def_rw("low_freq_factor", &vai::RopeConfig::lowFreqFactor)
             .def_rw("high_freq_factor", &vai::RopeConfig::highFreqFactor)
-            .def_rw("original_max_pos", &vai::RopeConfig::originalMaxPos)
+            .def_rw("mrope_section", &vai::RopeConfig::mropeSection)
             .def(
                 "__eq__",
                 [](const vai::RopeConfig& self, const vai::RopeConfig& other) {
-                    return self.type == other.type && self.base == other.base && self.factor == other.factor &&
-                           self.lowFreqFactor == other.lowFreqFactor && self.highFreqFactor == other.highFreqFactor &&
-                           self.originalMaxPos == other.originalMaxPos;
+                    return self.posType == other.posType && self.base == other.base && self.factor == other.factor &&
+                           self.originalMaxPos == other.originalMaxPos && self.lowFreqFactor == other.lowFreqFactor &&
+                           self.highFreqFactor == other.highFreqFactor && self.mropeSection == other.mropeSection;
                 },
                 nb::arg("other"),
                 nb::is_operator())
             .def("__repr__", [](const vai::RopeConfig& c) {
-                return nb::str("RopeConfig(type={}, base={}, factor={}, low_freq_factor={}, "
-                               "high_freq_factor={}, original_max_pos={})")
-                    .format(c.type, c.base, c.factor, c.lowFreqFactor, c.highFreqFactor, c.originalMaxPos);
+                return nb::str("RopeConfig(pos_type={}, base={}, factor={}, original_max_pos={}, "
+                               "low_freq_factor={}, high_freq_factor={}, mrope_section=[{}, {}, {}])")
+                    .format(c.posType, c.base, c.factor, c.originalMaxPos, c.lowFreqFactor, c.highFreqFactor,
+                            c.mropeSection[0], c.mropeSection[1], c.mropeSection[2]);
             });
     // A mutable value type with __eq__ is unhashable, as Python's rule has it.
     cls.attr("__hash__") = nb::none();
@@ -106,13 +112,13 @@ static void bindRope(nb::module_& m)
                                       },
                                       ""))
         .def(
-            "set_kv_cache_counter",
-            [](vai::node::Rope& self, KVCacheCounter& counter) { self.setKvCacheCounter(counter.buf); },
-            nb::arg("counter"),
-            // The counter's dtor destroys its buffer — pin it to the node.
+            "set_pos_param",
+            [](vai::node::Rope& self, KVCacheCounter& pos_param) { self.setPosParam(pos_param.buf); },
+            nb::arg("pos_param"),
+            // The position source owns its buffer — pin it to the node.
             nb::keep_alive<1, 2>(),
-            "Bind the KV-cache token counter that supplies this forward's "
-            "starting position. Required before the first forward.");
+            "Bind the uint the position type reads: the first input token's position, "
+            "or the grid width under AXIAL2D. Required before the first forward.");
 }
 PYVAI_NODE_BINDING(bindRope);
 

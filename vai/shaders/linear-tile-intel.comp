@@ -75,15 +75,15 @@ const uint SIMD = 16u;
 const uint OSV  = 32u;   // columns per subgroup = the packed block
 const uint TKO  = 4u;    // weights per lane per k pair
 
-layout(set = 0, binding = 0) writeonly buffer O_BUF_F32 { float bufferO_f32[]; };
-layout(set = 0, binding = 0) writeonly buffer O_BUF_F16 { float16_t bufferO_f16[]; };
+layout(set = 0, binding = 0) writeonly buffer O_BUF_F32 { float bO_f32[]; };
+layout(set = 0, binding = 0) writeonly buffer O_BUF_F16 { float16_t bO_f16[]; };
 //////////////////////////////////////////////////////////////////////////////
-layout(set = 0, binding = 1) readonly buffer I_BUF_F32 { float bufferI_f32[]; };
-layout(set = 0, binding = 1) readonly buffer I_BUF_F16 { float16_t bufferI_f16[]; };
+layout(set = 0, binding = 1) readonly buffer I_BUF_F32 { float bI_f32[]; };
+layout(set = 0, binding = 1) readonly buffer I_BUF_F16 { float16_t bI_f16[]; };
 //////////////////////////////////////////////////////////////////////////////
-layout(set = 0, binding = 2) readonly buffer W_BUF_F32  { float bufferW_f32[]; };
-layout(set = 0, binding = 2) readonly buffer W_BUF_F16  { float16_t bufferW_f16[]; };
-layout(set = 0, binding = 2) readonly buffer W_BUF_4F16 { uvec2 bufferW_4f16[]; };
+layout(set = 0, binding = 2) readonly buffer W_BUF_F32  { float bW_f32[]; };
+layout(set = 0, binding = 2) readonly buffer W_BUF_F16  { float16_t bW_f16[]; };
+layout(set = 0, binding = 2) readonly buffer W_BUF_4F16 { uvec2 bW_4f16[]; };
 
 layout(push_constant) uniform PushConstants {
     uint M;
@@ -92,10 +92,10 @@ layout(push_constant) uniform PushConstants {
     uint splitSize;   // K span per workgroup z (= K without splitting), a multiple of 16
 };
 
-float     readI(uint i)  { return (typeI == DTYPE_F32) ? bufferI_f32[i] : float(bufferI_f16[i]); }
-float16_t readIh(uint i) { return (typeI == DTYPE_F32) ? float16_t(bufferI_f32[i]) : bufferI_f16[i]; }
-float     readW(uint i)  { return (typeW == DTYPE_F32) ? bufferW_f32[i] : float(bufferW_f16[i]); }
-void writeO(uint i, float v) { if (typeO == DTYPE_F32) bufferO_f32[i] = v; else bufferO_f16[i] = float16_t(v); }
+float     readI(uint i)  { return (typeI == DTYPE_F32) ? bI_f32[i] : float(bI_f16[i]); }
+float16_t readIh(uint i) { return (typeI == DTYPE_F32) ? float16_t(bI_f32[i]) : bI_f16[i]; }
+float     readW(uint i)  { return (typeW == DTYPE_F32) ? bW_f32[i] : float(bW_f16[i]); }
+void writeO(uint i, float v) { if (typeO == DTYPE_F32) bO_f32[i] = v; else bO_f16[i] = float16_t(v); }
 
 // The epilogue (bias / activation / scale / residual, the GLU) when K is not split.
 #define LINEAR_STORE_BIAS_BINDING 3
@@ -108,13 +108,13 @@ void readW4(uint v, out float16_t w16[TKO], out float w32[TKO])
 {
     if (typeW == DTYPE_F16)
     {
-        const uvec2 u = bufferW_4f16[v];
+        const uvec2 u = bW_4f16[v];
         const f16vec2 a = unpackFloat2x16(u.x), b = unpackFloat2x16(u.y);
         w16[0] = a.x; w16[1] = a.y; w16[2] = b.x; w16[3] = b.y;
         [[unroll]] for (uint j = 0; j < TKO; j++) w32[j] = float(w16[j]);
     }
     else
-        [[unroll]] for (uint j = 0; j < TKO; j++) { w32[j] = bufferW_f32[v * TKO + j]; w16[j] = float16_t(w32[j]); }
+        [[unroll]] for (uint j = 0; j < TKO; j++) { w32[j] = bW_f32[v * TKO + j]; w16[j] = float16_t(w32[j]); }
 }
 
 void main()

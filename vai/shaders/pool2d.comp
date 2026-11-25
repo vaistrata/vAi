@@ -35,24 +35,24 @@ layout(constant_id = SPEC_ID_ALIGNED) const uint aligned = 0;  // 1: vec4 over c
 layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0;     // O (output) dtype
 layout(constant_id = SPEC_ID_TYPE_I) const uint typeI = 0;     // I (input) dtype
 
-layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_F32  { float bufferO_f32[]; };
-layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_F16  { float16_t bufferO_f16[]; };
-layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_4F32 { vec4 bufferO_4f32[]; };
-layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_4F16 { f16vec4 bufferO_4f16[]; };
+layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_F32  { float bO_f32[]; };
+layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_F16  { float16_t bO_f16[]; };
+layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_4F32 { vec4 bO_4f32[]; };
+layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_4F16 { f16vec4 bO_4f16[]; };
 //////////////////////////////////////////////////////////////////////////////
-layout(set = 0, binding = 1) restrict readonly buffer I_BUF_F32  { float bufferI_f32[]; };
-layout(set = 0, binding = 1) restrict readonly buffer I_BUF_F16  { float16_t bufferI_f16[]; };
-layout(set = 0, binding = 1) restrict readonly buffer I_BUF_4F32 { vec4 bufferI_4f32[]; };
-layout(set = 0, binding = 1) restrict readonly buffer I_BUF_4F16 { f16vec4 bufferI_4f16[]; };
+layout(set = 0, binding = 1) restrict readonly buffer I_BUF_F32  { float bI_f32[]; };
+layout(set = 0, binding = 1) restrict readonly buffer I_BUF_F16  { float16_t bI_f16[]; };
+layout(set = 0, binding = 1) restrict readonly buffer I_BUF_4F32 { vec4 bI_4f32[]; };
+layout(set = 0, binding = 1) restrict readonly buffer I_BUF_4F16 { f16vec4 bI_4f16[]; };
 
 layout(push_constant) uniform PushConstants {
     uint Hi, Wi, Ho, Wo, C;
 };
 
-float readI(uint i) { return (typeI == DTYPE_F32) ? bufferI_f32[i] : float(bufferI_f16[i]); }
-vec4 readI4(uint i) { return (typeI == DTYPE_F32) ? bufferI_4f32[i] : vec4(bufferI_4f16[i]); }
-void writeO(uint i, float v) { if (typeO == DTYPE_F32) bufferO_f32[i] = v; else bufferO_f16[i] = float16_t(v); }
-void writeO4(uint i, vec4 v) { if (typeO == DTYPE_F32) bufferO_4f32[i] = v; else bufferO_4f16[i] = f16vec4(v); }
+float readI(uint i) { return (typeI == DTYPE_F32) ? bI_f32[i] : float(bI_f16[i]); }
+vec4 readI4(uint i) { return (typeI == DTYPE_F32) ? bI_4f32[i] : vec4(bI_4f16[i]); }
+void writeO(uint i, float v) { if (typeO == DTYPE_F32) bO_f32[i] = v; else bO_f16[i] = float16_t(v); }
+void writeO4(uint i, vec4 v) { if (typeO == DTYPE_F32) bO_4f32[i] = v; else bO_4f16[i] = f16vec4(v); }
 
 #define FLT_LOWEST -3.402823466e+38
 

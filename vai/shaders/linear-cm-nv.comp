@@ -97,26 +97,26 @@ const float16_t FP16_MAX = 65504.0hf;     // largest finite fp16 value
 #define accT32 coopmat<float,     gl_ScopeSubgroup, tN, tM, gl_MatrixUseAccumulator>
 #define accT16 coopmat<float16_t, gl_ScopeSubgroup, tN, tM, gl_MatrixUseAccumulator>
 
-layout(set = 0, binding = 0) writeonly buffer O_BUF_F32 { float bufferO_f32[]; };
-layout(set = 0, binding = 0) writeonly buffer O_BUF_F16 { float16_t bufferO_f16[]; };
+layout(set = 0, binding = 0) writeonly buffer O_BUF_F32 { float bO_f32[]; };
+layout(set = 0, binding = 0) writeonly buffer O_BUF_F16 { float16_t bO_f16[]; };
 //////////////////////////////////////////////////////////////////////////////
-layout(set = 0, binding = 1) readonly buffer I_BUF_F32  { float bufferI_f32[]; };
-layout(set = 0, binding = 1) readonly buffer I_BUF_F16  { float16_t bufferI_f16[]; };
-layout(set = 0, binding = 1) readonly buffer I_BUF_8F32 { mat2x4 bufferI_8f32[]; };
-layout(set = 0, binding = 1) readonly buffer I_BUF_8F16 { f16mat2x4 bufferI_8f16[]; };
-layout(set = 0, binding = 1) readonly buffer I_BUF_4F32 { vec4 bufferI_4f32[]; };
-layout(set = 0, binding = 1) readonly buffer I_BUF_4F16 { f16vec4 bufferI_4f16[]; };
-layout(set = 0, binding = 1) readonly buffer I_BUF_2F32 { vec2 bufferI_2f32[]; };
-layout(set = 0, binding = 1) readonly buffer I_BUF_2F16 { f16vec2 bufferI_2f16[]; };
+layout(set = 0, binding = 1) readonly buffer I_BUF_F32  { float bI_f32[]; };
+layout(set = 0, binding = 1) readonly buffer I_BUF_F16  { float16_t bI_f16[]; };
+layout(set = 0, binding = 1) readonly buffer I_BUF_8F32 { mat2x4 bI_8f32[]; };
+layout(set = 0, binding = 1) readonly buffer I_BUF_8F16 { f16mat2x4 bI_8f16[]; };
+layout(set = 0, binding = 1) readonly buffer I_BUF_4F32 { vec4 bI_4f32[]; };
+layout(set = 0, binding = 1) readonly buffer I_BUF_4F16 { f16vec4 bI_4f16[]; };
+layout(set = 0, binding = 1) readonly buffer I_BUF_2F32 { vec2 bI_2f32[]; };
+layout(set = 0, binding = 1) readonly buffer I_BUF_2F16 { f16vec2 bI_2f16[]; };
 //////////////////////////////////////////////////////////////////////////////
-layout(set = 0, binding = 2) readonly buffer W_BUF_F32  { float bufferW_f32[]; };
-layout(set = 0, binding = 2) readonly buffer W_BUF_F16  { float16_t bufferW_f16[]; };
-layout(set = 0, binding = 2) readonly buffer W_BUF_8F32 { mat2x4 bufferW_8f32[]; };
-layout(set = 0, binding = 2) readonly buffer W_BUF_8F16 { f16mat2x4 bufferW_8f16[]; };
-layout(set = 0, binding = 2) readonly buffer W_BUF_4F32 { vec4 bufferW_4f32[]; };
-layout(set = 0, binding = 2) readonly buffer W_BUF_4F16 { f16vec4 bufferW_4f16[]; };
-layout(set = 0, binding = 2) readonly buffer W_BUF_2F32 { vec2 bufferW_2f32[]; };
-layout(set = 0, binding = 2) readonly buffer W_BUF_2F16 { f16vec2 bufferW_2f16[]; };
+layout(set = 0, binding = 2) readonly buffer W_BUF_F32  { float bW_f32[]; };
+layout(set = 0, binding = 2) readonly buffer W_BUF_F16  { float16_t bW_f16[]; };
+layout(set = 0, binding = 2) readonly buffer W_BUF_8F32 { mat2x4 bW_8f32[]; };
+layout(set = 0, binding = 2) readonly buffer W_BUF_8F16 { f16mat2x4 bW_8f16[]; };
+layout(set = 0, binding = 2) readonly buffer W_BUF_4F32 { vec4 bW_4f32[]; };
+layout(set = 0, binding = 2) readonly buffer W_BUF_4F16 { f16vec4 bW_4f16[]; };
+layout(set = 0, binding = 2) readonly buffer W_BUF_2F32 { vec2 bW_2f32[]; };
+layout(set = 0, binding = 2) readonly buffer W_BUF_2F16 { f16vec2 bW_2f16[]; };
 
 layout(push_constant) uniform PushConstants {
     uint M;
@@ -125,15 +125,15 @@ layout(push_constant) uniform PushConstants {
     uint splitSize;   // K span per workgroup-z (= K without splitting)
 };
 
-f16mat2x4 readI8(uint i8) { return (typeI == DTYPE_F32) ? f16mat2x4(bufferI_8f32[i8]) : bufferI_8f16[i8]; }
-f16mat2x4 readW8(uint i8) { return (typeW == DTYPE_F32) ? f16mat2x4(bufferW_8f32[i8]) : bufferW_8f16[i8]; }
-f16vec4   readI4(uint i4) { return (typeI == DTYPE_F32) ? f16vec4(bufferI_4f32[i4]) : bufferI_4f16[i4]; }
-f16vec4   readW4(uint i4) { return (typeW == DTYPE_F32) ? f16vec4(bufferW_4f32[i4]) : bufferW_4f16[i4]; }
-f16vec2   readI2(uint i2) { return (typeI == DTYPE_F32) ? f16vec2(bufferI_2f32[i2]) : bufferI_2f16[i2]; }
-f16vec2   readW2(uint i2) { return (typeW == DTYPE_F32) ? f16vec2(bufferW_2f32[i2]) : bufferW_2f16[i2]; }
-float16_t readI(uint i)   { return (typeI == DTYPE_F32) ? float16_t(bufferI_f32[i]) : bufferI_f16[i]; }
-float16_t readW(uint i)   { return (typeW == DTYPE_F32) ? float16_t(bufferW_f32[i]) : bufferW_f16[i]; }
-void writeO(uint i, float v) { if (typeO == DTYPE_F32) bufferO_f32[i] = v; else bufferO_f16[i] = float16_t(v); }
+f16mat2x4 readI8(uint i8) { return (typeI == DTYPE_F32) ? f16mat2x4(bI_8f32[i8]) : bI_8f16[i8]; }
+f16mat2x4 readW8(uint i8) { return (typeW == DTYPE_F32) ? f16mat2x4(bW_8f32[i8]) : bW_8f16[i8]; }
+f16vec4   readI4(uint i4) { return (typeI == DTYPE_F32) ? f16vec4(bI_4f32[i4]) : bI_4f16[i4]; }
+f16vec4   readW4(uint i4) { return (typeW == DTYPE_F32) ? f16vec4(bW_4f32[i4]) : bW_4f16[i4]; }
+f16vec2   readI2(uint i2) { return (typeI == DTYPE_F32) ? f16vec2(bI_2f32[i2]) : bI_2f16[i2]; }
+f16vec2   readW2(uint i2) { return (typeW == DTYPE_F32) ? f16vec2(bW_2f32[i2]) : bW_2f16[i2]; }
+float16_t readI(uint i)   { return (typeI == DTYPE_F32) ? float16_t(bI_f32[i]) : bI_f16[i]; }
+float16_t readW(uint i)   { return (typeW == DTYPE_F32) ? float16_t(bW_f32[i]) : bW_f16[i]; }
+void writeO(uint i, float v) { if (typeO == DTYPE_F32) bO_f32[i] = v; else bO_f16[i] = float16_t(v); }
 
 // One k-block of W (tileA) and I (tileB) rows, staged as f16vec2 slots.
 shared f16vec2 tileA[wgN * SHMEM_STRIDE];
@@ -365,14 +365,14 @@ void main()
                     accT32 v;
                     if (accType == DTYPE_F32) v = sums_f32[b * cmsN + a];
                     else               v = accT32(sums_f16[b * cmsN + a]);
-                    coopMatStore(v, bufferO_f32, zOff + m * N + n, N, gl_CooperativeMatrixLayoutColumnMajor);
+                    coopMatStore(v, bO_f32, zOff + m * N + n, N, gl_CooperativeMatrixLayoutColumnMajor);
                 }
                 else
                 {
                     accT16 v;
                     if (accType == DTYPE_F32) v = accT16(sums_f32[b * cmsN + a]);
                     else               v = sums_f16[b * cmsN + a];
-                    coopMatStore(v, bufferO_f16, zOff + m * N + n, N, gl_CooperativeMatrixLayoutColumnMajor);
+                    coopMatStore(v, bO_f16, zOff + m * N + n, N, gl_CooperativeMatrixLayoutColumnMajor);
                 }
             }
             else if (n < N && m < M)

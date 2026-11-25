@@ -1,11 +1,13 @@
 #include "tokenizer.h"
 #include "tiny-json.h"
+#include "unicode-nfc.h"
 
 #include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstdlib>
 #include <fstream>
+#include <iterator>
 #include <queue>
 #include <stdexcept>
 #include <string_view>
@@ -893,13 +895,172 @@ inline const ByteAlphabet& byteAlphabet()
 
 
 /////////////////////////////////////////////////////////////////////////////////////////
+// NFC - canonical composition (UAX #15) over the tables in unicode-nfc.h. Every
+// character is decomposed all the way, each run of combining marks is put in class
+// order, and each character then composes with the starter before it unless a
+// character between them blocks it. Hangul syllables are taken apart and put back
+// arithmetically.
+/////////////////////////////////////////////////////////////////////////////////////////
+namespace nfc {
+
+constexpr uint64_t kCode = (uint64_t{1} << 21) - 1;   // one packed code point
+constexpr uint64_t kPair = (uint64_t{1} << 42) - 1;   // a decomposition's two code points
+
+constexpr char32_t kSyllableBase = 0xAC00;
+constexpr char32_t kLeadBase = 0x1100;
+constexpr char32_t kVowelBase = 0x1161;
+constexpr char32_t kTrailBase = 0x11A7;   // one before the first trailing consonant
+constexpr uint32_t kLeadCount = 19;
+constexpr uint32_t kVowelCount = 21;
+constexpr uint32_t kTrailCount = 28;      // counting "none"
+constexpr uint32_t kSyllableCount = kLeadCount * kVowelCount * kTrailCount;
+
+inline bool isSyllable(char32_t c) { return c - kSyllableBase < kSyllableCount; }
+inline bool isVowel(char32_t c) { return c - kVowelBase < kVowelCount; }
+inline bool isTrail(char32_t c) { return c - (kTrailBase + 1) < kTrailCount - 1; }
+
+inline uint32_t combiningClass(char32_t c)
+{
+    if (c < 0x300)
+        return 0;
+    const auto& runs = unicode_nfc::kCombiningClasses;
+    auto it = std::upper_bound(std::begin(runs), std::end(runs), c, [](char32_t v, uint64_t run) { return v < (run >> 42); });
+    if (it == std::begin(runs))
+        return 0;
+    const uint64_t run = *--it;
+    return c <= ((run >> 21) & kCode) ? uint32_t(run & kCode) : 0;
+}
+
+// One level of c's canonical decomposition, or nullptr.
+inline const uint64_t* decomposition(char32_t c)
+{
+    const auto& entries = unicode_nfc::kDecompositions;
+    auto it = std::lower_bound(std::begin(entries), std::end(entries), c, [](uint64_t e, char32_t v) { return (e >> 42) < v; });
+    return it != std::end(entries) && (*it >> 42) == c ? it : nullptr;
+}
+
+inline void decompose(char32_t c, std::vector<char32_t>& out)
+{
+    if (isSyllable(c))
+    {
+        const uint32_t s = c - kSyllableBase;
+        out.push_back(kLeadBase + s / (kVowelCount * kTrailCount));
+        out.push_back(kVowelBase + s % (kVowelCount * kTrailCount) / kTrailCount);
+        if (s % kTrailCount)
+            out.push_back(kTrailBase + s % kTrailCount);
+        return;
+    }
+    const uint64_t* d = decomposition(c);
+    if (!d)
+    {
+        out.push_back(c);
+        return;
+    }
+    decompose(char32_t((*d >> 21) & kCode), out);
+    if (const char32_t second = char32_t(*d & kCode))
+        decompose(second, out);
+}
+
+// The primary composite of a followed by b, or 0 when they do not compose.
+inline char32_t compose(char32_t a, char32_t b)
+{
+    if (a - kLeadBase < kLeadCount && isVowel(b))
+        return kSyllableBase + ((a - kLeadBase) * kVowelCount + (b - kVowelBase)) * kTrailCount;
+    if (isSyllable(a) && (a - kSyllableBase) % kTrailCount == 0 && isTrail(b))
+        return a + (b - kTrailBase);
+
+    // kCompositions lists kDecompositions entries by pair, so the pair is found
+    // through the entry it points at.
+    const uint64_t pair = uint64_t(a) << 21 | b;
+    const auto& entries = unicode_nfc::kDecompositions;
+    const auto& byPair = unicode_nfc::kCompositions;
+    auto it = std::lower_bound(std::begin(byPair), std::end(byPair), pair,
+                               [&](uint16_t i, uint64_t v) { return (entries[i] & kPair) < v; });
+    return it != std::end(byPair) && (entries[*it] & kPair) == pair ? char32_t(entries[*it] >> 42) : 0;
+}
+
+// c stays as it is in any context: it neither decomposes for good, carries a
+// class, nor composes with a character before it.
+inline bool isStable(char32_t c)
+{
+    if (c < 0x300 || isSyllable(c))
+        return true;
+    if (isVowel(c) || isTrail(c) || combiningClass(c) != 0)
+        return false;
+    if (std::binary_search(std::begin(unicode_nfc::kComposingStarters), std::end(unicode_nfc::kComposingStarters), uint32_t(c)))
+        return false;
+    const uint64_t* d = decomposition(c);
+    return !d || compose(char32_t((*d >> 21) & kCode), char32_t(*d & kCode)) == c;
+}
+
+}   // namespace nfc
+
+// Text made of stable characters is already NFC and is left untouched, which is
+// what almost every input is.
+inline void normalizeNfc(std::string& text)
+{
+    if (std::all_of(text.begin(), text.end(), [](unsigned char c) { return c < 0x80; }))
+        return;
+    bool stable = true;
+    utf8ForEach(text, [&](char32_t c) { stable = stable && nfc::isStable(c); });
+    if (stable)
+        return;
+
+    std::vector<char32_t> cps;
+    utf8ForEach(text, [&](char32_t c) { nfc::decompose(c, cps); });
+
+    for (size_t i = 0; i < cps.size();)
+    {
+        if (nfc::combiningClass(cps[i]) == 0)
+        {
+            ++i;
+            continue;
+        }
+        size_t end = i;
+        while (end < cps.size() && nfc::combiningClass(cps[end]) != 0)
+            ++end;
+        std::stable_sort(cps.begin() + i, cps.begin() + end,
+                         [](char32_t a, char32_t b) { return nfc::combiningClass(a) < nfc::combiningClass(b); });
+        i = end;
+    }
+
+    // lastClass is the class of the last character kept since the starter: 0 right
+    // after it, 256 when the text opens on a mark that has no starter to join.
+    size_t starter = 0;
+    size_t kept = 1;
+    uint32_t lastClass = nfc::combiningClass(cps[0]) ? 256 : 0;
+    for (size_t i = 1; i < cps.size(); ++i)
+    {
+        const char32_t c = cps[i];
+        const uint32_t cls = nfc::combiningClass(c);
+        if (lastClass < cls || lastClass == 0)
+            if (const char32_t composite = nfc::compose(cps[starter], c))
+            {
+                cps[starter] = composite;
+                continue;
+            }
+        if (cls == 0)
+            starter = kept;
+        lastClass = cls;
+        cps[kept++] = c;
+    }
+
+    std::string out;
+    out.reserve(text.size());
+    for (size_t i = 0; i < kept; ++i)
+        utf8Append(out, cps[i]);
+    text = std::move(out);
+}
+
+
+/////////////////////////////////////////////////////////////////////////////////////////
 // Text rewrites: the normalizer runs them over the input before tokenizing, the
 // decoder runs them back over each piece. Both pipelines in tokenizer.json are
-// sequences of the same two rewrites, so they share a type.
+// sequences of the same rewrites, so they share a type.
 /////////////////////////////////////////////////////////////////////////////////////////
 struct TextStep
 {
-    enum Kind { prepend, replace };
+    enum Kind { prepend, replace, nfc };
 
     Kind kind = replace;
     std::string from;   // replace: the literal being matched
@@ -913,6 +1074,11 @@ inline void applyTextSteps(const std::vector<TextStep>& steps, std::string& text
         if (step.kind == TextStep::prepend)
         {
             text.insert(0, step.to);
+            continue;
+        }
+        if (step.kind == TextStep::nfc)
+        {
+            normalizeNfc(text);
             continue;
         }
         if (step.from.empty())
@@ -1112,7 +1278,12 @@ inline bool jsonBool(const tinyjson::sj_Value& v)
 /////////////////////////////////////////////////////////////////////////////////////////
 class Tokenizer::Impl
 {
-    struct AddedToken { std::string content; bool special = false; };
+    struct AddedToken
+    {
+        std::string content;
+        bool special = false;
+        bool normalized = false;   // the reference matches it in the normalized text
+    };
 
     // One encode call owns one context. Temporary buffers live here, so the
     // encoding helpers keep their semantic interfaces instead of threading
@@ -1369,6 +1540,7 @@ private:
     std::vector<int> prefixIds_, suffixIds_;
     std::vector<std::string> prefixNames_, suffixNames_;   // resolved once the vocabulary is in
     std::vector<tokenizer_detail::SplitStep> splits_;
+    bool byteLevelWithoutRegex_ = false;
     std::vector<tokenizer_detail::TextStep> normalizeSteps_;   // input -> vocabulary spelling
     std::vector<tokenizer_detail::TextStep> decodeSteps_;      // one piece -> text
     std::array<int, 256> byteFallbackIds_{};   // byte -> "<0xNN>" id, -1 when absent
@@ -1429,8 +1601,8 @@ private:
         {
             std::string k(key.start, key.end);
             if      (k == "model")          loadModel(r, val, path);
-            else if (k == "added_tokens")   loadAddedTokens(r, val);
-            else if (k == "pre_tokenizer")  loadPreTokenizer(r, val, path);
+            else if (k == "added_tokens")   loadAddedTokens(r, val, path);
+            else if (k == "pre_tokenizer" && val.type != SJ_NULL) loadPreTokenizer(r, val, path);
             else if (k == "post_processor") loadPostProcessor(r, val);
             else if (k == "normalizer")     loadNormalizer(r, val, path);
             else if (k == "decoder")        loadDecoder(r, val, path);
@@ -1439,7 +1611,7 @@ private:
             throw std::runtime_error(std::string("tokenizer: JSON parse error: ") + r.error);
         if (bpeModel_.tokenCount() == 0)
             throw std::runtime_error("tokenizer: no vocabulary found in " + path);
-        if (splits_.empty() && codec_->requiresPreTokenizer())
+        if (splits_.empty() && !byteLevelWithoutRegex_ && codec_->requiresPreTokenizer())
             throw std::runtime_error("tokenizer: no pre-tokenizer split pattern found in " + path);
         // Fusing consecutive unknown tokens only changes anything if an unknown
         // token can be emitted at all, which byte fallback rules out.
@@ -1447,6 +1619,7 @@ private:
             throw std::runtime_error("tokenizer: model.fuse_unk is not supported — " + path);
 
         codec_->validate(bpeModel_, path);
+        validateNormalizedAddedTokens(path);
         buildByteFallbackTable(path);
         buildAddedTokenTrie();
 
@@ -1455,6 +1628,28 @@ private:
         for (const auto& name : suffixNames_)
             if (int id = pieceToId(name); id >= 0) suffixIds_.push_back(id);
         unkId_ = unkName_.empty() ? -1 : pieceToId(unkName_);
+    }
+
+    // Added tokens are matched in the raw input. For a normalized one that is the
+    // reference's match only while the rewrites leave its content alone; a prepend
+    // touches the start of the text, not the token.
+    void validateNormalizedAddedTokens(const std::string& path) const
+    {
+        std::vector<tokenizer_detail::TextStep> rewrites;
+        for (const auto& step : normalizeSteps_)
+            if (step.kind != tokenizer_detail::TextStep::prepend)
+                rewrites.push_back(step);
+
+        for (const auto& [id, tok] : addedById_)
+        {
+            if (!tok.normalized)
+                continue;
+            std::string content = tok.content;
+            tokenizer_detail::applyTextSteps(rewrites, content);
+            if (content != tok.content)
+                throw std::runtime_error(
+                    "tokenizer: the normalizer rewrites the normalized added token \"" + tok.content + "\" — " + path);
+        }
     }
 
     void buildAddedTokenTrie()
@@ -1570,7 +1765,9 @@ private:
 
         if (type == "Sequence")
             return;   // the children registered themselves
-        if (type == "Prepend" && haveTo)
+        if (type == "NFC")
+            step.kind = tokenizer_detail::TextStep::nfc;
+        else if (type == "Prepend" && haveTo)
             step.kind = tokenizer_detail::TextStep::prepend;
         else if (type == "Replace" && haveFrom && haveTo)
             step.kind = tokenizer_detail::TextStep::replace;
@@ -1759,7 +1956,9 @@ private:
         }
     }
 
-    void loadAddedTokens(tinyjson::sj_Reader& r, tinyjson::sj_Value arr)
+    // Whitespace stripping around a token and whole-word matching are not
+    // implemented, so a token that asks for them is refused.
+    void loadAddedTokens(tinyjson::sj_Reader& r, tinyjson::sj_Value arr, const std::string& path)
     {
         using namespace tinyjson;
         sj_Value entry;
@@ -1772,9 +1971,12 @@ private:
             while (sj_iter_object(&r, entry, &k, &v))
             {
                 std::string key(k.start, k.end);
-                if      (key == "id")      id = int(tokenizer_detail::jsonInt(v));
-                else if (key == "content") tok.content = tokenizer_detail::jsonString(v);
-                else if (key == "special") tok.special = tokenizer_detail::jsonBool(v);
+                if      (key == "id")         id = int(tokenizer_detail::jsonInt(v));
+                else if (key == "content")    tok.content = tokenizer_detail::jsonString(v);
+                else if (key == "special")    tok.special = tokenizer_detail::jsonBool(v);
+                else if (key == "normalized") tok.normalized = tokenizer_detail::jsonBool(v);
+                else if ((key == "lstrip" || key == "rstrip" || key == "single_word") && tokenizer_detail::jsonBool(v))
+                    throw std::runtime_error("tokenizer: added token field \"" + key + "\" is not supported — " + path);
             }
             if (id < 0 || tok.content.empty()) continue;
             addedByContent_[tok.content] = id;
@@ -1788,11 +1990,13 @@ private:
     {
         using namespace tinyjson;
         if (node.type != SJ_OBJECT)
-            return;
+            throw std::runtime_error("tokenizer: pre-tokenizer must be an object — " + path);
 
         std::string type, pattern, behavior;
         bool useRegex = true;   // ByteLevel splits on its own unless told not to
         bool invert = false;
+        bool hasChildren = false;
+        bool hasPattern = false;
         sj_Value k, v;
         while (sj_iter_object(&r, node, &k, &v))
         {
@@ -1815,15 +2019,21 @@ private:
             }
             else if (key == "pretokenizers")
             {
+                if (v.type != SJ_ARRAY)
+                    throw std::runtime_error("tokenizer: pretokenizers must be an array — " + path);
+                hasChildren = true;
                 sj_Value child;
                 while (sj_iter_array(&r, v, &child))
                     loadPreTokenizer(r, child, path);
             }
             else if (key == "pattern" && v.type == SJ_OBJECT)
             {
+                hasPattern = true;
                 sj_Value pk, pv;
                 while (sj_iter_object(&r, v, &pk, &pv))
                 {
+                    if (!pattern.empty() || pv.type != SJ_STRING || pv.start == pv.end)
+                        throw std::runtime_error("tokenizer: expected one non-empty Split pattern — " + path);
                     std::string pkey(pk.start, pk.end);
                     if (pkey == "Regex")
                         pattern = tokenizer_detail::jsonString(pv);
@@ -1853,10 +2063,27 @@ private:
             }
         }
 
-        if (pattern.empty() && type == "ByteLevel" && useRegex)
+        if (type != "Sequence" && type != "ByteLevel" && type != "Split")
+            throw std::runtime_error("tokenizer: unsupported pre-tokenizer type \"" + type + "\" — " + path);
+        if (type == "Sequence")
+        {
+            if (!hasChildren || hasPattern)
+                throw std::runtime_error("tokenizer: Sequence requires a pretokenizers array — " + path);
+            return;
+        }
+        if (hasChildren || (type == "ByteLevel" && hasPattern))
+            throw std::runtime_error("tokenizer: unexpected field for pre-tokenizer " + type + " — " + path);
+        if (type == "ByteLevel")
+        {
+            if (!useRegex)
+            {
+                byteLevelWithoutRegex_ = true;
+                return;
+            }
             pattern = tokenizer_detail::kByteLevelSplit;
-        if (pattern.empty())
-            return;   // a Sequence wrapper, or a ByteLevel that leaves splitting alone
+        }
+        else if (pattern.empty())
+            throw std::runtime_error("tokenizer: Split requires a non-empty pattern — " + path);
 
         using Split = tokenizer_detail::SplitStep;
         tokenizer_detail::SplitStep step;

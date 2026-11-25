@@ -60,33 +60,33 @@ layout(constant_id = SPEC_ID_ALIGNED) const uint aligned = 0;  // 1: vec4 I/O, o
 
 layout(local_size_x_id = 0) in;
 
-layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_F32 { float bufferO_f32[]; };
-layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_F16 { float16_t bufferO_f16[]; };
-layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_4F32 { vec4 bufferO_4f32[]; };
+layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_F32 { float bO_f32[]; };
+layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_F16 { float16_t bO_f16[]; };
+layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_4F32 { vec4 bO_4f32[]; };
 //////////////////////////////////////////////////////////////////////////////
-layout(set = 0, binding = 1) restrict readonly buffer I_BUF_F32 { float bufferI_f32[]; };
-layout(set = 0, binding = 1) restrict readonly buffer I_BUF_F16 { float16_t bufferI_f16[]; };
-layout(set = 0, binding = 1) restrict readonly buffer I_BUF_4F32 { vec4 bufferI_4f32[]; };
+layout(set = 0, binding = 1) restrict readonly buffer I_BUF_F32 { float bI_f32[]; };
+layout(set = 0, binding = 1) restrict readonly buffer I_BUF_F16 { float16_t bI_f16[]; };
+layout(set = 0, binding = 1) restrict readonly buffer I_BUF_4F32 { vec4 bI_4f32[]; };
 //////////////////////////////////////////////////////////////////////////////
-layout(set = 0, binding = 2) restrict readonly buffer SCALE_BUF_F32 { float bufferScale_f32[]; };
-layout(set = 0, binding = 2) restrict readonly buffer SCALE_BUF_F16 { float16_t bufferScale_f16[]; };
+layout(set = 0, binding = 2) restrict readonly buffer SCALE_BUF_F32 { float bScale_f32[]; };
+layout(set = 0, binding = 2) restrict readonly buffer SCALE_BUF_F16 { float16_t bScale_f16[]; };
 //////////////////////////////////////////////////////////////////////////////
-layout(set = 0, binding = 3) restrict readonly buffer SHIFT_BUF_F32 { float bufferShift_f32[]; };
-layout(set = 0, binding = 3) restrict readonly buffer SHIFT_BUF_F16 { float16_t bufferShift_f16[]; };
+layout(set = 0, binding = 3) restrict readonly buffer SHIFT_BUF_F32 { float bShift_f32[]; };
+layout(set = 0, binding = 3) restrict readonly buffer SHIFT_BUF_F16 { float16_t bShift_f16[]; };
 //////////////////////////////////////////////////////////////////////////////
-layout(set = 0, binding = 4) restrict readonly buffer RES_BUF_F32 { float bufferRes_f32[]; };
-layout(set = 0, binding = 4) restrict readonly buffer RES_BUF_F16 { float16_t bufferRes_f16[]; };
-layout(set = 0, binding = 4) restrict readonly buffer RES_BUF_4F32 { vec4 bufferRes_4f32[]; };
+layout(set = 0, binding = 4) restrict readonly buffer RES_BUF_F32 { float bRes_f32[]; };
+layout(set = 0, binding = 4) restrict readonly buffer RES_BUF_F16 { float16_t bRes_f16[]; };
+layout(set = 0, binding = 4) restrict readonly buffer RES_BUF_4F32 { vec4 bRes_4f32[]; };
 
 layout(push_constant) uniform PushConstants {
     float eps;
 };
 
-float readI(uint i)     { return (typeI == DTYPE_F32) ? bufferI_f32[i] : float(bufferI_f16[i]); }
-float readScale(uint c) { return (typeW == DTYPE_F32) ? bufferScale_f32[c] : float(bufferScale_f16[c]); }
-float readShift(uint c)  { return (hasShift == 0u) ? 0.0 : ((typeW == DTYPE_F32) ? bufferShift_f32[c] : float(bufferShift_f16[c])); }
-float readResidual(uint i) { return (typeI == DTYPE_F32) ? bufferRes_f32[i] : float(bufferRes_f16[i]); }
-void writeO(uint i, float v) { if (typeO == DTYPE_F32) bufferO_f32[i] = v; else bufferO_f16[i] = float16_t(v); }
+float readI(uint i)     { return (typeI == DTYPE_F32) ? bI_f32[i] : float(bI_f16[i]); }
+float readScale(uint c) { return (typeW == DTYPE_F32) ? bScale_f32[c] : float(bScale_f16[c]); }
+float readShift(uint c)  { return (hasShift == 0u) ? 0.0 : ((typeW == DTYPE_F32) ? bShift_f32[c] : float(bShift_f16[c])); }
+float readResidual(uint i) { return (typeI == DTYPE_F32) ? bRes_f32[i] : float(bRes_f16[i]); }
+void writeO(uint i, float v) { if (typeO == DTYPE_F32) bO_f32[i] = v; else bO_f16[i] = float16_t(v); }
 
 // The residual and the activation on an affine result, element i of O.
 float finishOutput(float value, uint i)
@@ -100,9 +100,9 @@ float finishOutput(float value, uint i)
 // The same for quad i4 of O; aligned keeps the residual fp32 too.
 vec4 finishOutput4(vec4 value, uint i4)
 {
-    if (hasResidual != 0u && residualOrder == 1u) value += bufferRes_4f32[i4];
+    if (hasResidual != 0u && residualOrder == 1u) value += bRes_4f32[i4];
     value = applyActivation(value);
-    if (hasResidual != 0u && residualOrder == 0u) value += bufferRes_4f32[i4];
+    if (hasResidual != 0u && residualOrder == 0u) value += bRes_4f32[i4];
     return value;
 }
 
@@ -120,7 +120,7 @@ vec2 accumAligned(uint base4, uint F4, float sh)
     vec4 q4  = vec4(0.0);
     for (uint j = gl_LocalInvocationID.x; j < F4; j += wgSize)
     {
-        vec4 d = bufferI_4f32[base4 + j] - sh4;
+        vec4 d = bI_4f32[base4 + j] - sh4;
         s4 += d;
         q4 += d * d;
     }
@@ -149,8 +149,8 @@ void normalizeAligned(uint base4, uint cBase, uint F4, float mean, float invStd)
     for (uint j = gl_LocalInvocationID.x; j < F4; j += wgSize)
     {
         uint c = cBase + j / HW4;
-        vec4 x = bufferI_4f32[base4 + j];
-        bufferO_4f32[base4 + j] = finishOutput4((x - vec4(mean)) * invStd * readScale(c) + readShift(c), base4 + j);
+        vec4 x = bI_4f32[base4 + j];
+        bO_4f32[base4 + j] = finishOutput4((x - vec4(mean)) * invStd * readScale(c) + readShift(c), base4 + j);
     }
 }
 
@@ -189,7 +189,7 @@ void main()
     vec2 partial;
     if (cached != 0u)
     {
-        if (mine) quad = bufferI_4f32[base4 + tid];
+        if (mine) quad = bI_4f32[base4 + tid];
         vec4 d = quad - vec4(sh);
         partial = vec2(d.x + d.y + d.z + d.w, d.x * d.x + d.y * d.y + d.z * d.z + d.w * d.w);
     }
@@ -264,7 +264,7 @@ void main()
         if (mine)
         {
             uint c = cBase + tid / (HW / 4u);
-            bufferO_4f32[base4 + tid] = finishOutput4((quad - vec4(mean)) * invStd * readScale(c) + readShift(c), base4 + tid);
+            bO_4f32[base4 + tid] = finishOutput4((quad - vec4(mean)) * invStd * readScale(c) + readShift(c), base4 + tid);
         }
     }
     else if (aligned != 0u) normalizeAligned(base4, cBase, F4, mean, invStd);

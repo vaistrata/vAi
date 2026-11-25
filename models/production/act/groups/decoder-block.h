@@ -54,12 +54,12 @@ struct DecoderBlock : public vai::NodeGroup
 
     DecoderBlock(Config config)
     : projKV({ .inDim = config.embedDim, .outDim = 2 * config.embedDim })
-    , splitKV({ -1, int64_t(2 * config.numHeads), int64_t(config.embedDim / config.numHeads) })
+    , splitKV({ 2 * config.numHeads, config.embedDim / config.numHeads }, 1)
     , perKV({ 1, 0, 2 })
-    , sliceK({ .axis = 0, .start = 0, .count = config.numHeads })
-    , sliceV({ .axis = 0, .start = config.numHeads, .count = config.numHeads })
+    , sliceK({ .axis = -3, .start = 0, .count = config.numHeads })
+    , sliceV({ .axis = -3, .start = config.numHeads, .count = config.numHeads })
     , attn({ .headDim = config.embedDim / config.numHeads, .numQHeads = config.numHeads })
-    , mergeOut({ -1, int64_t(config.embedDim) })
+    , mergeOut({ config.embedDim }, 2)
     , projOut({ .inDim = config.embedDim, .outDim = config.embedDim })
     , norm1({ .eps = config.normEps })
     , ffn({

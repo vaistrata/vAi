@@ -9,8 +9,8 @@
 
 layout(local_size_x = 128) in;
 
-layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_F16 { float16_t bufferO_f16[]; };
-layout(set = 0, binding = 1) restrict readonly buffer I_BUF_F16 { float16_t bufferI_f16[]; };
+layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_F16 { float16_t bO_f16[]; };
+layout(set = 0, binding = 1) restrict readonly buffer I_BUF_F16 { float16_t bI_f16[]; };
 
 layout(push_constant) uniform PushConstants {
     uint hi; uint wi; uint ho; uint wo; uint ci; uint co;
@@ -37,7 +37,7 @@ void main()
 
     if (m >= pc.co || k >= rawK)
     {
-        bufferO_f16[index] = float16_t(0.0);
+        bO_f16[index] = float16_t(0.0);
         return;
     }
 
@@ -50,5 +50,5 @@ void main()
     const uint sourceChannel = focusPatch * inputChannels + inputChannel;
     const uint sourceTap = (kh6 >> 1u) * 3u + (kw6 >> 1u);
     const uint sourceIndex = (m * pc.ci + sourceChannel) * 9u + sourceTap;
-    bufferO_f16[index] = bufferI_f16[sourceIndex];
+    bO_f16[index] = bI_f16[sourceIndex];
 }

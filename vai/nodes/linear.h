@@ -162,7 +162,7 @@ public:
         uint32_t schedule = 0;    // StrixSchedule bits
         uint32_t loadWidth = 0;   // amdStrixLoadWidth()
         WeightLayout weights = WeightLayout::Rows;
-        bool fused = false;   // bias / activation / residual / scale in the kernel: no reduce pass
+        bool fused = false;       // bias / activation / residual / scale in the kernel: no reduce pass
         bool hasBias = false, hasResidual = false;
         uint32_t biasRepeat = 0, residualRepeat = 0, scaleBits = 0;
         vai::Dtype accType = vai::Dtype::None;
@@ -306,11 +306,11 @@ public:
         uint32_t inDim;
         uint32_t outDim;
 
-        bool acceptResidual = false;  // input "residual"
+        bool acceptResidual = false;   // input "residual"
         vai::ResidualOrder residualOrder = vai::ResidualOrder::AfterActivation;
         // The activation on the output, or under glu on the gate.
         vai::ActType actType = vai::ActType::None;
-        float scalarScale = 1.0f;   // s, right after the activation
+        float scalarScale = 1.0f;      // s, right after the activation
 
         uint32_t splitSize = 0;   // split-K: K length per split (0: the vendor's count per shape)
 

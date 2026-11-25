@@ -45,9 +45,8 @@ struct PrefillNet : public vai::NeuralNet
           .imageSize = modelCfg.visionTrf.imageSize,
           .patchSize = modelCfg.visionTrf.patchSize,
           .embedDim = modelCfg.visionTrf.embedDim,
-          .allowBatch = true,
       })
-    , visionEncoder({ .base = modelCfg.visionTrf, .allowBatch = true })
+    , visionEncoder({ .base = modelCfg.visionTrf })
     , projector({
           .inDim = modelCfg.visionTrf.embedDim,
           .outDim = modelCfg.languageTrf.embedDim,

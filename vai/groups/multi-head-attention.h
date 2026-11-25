@@ -37,7 +37,6 @@ struct MultiHeadAttentionConfig
     float qkNormEps = 0.0f;      // per-head RMS norm on Q and K, before RoPE; 0 = none
     std::optional<vai::RopeConfig> ropeCfg;   // absent: no position encoding (e.g. a ViT)
     bool crossAttention = false;              // true: Q / K / V open as separate inputs in place of in0 (Separate only)
-    bool allowBatch = false;                  // true: a leading batch axis, kept the whole way
     bool acceptResidual = false; // open "residual" and fold its addend into the output projection
 };
 
@@ -56,13 +55,13 @@ struct MultiHeadAttention;
 
 /////////////////////////////////////////////////////////////////////////////////////////
 // MultiHeadAttention<Separate> - GQA, one projection per operand
-// Input: in0 [Tq, embedDim], or [B, Tq, embedDim] with allowBatch;
+// Input: in0 [..., Tq, embedDim];
 //        Q / K / V of that shape each in place of in0 with crossAttention;
 //        optional residual of the same shape
 // Output: out0 the shape of in0
 //
-// allowBatch's B sequences share the projections and attend apart. A KV cache holds
-// one position counter for every sequence, so a cached block wants B = 1.
+// The axes ahead of Tq index sequences that share the projections and attend apart.
+// A KV cache holds one position counter for all of them, so a cached block wants one.
 //
 // Q, K and V are projected apart, so RoPE and the QK norm reach Q and K without
 // touching V.
@@ -81,14 +80,14 @@ struct MultiHeadAttention<QkvLayout::Separate> : public vai::NodeGroup
     uint32_t Hkv;     // number of KV heads
 
     std::optional<vai::node::Identity> input;   // in0, absent with crossAttention
-    vai::node::Linear projQ, projK, projV;      // Q: [B, Tq, D] -> [B, Tq, Hq*Dh],  K/V: -> [B, Tq, Hkv*Dh]
-    vai::node::Reshape splitQ, splitK, splitV;  // Q: [B, Tq, Hq, Dh],               K/V: [B, Tq, Hkv, Dh]
+    vai::node::Linear projQ, projK, projV;      // Q: [..., Tq, D] -> [..., Tq, Hq*Dh],  K/V: -> [..., Tq, Hkv*Dh]
+    vai::node::Reshape splitQ, splitK, splitV;  // Q: [..., Tq, Hq, Dh],                 K/V: [..., Tq, Hkv, Dh]
     std::optional<vai::node::RmsNorm> normQ, normK;
-    vai::node::Permute perQ, perK, perV;        // Q: -> [B, Hq, Tq, Dh],            K/V: -> [B, Hkv, Tq, Dh]
+    vai::node::Permute perQ, perK, perV;        // Q: -> [..., Hq, Tq, Dh],              K/V: -> [..., Hkv, Tq, Dh]
     std::optional<vai::node::Rope> ropeQ, ropeK;
-    vai::node::Attention attn;                  //    -> [B, Tq, Hq, Dh]
-    vai::node::Reshape mergeOut;                //    -> [B, Tq, Hq*Dh]
-    vai::node::Linear projOut;                  // [B, Tq, Hq*Dh] -> [B, Tq, D]
+    vai::node::Attention attn;                  //    -> [..., Tq, Hq, Dh]
+    vai::node::Reshape mergeOut;                //    -> [..., Tq, Hq*Dh]
+    vai::node::Linear projOut;                  // [..., Tq, Hq*Dh] -> [..., Tq, D]
 
     MultiHeadAttention(Config config)
     : D(config.embedDim)
@@ -98,12 +97,12 @@ struct MultiHeadAttention<QkvLayout::Separate> : public vai::NodeGroup
     , projQ({ .inDim = D, .outDim = Hq * Dh })
     , projK({ .inDim = D, .outDim = Hkv * Dh })
     , projV({ .inDim = D, .outDim = Hkv * Dh })
-    , splitQ(config.allowBatch ? std::vector<int64_t>{ 0, -1, Hq, Dh } : std::vector<int64_t>{ -1, Hq, Dh })
-    , splitK(config.allowBatch ? std::vector<int64_t>{ 0, -1, Hkv, Dh } : std::vector<int64_t>{ -1, Hkv, Dh })
-    , splitV(config.allowBatch ? std::vector<int64_t>{ 0, -1, Hkv, Dh } : std::vector<int64_t>{ -1, Hkv, Dh })
-    , perQ(config.allowBatch ? std::vector<uint32_t>{ 0, 2, 1, 3 } : std::vector<uint32_t>{ 1, 0, 2 })
-    , perK(config.allowBatch ? std::vector<uint32_t>{ 0, 2, 1, 3 } : std::vector<uint32_t>{ 1, 0, 2 })
-    , perV(config.allowBatch ? std::vector<uint32_t>{ 0, 2, 1, 3 } : std::vector<uint32_t>{ 1, 0, 2 })
+    , splitQ({ Hq, Dh }, 1)
+    , splitK({ Hkv, Dh }, 1)
+    , splitV({ Hkv, Dh }, 1)
+    , perQ({ 1, 0, 2 })
+    , perK({ 1, 0, 2 })
+    , perV({ 1, 0, 2 })
     , attn({
           .headDim = Dh,
           .numQHeads = Hq,
@@ -112,7 +111,7 @@ struct MultiHeadAttention<QkvLayout::Separate> : public vai::NodeGroup
           .kvCacheDtype = config.kvCacheDtype,
           .kvCacheRing = config.kvCacheRing,
       })
-    , mergeOut(config.allowBatch ? std::vector<int64_t>{ 0, -1, Hq * Dh } : std::vector<int64_t>{ -1, Hq * Dh })
+    , mergeOut({ Hq * Dh }, 2)
     , projOut({ .inDim = Hq * Dh, .outDim = D, .acceptResidual = config.acceptResidual })
     {
         if (!config.crossAttention)
@@ -154,15 +153,22 @@ struct MultiHeadAttention<QkvLayout::Separate> : public vai::NodeGroup
     void setKvCacheCounter(eva::Buffer buffer)
     {
         attn.setKvCacheCounter(buffer);
-        if (ropeQ) ropeQ->setKvCacheCounter(buffer);
-        if (ropeK) ropeK->setKvCacheCounter(buffer);
+        if (ropeQ) ropeQ->setPosParam(buffer);
+        if (ropeK) ropeK->setPosParam(buffer);
+    }
+
+    // RoPE by the model's per-token positions rather than by the counter (see Rope).
+    void setPositions(eva::Buffer buffer)
+    {
+        if (ropeQ) ropeQ->setPositions(buffer);
+        if (ropeK) ropeK->setPositions(buffer);
     }
 };
 
 
 /////////////////////////////////////////////////////////////////////////////////////////
 // MultiHeadAttention<Fused> - GQA, one projection over Q, K and V together
-// Input: in0 [Tq, embedDim], or [B, Tq, embedDim] with allowBatch;
+// Input: in0 [..., Tq, embedDim];
 //        optional residual of the same shape
 // Output: out0 the shape of in0
 //
@@ -186,15 +192,15 @@ struct MultiHeadAttention<QkvLayout::Fused> : public vai::NodeGroup
     uint32_t Hq;      // number of query heads
     uint32_t Hkv;     // number of KV heads
 
-    vai::node::Linear projQKV;                     // [B, Tq, D] -> [B, Tq, (Hq + 2*Hkv)*Dh]
-    vai::node::Reshape splitHeads;                 //            -> [B, Tq, Hq + 2*Hkv, Dh]
-    vai::node::Permute perQKV;                     //            -> [B, Hq + 2*Hkv, Tq, Dh]
-    vai::node::Slice sliceQ, sliceK, sliceV;       //  Q: [B, Hq, Tq, Dh],  K/V: [B, Hkv, Tq, Dh]
+    vai::node::Linear projQKV;                     // [..., Tq, D] -> [..., Tq, (Hq + 2*Hkv)*Dh]
+    vai::node::Reshape splitHeads;                 //              -> [..., Tq, Hq + 2*Hkv, Dh]
+    vai::node::Permute perQKV;                     //              -> [..., Hq + 2*Hkv, Tq, Dh]
+    vai::node::Slice sliceQ, sliceK, sliceV;       //  Q: [..., Hq, Tq, Dh],  K/V: [..., Hkv, Tq, Dh]
     std::optional<vai::node::RmsNorm> normQ, normK;
     std::optional<vai::node::Rope> ropeQ, ropeK;
-    vai::node::Attention attn;                     //            -> [B, Tq, Hq, Dh]
-    vai::node::Reshape mergeOut;                   //            -> [B, Tq, Hq*Dh]
-    vai::node::Linear projOut;                     // [B, Tq, Hq*Dh] -> [B, Tq, D]
+    vai::node::Attention attn;                     //              -> [..., Tq, Hq, Dh]
+    vai::node::Reshape mergeOut;                   //              -> [..., Tq, Hq*Dh]
+    vai::node::Linear projOut;                     // [..., Tq, Hq*Dh] -> [..., Tq, D]
 
     MultiHeadAttention(Config config)
     : D(config.embedDim)
@@ -202,12 +208,11 @@ struct MultiHeadAttention<QkvLayout::Fused> : public vai::NodeGroup
     , Hq(config.numQHeads ? config.numQHeads : config.embedDim / config.headDim)
     , Hkv(config.numKVHeads ? config.numKVHeads : Hq)
     , projQKV({ .inDim = D, .outDim = (Hq + 2 * Hkv) * Dh })
-    , splitHeads(config.allowBatch ? std::vector<int64_t>{ 0, -1, Hq + 2 * Hkv, Dh }
-                                   : std::vector<int64_t>{ -1, Hq + 2 * Hkv, Dh })
-    , perQKV(config.allowBatch ? std::vector<uint32_t>{ 0, 2, 1, 3 } : std::vector<uint32_t>{ 1, 0, 2 })
-    , sliceQ({ .axis = config.allowBatch ? 1u : 0u, .start = 0, .count = Hq })
-    , sliceK({ .axis = config.allowBatch ? 1u : 0u, .start = Hq, .count = Hkv })
-    , sliceV({ .axis = config.allowBatch ? 1u : 0u, .start = Hq + Hkv, .count = Hkv })
+    , splitHeads({ Hq + 2 * Hkv, Dh }, 1)
+    , perQKV({ 1, 0, 2 })
+    , sliceQ({ .axis = -3, .start = 0, .count = Hq })
+    , sliceK({ .axis = -3, .start = Hq, .count = Hkv })
+    , sliceV({ .axis = -3, .start = Hq + Hkv, .count = Hkv })
     , attn({
           .headDim = Dh,
           .numQHeads = Hq,
@@ -216,7 +221,7 @@ struct MultiHeadAttention<QkvLayout::Fused> : public vai::NodeGroup
           .kvCacheDtype = config.kvCacheDtype,
           .kvCacheRing = config.kvCacheRing,
       })
-    , mergeOut(config.allowBatch ? std::vector<int64_t>{ 0, -1, Hq * Dh } : std::vector<int64_t>{ -1, Hq * Dh })
+    , mergeOut({ Hq * Dh }, 2)
     , projOut({ .inDim = Hq * Dh, .outDim = D, .acceptResidual = config.acceptResidual })
     {
         // One projection reads one input, so it has no Q / K / V of its own.
@@ -237,8 +242,8 @@ struct MultiHeadAttention<QkvLayout::Fused> : public vai::NodeGroup
 
         // clang-format off
         projQKV - splitHeads - perQKV - sliceQ - normQ - ropeQ - "Q"/attn;
-        perQKV - sliceK - normK - ropeK - "K"/attn;
-        perQKV - sliceV                 - "V"/attn - mergeOut - projOut;
+                               perQKV - sliceK - normK - ropeK - "K"/attn;
+                               perQKV - sliceV                 - "V"/attn - mergeOut - projOut;
         // clang-format on
 
         defineSlot("in0", projQKV.slot("in0"));
@@ -252,8 +257,15 @@ struct MultiHeadAttention<QkvLayout::Fused> : public vai::NodeGroup
     void setKvCacheCounter(eva::Buffer buffer)
     {
         attn.setKvCacheCounter(buffer);
-        if (ropeQ) ropeQ->setKvCacheCounter(buffer);
-        if (ropeK) ropeK->setKvCacheCounter(buffer);
+        if (ropeQ) ropeQ->setPosParam(buffer);
+        if (ropeK) ropeK->setPosParam(buffer);
+    }
+
+    // RoPE by the model's per-token positions rather than by the counter (see Rope).
+    void setPositions(eva::Buffer buffer)
+    {
+        if (ropeQ) ropeQ->setPositions(buffer);
+        if (ropeK) ropeK->setPositions(buffer);
     }
 };
 

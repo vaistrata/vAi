@@ -104,7 +104,7 @@ input - projV - splitV         - perV         - "V"/attn - mergeOut - projOut;
 
 Gemma 3 creates `normQ` and `normK`, which RMS-normalize Q and K per head before RoPE. `projOut` does not take the residual; `norm2` adds it.
 
-`Rope` shares the KV cache token counter, so rotation uses the cumulative absolute position even during decode steps, rather than the offset within the current forward pass.
+The model supplies the position of the first input token through `Rope::setStartPos()`. RoPE adds the index of each token within the input to that starting position.
 
 #### GatedFeedForward
 

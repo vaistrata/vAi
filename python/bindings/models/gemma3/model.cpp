@@ -17,6 +17,9 @@ namespace pyvai {
 
 namespace {
 
+// Python exposes the image token count before constructing an encoder.
+constexpr uint32_t tokensPerImage =
+    gemma3::VisionConfig::trf.numPatches() / (gemma3::VisionConfig::mergeSize * gemma3::VisionConfig::mergeSize);
 // ModelConfig::get() by name: the presets table holds plain functions.
 const Presets<gemma3::ModelConfig>& gemma3Presets()
 {
@@ -53,10 +56,9 @@ void checkConfig(const gemma3::ModelConfig& c, uint32_t prefillChunk)
         configError(who, "config.max_trained_context must be >= 1: the KV cache is clamped to it");
 
     // A prefill chunk holds an image whole.
-    constexpr uint32_t tokensPerImage = gemma3::group::VisionEncoder::tokensPerImage;
-    if (c.vision && prefillChunk != 0 && prefillChunk < tokensPerImage)
+    if (c.hasVision() && (prefillChunk == 0 ? d.slidingWindow : prefillChunk) < tokensPerImage)
         configError(
-            who, "prefill_chunk must be 0 or at least " + std::to_string(tokensPerImage) + ", the tokens of one image");
+            who, "effective prefill_chunk must be at least " + std::to_string(tokensPerImage) + ", the tokens of one image");
 }
 
 }   // namespace
@@ -96,14 +98,14 @@ void bindGemma3(nb::module_& m)
         .def_rw("max_trained_context",
                 &gemma3::ModelConfig::maxTrainedContext,
                 "The trained context, which caps the KV cache.")
-        .def_rw("vision", &gemma3::ModelConfig::vision, "Whether the checkpoint takes images (the 4B and 12B VLMs).")
+        .def_prop_ro("vision", &gemma3::ModelConfig::hasVision, "Whether the checkpoint takes images.")
         .def_prop_ro_static(
             "image_size",
-            [](nb::handle) { return gemma3::group::VisionEncoder::config.imageSize; },
+            [](nb::handle) { return gemma3::VisionConfig::trf.imageSize; },
             "Side of the square image the vision encoder takes.")
         .def_prop_ro_static(
             "tokens_per_image",
-            [](nb::handle) { return gemma3::group::VisionEncoder::tokensPerImage; },
+            [](nb::handle) { return tokensPerImage; },
             "Soft tokens per image: the length of its placeholder run in a prompt.")
         .def_prop_ro_static(
             "image_token_id",
@@ -173,22 +175,21 @@ void bindGemma3(nb::module_& m)
             {
                 if (!nb::isinstance<vai::Tensor>(images))
                     throw nb::type_error("Gemma3Model.prefill: images must be a Tensor or None");
-                if (!model.modelCfg.vision)
+                if (!model.modelCfg.hasVision())
                     throw nb::value_error(
                         "Gemma3Model.prefill: this checkpoint has no vision encoder "
                         "(config.vision is False)");
                 batch = stageInput(self, "inImages", images, who);
                 // The model asserts the shape.
-                const auto& v = gemma3::group::VisionEncoder::config;
+                const auto& v = gemma3::VisionConfig::trf;
                 const auto& shape = batch.shape();
-                const size_t r = shape.size();
                 // clang-format off
-                if ((r != 3 && r != 4) || shape[r - 3] != v.imageChannels
-                    || shape[r - 2] != v.imageSize || shape[r - 1] != v.imageSize)
+                if (shape.size() != 4 || shape[1] != v.imageChannels
+                    || shape[2] != v.imageSize || shape[3] != v.imageSize)
                     throw nb::value_error(("Gemma3Model.prefill: images must be [B, "
                         + std::to_string(v.imageChannels) + ", "
                         + std::to_string(v.imageSize) + ", "
-                        + std::to_string(v.imageSize) + "], or one image without the B").c_str());
+                        + std::to_string(v.imageSize) + "]").c_str());
                 // clang-format on
             }
             {

@@ -10,10 +10,11 @@
                                     .chw();
     Tensor image = Tensor({3, 896, 896}).setFloats(pixels);
 
-  resize() and letterbox() run in call order. normalize(), standardize(), bgr()
-  and chw() describe the output, so where and how often they are called does not
-  matter; they ride on the writes of the last resize or letterbox, and
-  without one a single pass turns the decoded bytes into the output.
+  resize(), resizeShorter(), letterbox() and centerCrop() run in call order.
+  normalize(), standardize(), bgr() and chw() describe the output, so where and
+  how often they are called does not matter; they ride on the writes of the last
+  resize or letterbox, and without one a single pass turns the decoded bytes into
+  the output.
 
   The steps only record; converting to std::vector<float> runs them. Pixels are RGB,
   HWC and 0~255 unless bgr(), chw(), normalize() or standardize() says otherwise,
@@ -32,12 +33,22 @@
 
 namespace vai::utils {
 
+// Each mode reproduces one reference resampler, named by what it matches.
 enum class Resize
 {
+    // torch F.interpolate / cv2 on a float image: fixed taps, float arithmetic.
+    Nearest,                    // floor(i * scale), as torch's nearest and cv2 INTER_NEAREST
     Bilinear,                   // half-pixel centres, as cv2 and torchvision without antialias
     BilinearAlignCorners,       // corner pixels map to corner pixels
-    BilinearAntialias,          // Pillow: 22-bit integer coefficients, rounded to 0~255 after each axis
+    Bicubic,                    // torch bicubic without antialias: Keys a = -0.75, borders clamped
+
+    // Pillow / torchvision on uint8: the kernel widens with the downscale, fixed-point
+    // coefficients, rounded to 0~255 after each axis.
+    BilinearAntialias,          // Pillow BILINEAR, 22-bit coefficients
     BilinearAntialiasInt16,     // torchvision uint8 antialias: as above, coefficients capped to fit int16
+    BicubicAntialias,           // Pillow BICUBIC, Keys a = -0.5
+    BicubicAntialiasInt16,      // torchvision uint8 antialias, bicubic
+    LanczosAntialias,           // Pillow LANCZOS, three lobes
 };
 
 enum class Align
@@ -57,6 +68,15 @@ struct ImageGeometry
     float padY = 0.0f;
 };
 
+// A rectangle of an image, in pixels.
+struct Window
+{
+    uint32_t x = 0;
+    uint32_t y = 0;
+    uint32_t width = 0;
+    uint32_t height = 0;
+};
+
 
 class ImageProcessor
 {
@@ -73,7 +93,22 @@ public:
     // Squashes the image to size x size, ignoring the aspect ratio.
     auto&& resize(this auto&& self, uint32_t size, Resize mode = Resize::Bilinear)
     {
-        self.recordResize(size, mode);
+        self.recordResize(size, size, mode);
+        return std::forward<decltype(self)>(self);
+    }
+
+    // Squashes the image to width x height.
+    auto&& resize(this auto&& self, uint32_t width, uint32_t height, Resize mode = Resize::Bilinear)
+    {
+        self.recordResize(width, height, mode);
+        return std::forward<decltype(self)>(self);
+    }
+
+    // Scales the shorter side to size and the longer one by the same ratio, truncated
+    // as torchvision's Resize(int) and HF's shortest_edge do.
+    auto&& resizeShorter(this auto&& self, uint32_t size, Resize mode = Resize::Bilinear)
+    {
+        self.recordResizeShorter(size, mode);
         return std::forward<decltype(self)>(self);
     }
 
@@ -81,6 +116,21 @@ public:
     auto&& letterbox(this auto&& self, uint32_t size, Align align, float padValue, Resize mode = Resize::Bilinear)
     {
         self.recordLetterbox(size, align, padValue, mode);
+        return std::forward<decltype(self)>(self);
+    }
+
+    // Keeps the size x size square at the centre, its offset rounded down as HF's
+    // center_crop does.
+    auto&& centerCrop(this auto&& self, uint32_t size)
+    {
+        self.recordCenterCrop(size, size);
+        return std::forward<decltype(self)>(self);
+    }
+
+    // Keeps the width x height rectangle at the centre.
+    auto&& centerCrop(this auto&& self, uint32_t width, uint32_t height)
+    {
+        self.recordCenterCrop(width, height);
         return std::forward<decltype(self)>(self);
     }
 
@@ -119,11 +169,16 @@ public:
 
     const ImageGeometry& geometry() const { return imageGeometry; }
 
+    // The output's size after the steps recorded so far.
+    uint32_t outputWidth() const { return width; }
+    uint32_t outputHeight() const { return height; }
+
 private:
     struct Resample
     {
         uint32_t width;             // the resized image
         uint32_t height;
+        Window keep;                // the part of it written, narrowed by a crop after it
         uint32_t canvas;            // square it sits in, 0 for none
         uint32_t padX;
         uint32_t padY;
@@ -131,8 +186,10 @@ private:
         Resize mode;
     };
 
-    void recordResize(uint32_t size, Resize mode);
+    void recordResize(uint32_t width, uint32_t height, Resize mode);
+    void recordResizeShorter(uint32_t size, Resize mode);
     void recordLetterbox(uint32_t size, Align align, float padValue, Resize mode);
+    void recordCenterCrop(uint32_t cropWidth, uint32_t cropHeight);
     void recordNormalize(float min, float max);
     void recordStandardize(const std::array<float, 3>& mean, const std::array<float, 3>& std);
     void recordBgr();
@@ -159,6 +216,7 @@ private:
     std::array<float, 4> normStd{};
     uint32_t bufWidth;              // size of the image held now
     uint32_t bufHeight;
+    Window view;                    // the part of it the next pass reads, narrowed by a crop
     uint32_t width;                 // size after every recorded step
     uint32_t height;
     uint32_t channels;

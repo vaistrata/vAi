@@ -50,10 +50,12 @@ static void bindIndexCopy(nb::module_& m)
     bindNode<PyIndexCopy>(m, "IndexCopyNode",
                           "torch.index_copy along `axis`: out0 is in0 with slice index[n] taken from "
                           "slice n of in1, which is in0's shape with that axis replaced by len(index). "
-                          "Both inputs share a dtype. out0 aliases in0, so no other node may read in0 "
+                          "in1 may be fp32 or fp16 either way; in0's dtype is kept. out0 aliases in0, so no other node may read in0 "
                           "after this one; a forward without in1 passes in0 through. An index past "
-                          "in0's axis leaves its slice unwritten.",
-                          field("axis", &C::axis))
+                          "in0's axis leaves its slice unwritten. With `accumulate`, in1 is added "
+                          "instead (torch.index_add_), and the indices must be distinct.",
+                          field("axis", &C::axis),
+                          field("accumulate", &C::accumulate))
         .def(
             "set_index",
             [](PyIndexCopy& self, const std::vector<uint32_t>& index) {

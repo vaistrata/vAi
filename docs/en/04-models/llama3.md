@@ -93,7 +93,7 @@ input - projV - splitV         - perV         - "V"/attn - mergeOut - projOut;
 
 With `acceptResidual = true`, `projOut` receives the block's residual through `residual` and adds it to the projection result.
 
-`Rope` shares the KV cache token counter, so rotation uses the cumulative absolute position even during decode steps, rather than the offset within the current forward pass.
+The model supplies the position of the first input token through `Rope::setStartPos()`. RoPE adds the index of each token within the input to that starting position.
 
 #### GatedFeedForward
 

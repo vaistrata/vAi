@@ -16,25 +16,25 @@ layout(local_size_x = 256) in;
 layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0;  // O (output) dtype
 layout(constant_id = SPEC_ID_TYPE_I) const uint typeI = 0;  // I0..I7 dtype (shared)
 
-layout(set = 0, binding = 0) buffer O_BUF_F32  { float bufferO_f32[];  };
-layout(set = 0, binding = 0) buffer O_BUF_F16  { float16_t bufferO_f16[];  };
+layout(set = 0, binding = 0) buffer O_BUF_F32  { float bO_f32[];  };
+layout(set = 0, binding = 0) buffer O_BUF_F16  { float16_t bO_f16[];  };
 //////////////////////////////////////////////////////////////////////////////
-layout(set = 0, binding = 1) buffer I0_BUF_F32 { float bufferI0_f32[]; };
-layout(set = 0, binding = 1) buffer I0_BUF_F16 { float16_t bufferI0_f16[]; };
-layout(set = 0, binding = 2) buffer I1_BUF_F32 { float bufferI1_f32[]; };
-layout(set = 0, binding = 2) buffer I1_BUF_F16 { float16_t bufferI1_f16[]; };
-layout(set = 0, binding = 3) buffer I2_BUF_F32 { float bufferI2_f32[]; };
-layout(set = 0, binding = 3) buffer I2_BUF_F16 { float16_t bufferI2_f16[]; };
-layout(set = 0, binding = 4) buffer I3_BUF_F32 { float bufferI3_f32[]; };
-layout(set = 0, binding = 4) buffer I3_BUF_F16 { float16_t bufferI3_f16[]; };
-layout(set = 0, binding = 5) buffer I4_BUF_F32 { float bufferI4_f32[]; };
-layout(set = 0, binding = 5) buffer I4_BUF_F16 { float16_t bufferI4_f16[]; };
-layout(set = 0, binding = 6) buffer I5_BUF_F32 { float bufferI5_f32[]; };
-layout(set = 0, binding = 6) buffer I5_BUF_F16 { float16_t bufferI5_f16[]; };
-layout(set = 0, binding = 7) buffer I6_BUF_F32 { float bufferI6_f32[]; };
-layout(set = 0, binding = 7) buffer I6_BUF_F16 { float16_t bufferI6_f16[]; };
-layout(set = 0, binding = 8) buffer I7_BUF_F32 { float bufferI7_f32[]; };
-layout(set = 0, binding = 8) buffer I7_BUF_F16 { float16_t bufferI7_f16[]; };
+layout(set = 0, binding = 1) buffer I0_BUF_F32 { float bI0_f32[]; };
+layout(set = 0, binding = 1) buffer I0_BUF_F16 { float16_t bI0_f16[]; };
+layout(set = 0, binding = 2) buffer I1_BUF_F32 { float bI1_f32[]; };
+layout(set = 0, binding = 2) buffer I1_BUF_F16 { float16_t bI1_f16[]; };
+layout(set = 0, binding = 3) buffer I2_BUF_F32 { float bI2_f32[]; };
+layout(set = 0, binding = 3) buffer I2_BUF_F16 { float16_t bI2_f16[]; };
+layout(set = 0, binding = 4) buffer I3_BUF_F32 { float bI3_f32[]; };
+layout(set = 0, binding = 4) buffer I3_BUF_F16 { float16_t bI3_f16[]; };
+layout(set = 0, binding = 5) buffer I4_BUF_F32 { float bI4_f32[]; };
+layout(set = 0, binding = 5) buffer I4_BUF_F16 { float16_t bI4_f16[]; };
+layout(set = 0, binding = 6) buffer I5_BUF_F32 { float bI5_f32[]; };
+layout(set = 0, binding = 6) buffer I5_BUF_F16 { float16_t bI5_f16[]; };
+layout(set = 0, binding = 7) buffer I6_BUF_F32 { float bI6_f32[]; };
+layout(set = 0, binding = 7) buffer I6_BUF_F16 { float16_t bI6_f16[]; };
+layout(set = 0, binding = 8) buffer I7_BUF_F32 { float bI7_f32[]; };
+layout(set = 0, binding = 8) buffer I7_BUF_F16 { float16_t bI7_f16[]; };
 
 layout(push_constant) uniform PushConstants {
     uint totalElements;
@@ -44,20 +44,20 @@ layout(push_constant) uniform PushConstants {
     uint prefixSum[8]; // prefixSum[i] = dim0 + dim1 + ... + dim_i (inclusive)
 };
 
-void writeO(uint i, float v) { if (typeO == DTYPE_F32) bufferO_f32[i] = v; else bufferO_f16[i] = float16_t(v); }
+void writeO(uint i, float v) { if (typeO == DTYPE_F32) bO_f32[i] = v; else bO_f16[i] = float16_t(v); }
 
 float readInput(uint inputIdx, uint offset)
 {
     switch (inputIdx)
     {
-        case 0: return (typeI == DTYPE_F32) ? bufferI0_f32[offset] : float(bufferI0_f16[offset]);
-        case 1: return (typeI == DTYPE_F32) ? bufferI1_f32[offset] : float(bufferI1_f16[offset]);
-        case 2: return (typeI == DTYPE_F32) ? bufferI2_f32[offset] : float(bufferI2_f16[offset]);
-        case 3: return (typeI == DTYPE_F32) ? bufferI3_f32[offset] : float(bufferI3_f16[offset]);
-        case 4: return (typeI == DTYPE_F32) ? bufferI4_f32[offset] : float(bufferI4_f16[offset]);
-        case 5: return (typeI == DTYPE_F32) ? bufferI5_f32[offset] : float(bufferI5_f16[offset]);
-        case 6: return (typeI == DTYPE_F32) ? bufferI6_f32[offset] : float(bufferI6_f16[offset]);
-        case 7: return (typeI == DTYPE_F32) ? bufferI7_f32[offset] : float(bufferI7_f16[offset]);
+        case 0: return (typeI == DTYPE_F32) ? bI0_f32[offset] : float(bI0_f16[offset]);
+        case 1: return (typeI == DTYPE_F32) ? bI1_f32[offset] : float(bI1_f16[offset]);
+        case 2: return (typeI == DTYPE_F32) ? bI2_f32[offset] : float(bI2_f16[offset]);
+        case 3: return (typeI == DTYPE_F32) ? bI3_f32[offset] : float(bI3_f16[offset]);
+        case 4: return (typeI == DTYPE_F32) ? bI4_f32[offset] : float(bI4_f16[offset]);
+        case 5: return (typeI == DTYPE_F32) ? bI5_f32[offset] : float(bI5_f16[offset]);
+        case 6: return (typeI == DTYPE_F32) ? bI6_f32[offset] : float(bI6_f16[offset]);
+        case 7: return (typeI == DTYPE_F32) ? bI7_f32[offset] : float(bI7_f16[offset]);
     }
     return 0.0;
 }

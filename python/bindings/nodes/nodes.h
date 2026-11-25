@@ -41,7 +41,7 @@ inline void checkRopeConfig(const vai::RopeConfig& cfg, const char* who, const c
         fail("base must be > 0");
     if (!(cfg.factor > 0.0f))
         fail("factor must be > 0");
-    if (cfg.type == vai::RopeType::Llama3 && cfg.lowFreqFactor == cfg.highFreqFactor)
+    if (cfg.originalMaxPos > 0 && cfg.lowFreqFactor == cfg.highFreqFactor)
         fail("low_freq_factor and high_freq_factor must differ");
 }
 

@@ -17,16 +17,18 @@ namespace vai::node {
 
   out0 aliases in0 and only the N slices are written (= index_copy_), so no
   other node may read in0 after this one. in1 may be left out of a recording,
-  and out0 then aliases in0 with nothing recorded. Bytes move as they are, so
-  in0 and in1 share a dtype.
+  and out0 then aliases in0 with nothing recorded. in1 is converted to in0's
+  dtype when the two differ.
+
+  With accumulate, in1 is added instead, and the indices must be distinct.
 =============================================================================*/
 class IndexCopy : public Node
 {
     eva::ComputePipeline pipe;
     eva::DescriptorSet descSet;
     eva::Buffer index;
-    uint32_t vecWords = 0;      // 4-byte words one thread moves: 4, 2 or 1
-    uint32_t rowWords = 0;      // a slice row (the axes behind axis) in vecWords units
+    uint32_t vecElems = 0;      // elements one thread moves: 4, 2 or 1
+    uint32_t rowUnits = 0;      // a slice row (the axes behind axis) in vecElems units
     uint32_t count = 0;         // N
     uint32_t axisSize = 0;      // d(axis)
     uint32_t rows = 0;          // source rows: outer * N
@@ -35,6 +37,7 @@ class IndexCopy : public Node
 public:
     struct Config {
         uint32_t axis = 0;
+        bool accumulate = false;   // out0[.., index[n], ..] += in1[.., n, ..], as torch.index_put_(accumulate=True)
     } config_;
 
     IndexCopy();
@@ -69,7 +72,6 @@ inline void IndexCopy::prepare()
         return;
 
     VAI_ASSERT(index && "IndexCopy: setIndex() was never called");
-    VAI_ASSERT(dst.dtype() == src.dtype());
 
     const auto& dstShape = dst.shape();
     const auto& srcShape = src.shape();
@@ -83,14 +85,16 @@ inline void IndexCopy::prepare()
     rows     = outerSize(srcShape, srcShape.size() - axis - 1);
     VAI_ASSERT(index.size() >= uint64_t(count) * sizeof(uint32_t));
 
-    const uint64_t rowBytes = src.numBytes() / rows;
-    VAI_ASSERT(rowBytes % 4 == 0);
-    vecWords = rowBytes % 16 == 0 ? 4 : rowBytes % 8 == 0 ? 2 : 1;
-    rowWords = uint32_t(rowBytes / (4 * vecWords));
+    const uint64_t rowElems = src.numElements() / rows;
+    vecElems = rowElems % 4 == 0 ? 4 : rowElems % 2 == 0 ? 2 : 1;
+    rowUnits = uint32_t(rowElems / vecElems);
 
     // clang-format off
     pipe = pipelinePool().request("index-copy", {
-        eva::constant_id<0>(vecWords)       // vecWords
+        eva::constant_id<0>(vecElems),                  // vecElems
+        eva::constant_id<1>(config_.accumulate),        // accumulate
+        eva::constant_id<SPEC_ID_TYPE_O>(dst.dtype()),  // typeO
+        eva::constant_id<SPEC_ID_TYPE_I>(src.dtype())   // typeI
     });
     // clang-format on
     if (!descSet)
@@ -106,15 +110,15 @@ inline void IndexCopy::run(eva::CommandBuffer cmdBuff)
     auto srcBuf = (*this)["in1"].buffer();
 
     struct {
-        uint32_t rowWords, count, axisSize, rows;
-    } constants = { rowWords, count, axisSize, rows };
+        uint32_t rowUnits, count, axisSize, rows;
+    } constants = { rowUnits, count, axisSize, rows };
 
     descSet.write({ outBuf, srcBuf, index });
     cmdBuff
         .bindPipeline(pipe)
         .bindDescSets({descSet})
         .setPushConstants(0, sizeof(constants), &constants)
-        .dispatch2(rowWords, rows)
+        .dispatch2(rowUnits, rows)
         .barrier(eva::SYNC_SCOPE::COMPUTE_WRITE / outBuf / eva::SYNC_SCOPE::COMPUTE_READ);
 }
 

@@ -92,7 +92,7 @@ struct Net : public vai::NeuralNet
     vai::node::Concat catTokens;           // [2 + B*h*w, D]
     std::vector<group::EncoderBlock> encoder;
 
-    group::DecoderBlock decoder;   // [actionChunk, D]
+    group::DecoderBlock decoder;    // [actionChunk, D]
     vai::node::LayerNorm decoderNorm;
     vai::node::Linear actionHead;   // [actionChunk, actionDim]
 
@@ -108,7 +108,7 @@ struct Net : public vai::NeuralNet
     Net(const vai::NeuralNetConfig& netCfg, const ModelConfig& modelCfg)
     : NeuralNet(netCfg)
     , modelCfg(modelCfg)
-    , flatten({ 0, vai::group::ResNet18::outChannels, -1 })
+    , flatten({ -1 }, 2)
     , transpose({ 0, 2, 1 })
     , imageProj({ .inDim = vai::group::ResNet18::outChannels, .outDim = modelCfg.embedDim })
     , mergeCameras({ -1, int64_t(modelCfg.embedDim) })

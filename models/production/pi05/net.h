@@ -109,9 +109,8 @@ struct Net : public vai::NeuralNet
           .imageSize = modelCfg.visionTrf.imageSize,
           .patchSize = modelCfg.visionTrf.patchSize,
           .embedDim = modelCfg.visionTrf.embedDim,
-          .allowBatch = true,
       })
-    , visionEncoder({ .base = modelCfg.visionTrf, .allowBatch = true })
+    , visionEncoder({ .base = modelCfg.visionTrf })
     , projector({
           .inDim = modelCfg.visionTrf.embedDim,
           .outDim = modelCfg.languageTrf.embedDim,
@@ -205,4 +204,4 @@ struct Net : public vai::NeuralNet
 
 }   // namespace model::production::pi05
 
-#endif
+#endif   // PRODUCTION_PI05_NET_H

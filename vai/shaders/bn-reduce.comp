@@ -40,19 +40,19 @@ layout(constant_id = SPEC_ID_TYPE_P) const uint typeP = 0u;
 layout(constant_id = SPEC_ID_HAS_SCALE) const uint hasScale = 1u;
 layout(constant_id = SPEC_ID_HAS_BIAS) const uint hasBias = 1u;
 
-layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_F32 { float bufferO_f32[]; };
-layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_F16 { float16_t bufferO_f16[]; };
-layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_4F32 { vec4 bufferO_4f32[]; };
-layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_4F16 { f16vec4 bufferO_4f16[]; };
-layout(set = 0, binding = 1) restrict readonly buffer I_BUF_F32 { float bufferI_f32[]; };
-layout(set = 0, binding = 1) restrict readonly buffer I_BUF_4F32 { vec4 bufferI_4f32[]; };
-layout(set = 0, binding = 1) restrict readonly buffer I_BUF_4F16 { f16vec4 bufferI_4f16[]; };
-layout(set = 0, binding = 2) restrict readonly buffer BIAS_BUF_F32 { float bufferBias_f32[]; };
-layout(set = 0, binding = 2) restrict readonly buffer BIAS_BUF_F16 { float16_t bufferBias_f16[]; };
-layout(set = 0, binding = 3) restrict readonly buffer SCALE_BUF_F32 { float bufferScale_f32[]; };
-layout(set = 0, binding = 3) restrict readonly buffer SCALE_BUF_F16 { float16_t bufferScale_f16[]; };
-layout(set = 0, binding = 4) restrict readonly buffer RES_BUF_F32 { float bufferRes_f32[]; };
-layout(set = 0, binding = 4) restrict readonly buffer RES_BUF_F16 { float16_t bufferRes_f16[]; };
+layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_F32 { float bO_f32[]; };
+layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_F16 { float16_t bO_f16[]; };
+layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_4F32 { vec4 bO_4f32[]; };
+layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_4F16 { f16vec4 bO_4f16[]; };
+layout(set = 0, binding = 1) restrict readonly buffer I_BUF_F32 { float bI_f32[]; };
+layout(set = 0, binding = 1) restrict readonly buffer I_BUF_4F32 { vec4 bI_4f32[]; };
+layout(set = 0, binding = 1) restrict readonly buffer I_BUF_4F16 { f16vec4 bI_4f16[]; };
+layout(set = 0, binding = 2) restrict readonly buffer BIAS_BUF_F32 { float bBias_f32[]; };
+layout(set = 0, binding = 2) restrict readonly buffer BIAS_BUF_F16 { float16_t bBias_f16[]; };
+layout(set = 0, binding = 3) restrict readonly buffer SCALE_BUF_F32 { float bScale_f32[]; };
+layout(set = 0, binding = 3) restrict readonly buffer SCALE_BUF_F16 { float16_t bScale_f16[]; };
+layout(set = 0, binding = 4) restrict readonly buffer RES_BUF_F32 { float bRes_f32[]; };
+layout(set = 0, binding = 4) restrict readonly buffer RES_BUF_F16 { float16_t bRes_f16[]; };
 
 layout(push_constant) uniform PushConstants {
     uint hi;
@@ -78,29 +78,29 @@ void writeO(uint index, float value)
 {
     index += imageOutputBase;
     if (typeO == DTYPE_F32)
-        bufferO_f32[index] = value;
+        bO_f32[index] = value;
     else
-        bufferO_f16[index] = float16_t(value);
+        bO_f16[index] = float16_t(value);
 }
 
 void writeO4(uint index4, vec4 value)
 {
     index4 += imageOutputBase >> 2u;
     if (typeO == DTYPE_F32)
-        bufferO_4f32[index4] = value;
+        bO_4f32[index4] = value;
     else
-        bufferO_4f16[index4] = f16vec4(value);
+        bO_4f16[index4] = f16vec4(value);
 }
 
 float readBias(uint m)
 {
     if (hasBias == 0u) return 0.0;
-    return typeP == DTYPE_F32 ? bufferBias_f32[m] : float(bufferBias_f16[m]);
+    return typeP == DTYPE_F32 ? bBias_f32[m] : float(bBias_f16[m]);
 }
 
 float readScale(uint m)
 {
-    return typeP == DTYPE_F32 ? bufferScale_f32[m] : float(bufferScale_f16[m]);
+    return typeP == DTYPE_F32 ? bScale_f32[m] : float(bScale_f16[m]);
 }
 
 vec4 applyAffine(uint m, vec4 sum)
@@ -117,7 +117,7 @@ float applyAffine(uint m, float sum)
         : fma(sum, readScale(m), readBias(m));
 }
 
-float readResidual(uint i) { i += imageOutputBase; return typeI == DTYPE_F32 ? bufferRes_f32[i] : float(bufferRes_f16[i]); }
+float readResidual(uint i) { i += imageOutputBase; return typeI == DTYPE_F32 ? bRes_f32[i] : float(bRes_f16[i]); }
 vec4 readResidual4(uint i) { return vec4(readResidual(i), readResidual(i + 1u), readResidual(i + 2u), readResidual(i + 3u)); }
 
 // Output channel m, O[index].
@@ -157,7 +157,7 @@ void reduceReorder()
 
     vec4 sum = vec4(0.0);
     for (uint split = 0u; split < pc.splitCount; ++split)
-        sum += bufferI_4f32[(imagePartialBase >> 2u) + (transform * pc.splitCount + split) * plane4 + inner4];
+        sum += bI_4f32[(imagePartialBase >> 2u) + (transform * pc.splitCount + split) * plane4 + inner4];
 
     writeO4(index4, sum);
 }
@@ -171,7 +171,7 @@ void reduceF16()
 
     vec4 sum = vec4(0.0);
     for (uint split = 0u; split < pc.splitCount; ++split)
-        sum += vec4(bufferI_4f16[(imagePartialBase >> 2u) + split * total4 + index4]);
+        sum += vec4(bI_4f16[(imagePartialBase >> 2u) + split * total4 + index4]);
 
     const uint m = (index4 * 4u) / pc.n;
     writeO4(index4, applyOutput(m, index4 * 4u, sum));
@@ -188,7 +188,7 @@ void reduceF32()
 
         vec4 sum = vec4(0.0);
         for (uint split = 0u; split < pc.splitCount; ++split)
-            sum += bufferI_4f32[(imagePartialBase >> 2u) + split * total4 + index4];
+            sum += bI_4f32[(imagePartialBase >> 2u) + split * total4 + index4];
 
         const uint m = (index4 * 4u) / pc.n;
         writeO4(index4, applyOutput(m, index4 * 4u, sum));
@@ -208,10 +208,10 @@ void reduceF32()
         for (uint split = 0u; split < pc.splitCount; ++split)
         {
             const uint partialIndex = imagePartialBase + split * total + index;
-            sum += vec4(bufferI_f32[partialIndex],
-                        bufferI_f32[partialIndex + 1u],
-                        bufferI_f32[partialIndex + 2u],
-                        bufferI_f32[partialIndex + 3u]);
+            sum += vec4(bI_f32[partialIndex],
+                        bI_f32[partialIndex + 1u],
+                        bI_f32[partialIndex + 2u],
+                        bI_f32[partialIndex + 3u]);
         }
         writeO4(index >> 2u, applyOutput(m, index, sum));
         return;
@@ -224,7 +224,7 @@ void reduceF32()
         {
             float sum = 0.0;
             for (uint split = 0u; split < pc.splitCount; ++split)
-                sum += bufferI_f32[imagePartialBase + split * total + scalarIndex];
+                sum += bI_f32[imagePartialBase + split * total + scalarIndex];
 
             const uint scalarM = scalarIndex / pc.n;
             writeO(

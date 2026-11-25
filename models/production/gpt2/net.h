@@ -147,4 +147,4 @@ private:
 
 }   // namespace model::production::gpt2
 
-#endif
+#endif   // PRODUCTION_GPT2_NET_H

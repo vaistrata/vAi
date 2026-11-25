@@ -3,14 +3,14 @@
  for the cm-family GEMMs. MODE spec-constant selects the source layout:
  Bindings: O=0, I=1.
 
-   MODE 0 (1x1)        bufferI_f16[Co, Ci] -> bufferO_f16[Co/16][Ci/16][16][16]
+   MODE 0 (1x1)        bI_f16[Co, Ci] -> bO_f16[Co/16][Ci/16][16][16]
    MODE 1 (Winograd U) U[36, Co, Ci]  -> Ut[36][Co/16][Ci/16][16][16]  (36 batch)
-   MODE 2 (3x3 s2)     bufferI_f16[Co, Ci, 3,3] -> bufferO_f16[Co/16][K'/16][16][16],
+   MODE 2 (3x3 s2)     bI_f16[Co, Ci, 3,3] -> bO_f16[Co/16][K'/16][16][16],
                        K dim tap-major  k' = tap*Ci + ci,  tap = kh*3+kw  (K'=9Ci)
    MODE 3 (3x3 s1)     same source and fragment layout, but K is channel-major:
                        k' = ci*9 + tap. This keeps all nine taps of 16 input
                        channels in one K=144 panel for implicit-GEMM input reuse.
-   MODE 4 (general)    bufferI_f16[Co,Ci,K,K] -> padded 16x16 fragment layout;
+   MODE 4 (general)    bI_f16[Co,Ci,K,K] -> padded 16x16 fragment layout;
                        Co and Ci*K*K tails are explicitly zero-filled.
 
  Each 16x16 A-fragment becomes a contiguous 512B block (stride 16), so the
@@ -30,8 +30,8 @@ layout(constant_id = 0) const uint MODE = 0u;   // 0=1x1, 1=Winograd-U, 2/3=3x3,
 
 layout(local_size_x = 128) in;
 
-layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_F16 { float16_t bufferO_f16[]; };
-layout(set = 0, binding = 1) restrict readonly  buffer I_BUF_F16 { float16_t bufferI_f16[]; };
+layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_F16 { float16_t bO_f16[]; };
+layout(set = 0, binding = 1) restrict readonly  buffer I_BUF_F16 { float16_t bI_f16[]; };
 
 layout(push_constant) uniform PushConstants {
     uint hi;
@@ -49,17 +49,17 @@ layout(push_constant) uniform PushConstants {
 
 float16_t readI(uint index)
 {
-    return bufferI_f16[index];
+    return bI_f16[index];
 }
 
 void writeO(uint index, float16_t value)
 {
-    bufferO_f16[index] = value;
+    bO_f16[index] = value;
 }
 
 void main()
 {
-    uint index = gl_GlobalInvocationID.x;            // half index into bufferO_f16
+    uint index = gl_GlobalInvocationID.x;            // half index into bO_f16
 
     uint rawK     = MODE == 4u ? pc.ci * pc.kernel * pc.kernel
                   : (MODE == 2u || MODE == 3u) ? pc.ci * 9u : pc.ci;

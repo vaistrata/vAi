@@ -44,21 +44,24 @@ enum class ResidualOrder : uint32_t {
     BeforeActivation = 1,   // an Add ahead of the activation (e.g. ResNet's block, pi0's time MLP)
 };
 
-enum class RopeType {
-    Default,   // reads base and factor (1: unscaled)
-    Llama3,    // ... and the frequency bounds
+// How each rotated pair gets its position; values match rope.comp's POS_*.
+enum class RopePosType : uint32_t {
+    Sequential,   // token tq at a start position + tq
+    Grid2D,       // a ViT's raster grid: half the pairs turn by the row, half by the column
+    MRoPE,        // (t, h, w) per token from the model; the pairs alternate t, h, w
 };
 
-// RoPE frequency parameters. They describe a model, not a layer, so a model
-// config carries one and each attention passes it with its own headDim.
+// RoPE parameters, HF's rope_parameters. They describe a model, not a layer, so a
+// model config carries one and each attention passes it with its own headDim.
 struct RopeConfig
 {
-    RopeType type = RopeType::Default;
+    RopePosType posType = RopePosType::Sequential;
     float base;
-    float factor = 1.0f;   // Default divides every frequency by it, Llama3 the long wavelengths
-    float lowFreqFactor;
-    float highFreqFactor;
-    uint32_t originalMaxPos;
+    float factor = 1.0f;             // 1: unscaled; else divides the frequencies (Llama3: the long wavelengths)
+    uint32_t originalMaxPos = 0;     // 0: no Llama3 band; else Llama3 scales by the bounds below
+    float lowFreqFactor = 1.0f;      // Llama3
+    float highFreqFactor = 4.0f;     // Llama3
+    std::array<uint32_t, 3> mropeSection = {};   // MRoPE: pairs on (t, h, w), interleaved
 };
 
 

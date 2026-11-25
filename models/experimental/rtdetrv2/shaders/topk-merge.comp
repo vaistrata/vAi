@@ -18,10 +18,10 @@ layout(constant_id = 0) const uint K = 1;
 layout(constant_id = SPEC_ID_TYPE_I) const uint typeI = 0;
 
 // Intermediate output: interleaved (value bits, index). Final output: value bits.
-layout(set = 0, binding = 0) writeonly buffer O_BUF_U32 { uint bufferO_u32[]; };
-layout(set = 0, binding = 0) writeonly buffer O_BUF_U16 { uint16_t bufferO_u16[]; };
-layout(set = 0, binding = 1) readonly buffer I_BUF_2U32 { uvec2 bufferI_2u32[]; };
-layout(set = 0, binding = 2) writeonly buffer IDX_BUF_U32 { uint bufferIdx_u32[]; };
+layout(set = 0, binding = 0) writeonly buffer O_BUF_U32 { uint bO_u32[]; };
+layout(set = 0, binding = 0) writeonly buffer O_BUF_U16 { uint16_t bO_u16[]; };
+layout(set = 0, binding = 1) readonly buffer I_BUF_2U32 { uvec2 bI_2u32[]; };
+layout(set = 0, binding = 2) writeonly buffer IDX_BUF_U32 { uint bIdx_u32[]; };
 
 layout(push_constant) uniform PushConstants {
     uint groups;
@@ -73,14 +73,14 @@ void main()
     uint side = i / K, j = i % K, group = pair * 2 + side;
     if (group >= groups) return;
     uint rowBase = row * groups * K;
-    uvec2 value = bufferI_2u32[rowBase + group * K + j];
+    uvec2 value = bI_2u32[rowBase + group * K + j];
     uint other = pair * 2 + (1 - side), lo = 0, hi = other < groups ? K : 0;
     // rank = own-list rank + number of other-list entries preceding this one.
     // Identical padding goes left first, avoiding competing output writes.
     while (lo < hi)
     {
         uint mid = (lo + hi) / 2;
-        uvec2 candidate = bufferI_2u32[rowBase + other * K + mid];
+        uvec2 candidate = bI_2u32[rowBase + other * K + mid];
         if (topkBetter(candidate, value) || (side == 1 && all(equal(candidate, value))))
             lo = mid + 1;
         else
@@ -92,16 +92,16 @@ void main()
         if (nextGroups == 1)
         {
             if (typeI == 0u)
-                bufferO_u32[row * K + rank] = value.x;
+                bO_u32[row * K + rank] = value.x;
             else
-                bufferO_u16[row * K + rank] = uint16_t(value.x);
-            bufferIdx_u32[row * K + rank] = value.y;
+                bO_u16[row * K + rank] = uint16_t(value.x);
+            bIdx_u32[row * K + rank] = value.y;
         }
         else
         {
             uint outIndex = ((row * nextGroups + pair) * K + rank) * 2;
-            bufferO_u32[outIndex] = value.x;
-            bufferO_u32[outIndex + 1] = value.y;
+            bO_u32[outIndex] = value.x;
+            bO_u32[outIndex + 1] = value.y;
         }
     }
 }

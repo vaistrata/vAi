@@ -33,7 +33,7 @@ void setProfileTags(gemma3::Net& net)
     // Vision encoder
     if (net.visionEncoder)
     {
-        const auto& v = gemma3::group::VisionEncoder::config;
+        const auto& v = gemma3::VisionConfig::trf;
         auto& vision = net.visionEncoder.value();
 
         for (auto& b : vision.encoder.blocks)
@@ -56,15 +56,11 @@ void setProfileTags(gemma3::Net& net)
 
         vision.encoder.finalNorm.setProfileTag("Vision.LayerNorm");
 
-        vision.pool.setProfileTag("Vision.Pool");
-        vision.imageNorm.setProfileTag("Vision.RmsNorm");
-        net.projector->setProfileTag(towerLin("Vision", v.embedDim, trf.embedDim));
+        vision.connector.pool.setProfileTag("Vision.Pool");
+        vision.connector.tokenNorm.setProfileTag("Vision.RmsNorm");
+        vision.connector.projector.setProfileTag(towerLin("Vision", v.embedDim, trf.embedDim));
 
-#ifdef TEST_INDEX_COPY
         net.imageCopy.setProfileTag("Vision.IndexCopy");
-#else
-        net.imageScatter.setProfileTag("Vision.RowSliceScatter");
-#endif
     }
 
     // Text decoder

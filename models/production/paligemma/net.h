@@ -154,4 +154,4 @@ private:
 
 }   // namespace model::production::paligemma
 
-#endif
+#endif   // PRODUCTION_PALIGEMMA_NET_H

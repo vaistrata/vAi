@@ -668,6 +668,7 @@ Source: [`vai/nodes/index-copy.h`](../../vai/nodes/index-copy.h)
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `axis` | `uint32_t` | `0` |  |
+| `accumulate` | `bool` | `false` | out0[.., index[n], ..] += in1[.., n, ..], as torch.index_put_(accumulate=True) |
 
 **Behavior and constraints**
 
@@ -677,8 +678,10 @@ no re-recording. An index past d(axis) leaves its slice unwritten.
 
 out0 aliases in0 and only the N slices are written (= index_copy_), so no
 other node may read in0 after this one. in1 may be left out of a recording,
-and out0 then aliases in0 with nothing recorded. Bytes move as they are, so
-in0 and in1 share a dtype.
+and out0 then aliases in0 with nothing recorded. in1 is converted to in0's
+dtype when the two differ.
+
+With accumulate, in1 is added instead, and the indices must be distinct.
 
 **Kernels**
 
@@ -909,8 +912,8 @@ Source: [`vai/nodes/permute.h`](../../vai/nodes/permute.h)
 
 **Signature**
 
-- Input: in0 [D0, .., Dr-1], r = perms.size()
-- Output: axes reordered by perms; reshape-only fast path when layout is unchanged
+- Input: in0 [..., D0, .., Dk-1], k = perms.size()
+- Output: [..., the last k axes reordered by perms]; reshape-only fast path when layout is unchanged
 
 **Slots**
 
@@ -921,10 +924,12 @@ Source: [`vai/nodes/permute.h`](../../vai/nodes/permute.h)
 
 **Behavior and constraints**
 
-Output dimension i is input dimension perms[i], and perms must be a permutation of
-{0, .., r-1} with r at most PERMUTE_MAX_RANK. When the permutation preserves memory
-order and the dtype is unchanged, the output aliases the input; otherwise it uses new
-contiguous storage.
+perms reorders the last k axes of in0 and the axes ahead of them pass through, so a
+leading batch axis may be there or not. Among the last k, output dimension i is input
+dimension perms[i], and perms must be a permutation of {0, .., k-1}. The leading axes
+fold into one, so k (plus one when there are leading axes) is at most
+PERMUTE_MAX_RANK. When the permutation preserves memory order and the dtype is
+unchanged, the output aliases the input; otherwise it uses new contiguous storage.
 
 The rank is a specialization constant, so the pool holds one pipeline per rank.
 
@@ -983,7 +988,7 @@ Source: [`vai/nodes/reshape.h`](../../vai/nodes/reshape.h)
 **Signature**
 
 - Input: in0 [any shape]
-- Output: out0 [dims] (shares buffer with input)
+- Output: out0 [leading.., dims] (shares buffer with input)
 
 **Slots**
 
@@ -994,10 +999,11 @@ Source: [`vai/nodes/reshape.h`](../../vai/nodes/reshape.h)
 
 **Behavior and constraints**
 
-A dim is a size, 0 for the input's dimension at that same position, or -1 for
-whatever the element count leaves over, at most once (= ONNX). 0 carries a size only
-the caller's data knows without the graph naming it. The resolved dims must multiply
-to the input's element count. The output aliases the input buffer.
+The last trailingAxes axes of in0 become dims and the axes ahead of them pass
+through, so a leading batch axis may be there or not (= torch.unflatten /
+flatten). trailingAxes 0 means every axis. A dim is a size, or -1 for whatever
+the replaced axes leave over, at most once. The resolved dims must multiply to
+the replaced axes' element count. The output aliases the input buffer.
 
 ---
 
@@ -1055,9 +1061,9 @@ Source: [`vai/nodes/rope.h`](../../vai/nodes/rope.h)
 
 **Signature**
 
-- Input: in0 [.., H, Tq, Dh] (Q or K, Dh even)
-- Params: freqs [Dh/2] per-dimension angular frequency, built by the constructor
-- Output: out0 [.., H, Tq, Dh]
+- Input: in0 [..., H, Tq, Dh] (Q or K, Dh even)
+- Params: freqs [Dh/2] per-pair angular frequency, built by the constructor
+- Output: out0 [..., H, Tq, Dh]
 
 **Slots**
 
@@ -1079,12 +1085,17 @@ Source: [`vai/nodes/rope.h`](../../vai/nodes/rope.h)
 The rotation depends on the token position alone, so anything ahead of the head
 axis is one more sweep and folds into the head count.
 
-Positions continue from setKvCacheCounter()'s buffer, so a KV-cache decode
-step rotates by the absolute position rather than by its offset in this forward.
+The values in cfg pick how the frequencies are scaled: factor 1 leaves them
+alone, any other divides every one, and a nonzero originalMaxPos makes it
+Llama3's, dividing only the long wavelengths and interpolating the band between
+the two frequency bounds.
 
-cfg.type picks how the frequencies are scaled: Default divides every one by
-factor (1 leaves them alone), and Llama3 divides only the long wavelengths,
-interpolating the band between the two frequency bounds.
+cfg.posType fixes where positions come from. setPosParam() binds one uint, read
+at dispatch time, whose meaning the type gives:
+Sequential  token tq at posParam + tq, posParam the first token's position
+Grid2D      tokens are a raster grid posParam wide, row and column from tq
+MRoPE       each token's (t, h, w) from the buffer setPositions() binds;
+rope.comp picks the pair's axis from the sections
 
 **Kernels**
 
@@ -1147,13 +1158,13 @@ Source: [`vai/nodes/slice.h`](../../vai/nodes/slice.h)
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `axis` | `uint32_t` | `0` | the axis to cut; 0 takes a contiguous block |
+| `axis` | `int` | `0` | the axis to cut; negative counts from the end |
 | `start` | `int64_t` | Not specified | first index on the axis; negative counts from the end |
 | `count` | `uint32_t` | `1` | how many consecutive indices to take |
 
 **Behavior and constraints**
 
-A negative start counts from the end, with -1 selecting the last index.
+A negative axis or start counts from the end, with -1 selecting the last.
 
 What the axes ahead of the cut multiply to decides the cost, not the axis number.
 At 1 the run is one contiguous block, so out0 aliases it when the offset satisfies
@@ -1224,7 +1235,7 @@ Source: [`vai/nodes/topk-sampling.h`](../../vai/nodes/topk-sampling.h)
 
 **Signature**
 
-- Input: logits [.., N]
+- Input: logits [..., N]
 - Output: out0 [..] (one raw uint32 sampled index per row, in 4-byte slots)
 
 **Slots**

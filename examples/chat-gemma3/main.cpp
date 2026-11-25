@@ -79,7 +79,7 @@ struct ChatSession
     {
         // The rendered delta already starts with BOS on the first turn.
         std::vector<int> tokens =
-            tokenizer.encode(gemma3::expandImagePlaceholders(prompt, gemma3::group::VisionEncoder::tokensPerImage));
+            tokenizer.encode(gemma3::expandImagePlaceholders(prompt, net.visionEncoder ? net.visionEncoder->tokensPerImage : 0));
 
         if (net.tokensSoFar_ + tokens.size() > net.runtimeCfg.maxRuntimeContext)
             return std::nullopt;
@@ -147,9 +147,11 @@ void chat(gemma3::Net& net, const utils::Tokenizer& tokenizer)
         {
             if (!imagePaths.empty())
             {
+                if (!net.modelCfg.hasVision())
+                    throw std::runtime_error("This checkpoint has no vision encoder");
                 const uint32_t B = (uint32_t)imagePaths.size();
-                const uint32_t C = gemma3::group::VisionEncoder::config.imageChannels;
-                const uint32_t S = gemma3::group::VisionEncoder::config.imageSize;
+                const uint32_t C = gemma3::VisionConfig::trf.imageChannels;
+                const uint32_t S = gemma3::VisionConfig::trf.imageSize;
                 for (std::string& path : imagePaths)
                     path = VAI_DATA_DIR "/images/" + path;
                 images = Tensor({ B, C, S, S }).setFloats(gemma3::loadImages(imagePaths, S));

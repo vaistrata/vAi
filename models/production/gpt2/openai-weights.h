@@ -18,9 +18,13 @@
 
 namespace model::production::gpt2::openai {
 
+/////////////////////////////////////////////////////////////////////////////////////////
+// Weight loading - maps HuggingFace safetensors key names to model members
+//
 // HuggingFace GPT-2's checkpoint stores every linear transposed (PyTorch
 // Conv1D: [in, out]); vAi wants [out, in], so loadLin below transposes each.
 // The fused c_attn projection loads as-is — the model keeps Q, K and V fused.
+/////////////////////////////////////////////////////////////////////////////////////////
 inline void loadWeights(Net& net, const vai::Checkpoint& ckpt)
 {
     // Weights load at the net's wDefaultDtype, norm coefficients at Fp32.

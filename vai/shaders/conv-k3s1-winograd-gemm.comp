@@ -27,14 +27,14 @@ layout(constant_id = 10) const bool storeMode = false; // false: scalar output, 
 layout(constant_id = 11) const bool loadMode = false; // false: scalar staging, true: vec4 staging
 layout(constant_id = SPEC_ID_TYPE_W) const uint typeW = 0u;
 
-layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_F32 { float bufferO_f32[]; };
-layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_4F32 { vec4 bufferO_4f32[]; };
-layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_F16 { float16_t bufferO_f16[]; };
-layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_4F16 { f16vec4 bufferO_4f16[]; };
-layout(set = 0, binding = 1) restrict readonly  buffer I_BUF_F32 { float bufferI_f32[]; };
-layout(set = 0, binding = 1) restrict readonly  buffer I_BUF_F16 { float16_t bufferI_f16[]; };
-layout(set = 0, binding = 2) restrict readonly  buffer W_BUF_F32 { float bufferW_f32[]; };
-layout(set = 0, binding = 2) restrict readonly  buffer W_BUF_F16 { float16_t bufferW_f16[]; };
+layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_F32 { float bO_f32[]; };
+layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_4F32 { vec4 bO_4f32[]; };
+layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_F16 { float16_t bO_f16[]; };
+layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_4F16 { f16vec4 bO_4f16[]; };
+layout(set = 0, binding = 1) restrict readonly  buffer I_BUF_F32 { float bI_f32[]; };
+layout(set = 0, binding = 1) restrict readonly  buffer I_BUF_F16 { float16_t bI_f16[]; };
+layout(set = 0, binding = 2) restrict readonly  buffer W_BUF_F32 { float bW_f32[]; };
+layout(set = 0, binding = 2) restrict readonly  buffer W_BUF_F16 { float16_t bW_f16[]; };
 
 layout(push_constant) uniform PushConstants {
     uint hi;
@@ -65,8 +65,8 @@ shared float16_t As16[2][typeW == DTYPE_F16 ? A_ELEMS : 1u];
 shared float16_t Bs16[2][typeW == DTYPE_F16 ? B_ELEMS : 1u];
 shared f16vec4 B4s16[2][typeW == DTYPE_F16 ? B4_ELEMS : 1u];
 
-float readI(uint index) { return typeW == DTYPE_F32 ? bufferI_f32[index] : float(bufferI_f16[index]); }
-float readW(uint index) { return typeW == DTYPE_F32 ? bufferW_f32[index] : float(bufferW_f16[index]); }
+float readI(uint index) { return typeW == DTYPE_F32 ? bI_f32[index] : float(bI_f16[index]); }
+float readW(uint index) { return typeW == DTYPE_F32 ? bW_f32[index] : float(bW_f16[index]); }
 
 // TODO: Investigate NVIDIA specialization/DCE codegen for the dual FP32/FP16 shared-memory paths.
 // Keep the FP16 specialization first as a temporary workaround for the observed performance regression.
@@ -103,25 +103,25 @@ void writeO(uint i, uint n0, vec4 v)
     {
         if (remaining >= 4u)
         {
-            if (typeW == DTYPE_F32) bufferO_4f32[i >> 2u] = v;
-            else bufferO_4f16[i >> 2u] = f16vec4(v);
+            if (typeW == DTYPE_F32) bO_4f32[i >> 2u] = v;
+            else bO_4f16[i >> 2u] = f16vec4(v);
         }
         return;
     }
 
     if (typeW == DTYPE_F32)
     {
-        bufferO_f32[i] = v.x;
-        if (remaining > 1u) bufferO_f32[i + 1u] = v.y;
-        if (remaining > 2u) bufferO_f32[i + 2u] = v.z;
-        if (remaining > 3u) bufferO_f32[i + 3u] = v.w;
+        bO_f32[i] = v.x;
+        if (remaining > 1u) bO_f32[i + 1u] = v.y;
+        if (remaining > 2u) bO_f32[i + 2u] = v.z;
+        if (remaining > 3u) bO_f32[i + 3u] = v.w;
     }
     else
     {
-        bufferO_f16[i] = float16_t(v.x);
-        if (remaining > 1u) bufferO_f16[i + 1u] = float16_t(v.y);
-        if (remaining > 2u) bufferO_f16[i + 2u] = float16_t(v.z);
-        if (remaining > 3u) bufferO_f16[i + 3u] = float16_t(v.w);
+        bO_f16[i] = float16_t(v.x);
+        if (remaining > 1u) bO_f16[i + 1u] = float16_t(v.y);
+        if (remaining > 2u) bO_f16[i + 2u] = float16_t(v.z);
+        if (remaining > 3u) bO_f16[i + 3u] = float16_t(v.w);
     }
 
 }

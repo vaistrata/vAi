@@ -13,9 +13,8 @@ namespace vai::group {
 
 /////////////////////////////////////////////////////////////////////////////////////////
 // PatchEmbedding - square image to one token per non-overlapping patch
-// Input: in0 [C, S, S], or [B, C, S, S] with allowBatch
-// Output: out0 [N, embedDim], or [B, N, embedDim] with allowBatch,
-//         = project(patches(in0)), N = (S / patchSize)^2
+// Input: in0 [..., C, S, S]
+// Output: out0 [..., N, embedDim] = project(patches(in0)), N = (S / patchSize)^2
 //
 // The pixels past the last whole patch drop, as a stride-patchSize conv drops
 // them; when S is a multiple of patchSize the crop passes in0 through.
@@ -23,41 +22,36 @@ namespace vai::group {
 // A patch row carries (c, kh, kw), the order a [D, C, P, P] patch kernel already has, so
 // such a checkpoint loads as a [D, C*P*P] matrix with no repacking.
 //
-// The group takes one image. allowBatch adds a leading B that stays an axis of its own
-// the whole way, so the images never share a row: what one attends to downstream stops
-// at its own patches.
+// The axes ahead of C stay their own the whole way, so the images never share a row:
+// what one attends to downstream stops at its own patches.
 /////////////////////////////////////////////////////////////////////////////////////////
 struct PatchEmbedding : public vai::NodeGroup
 {
     uint32_t G;   // patches per side
     uint32_t K;   // C * P * P, one patch flattened into a row
 
-    vai::node::Slice cropRows;         // [B, C, S, S] -> [B, C, G * P, S]
-    vai::node::Slice cropCols;         //              -> [B, C, G * P, G * P]
-    vai::node::Reshape splitPatches;   //              -> [B, C, G, P, G, P]
-    vai::node::Permute perPatches;    //              -> [B, G, G, C, P, P]
-    vai::node::Reshape mergePatches;  //              -> [B, N, K], N = G * G
-    vai::node::Linear project;        // [B, N, K] -> [B, N, D], + bias[N, D] or bias[D]
+    vai::node::Slice cropRows;         // [..., C, S, S] -> [..., C, G * P, S]
+    vai::node::Slice cropCols;         //                -> [..., C, G * P, G * P]
+    vai::node::Reshape splitPatches;   //                -> [..., C, G, P, G, P]
+    vai::node::Permute perPatches;     //                -> [..., G, G, C, P, P]
+    vai::node::Reshape mergePatches;   //                -> [..., N, K], N = G * G
+    vai::node::Linear project;         // [..., N, K] -> [..., N, D], + bias[N, D] or bias[D]
 
     struct Config {
         uint32_t imageChannels;
         uint32_t imageSize;
         uint32_t patchSize;
         uint32_t embedDim;
-        bool allowBatch = false;   // true: a leading batch axis, kept the whole way
     };
 
     PatchEmbedding(Config config)
     : G(config.imageSize / config.patchSize)
     , K(config.imageChannels * config.patchSize * config.patchSize)
-    , cropRows({ .axis = config.allowBatch ? 2u : 1u, .start = 0, .count = G * config.patchSize })
-    , cropCols({ .axis = config.allowBatch ? 3u : 2u, .start = 0, .count = G * config.patchSize })
-    , splitPatches(
-          config.allowBatch
-              ? std::vector<int64_t>{ -1, config.imageChannels, G, config.patchSize, G, config.patchSize }
-              : std::vector<int64_t>{ config.imageChannels, G, config.patchSize, G, config.patchSize })
-    , perPatches(config.allowBatch ? std::vector<uint32_t>{ 0, 2, 4, 1, 3, 5 } : std::vector<uint32_t>{ 1, 3, 0, 2, 4 })
-    , mergePatches(config.allowBatch ? std::vector<int64_t>{ 0, G * G, K } : std::vector<int64_t>{ G * G, K })
+    , cropRows({ .axis = -2, .start = 0, .count = G * config.patchSize })
+    , cropCols({ .axis = -1, .start = 0, .count = G * config.patchSize })
+    , splitPatches({ config.imageChannels, G, config.patchSize, G, config.patchSize }, 3)
+    , perPatches({ 1, 3, 0, 2, 4 })
+    , mergePatches({ G * G, K }, 5)
     , project({ .inDim = K, .outDim = config.embedDim })
     {
         VAI_ASSERT(config.patchSize >= 1 && G >= 1);

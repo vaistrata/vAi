@@ -104,7 +104,7 @@ input - projV - splitV         - perV         - "V"/attn - mergeOut - projOut;
 
 Gemma 3에서는 `normQ`와 `normK`가 생겨 RoPE 전에 Q와 K를 헤드별로 RMS 정규화합니다. `projOut`은 잔차를 받지 않고, `norm2`가 더합니다.
 
-`Rope`는 KV 캐시 토큰 카운터를 공유해서, decode 스텝에서도 이번 forward 안의 오프셋이 아니라 누적 절대 위치로 회전합니다.
+모델은 이번 입력의 첫 토큰 위치를 `Rope::setStartPos()`로 연결합니다. RoPE는 이 시작 위치에 입력 안의 토큰 인덱스를 더해 회전 위치를 구합니다.
 
 #### GatedFeedForward
 

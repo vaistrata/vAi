@@ -32,15 +32,25 @@ struct PyImageProcessor
 
 void bindImageProcessor(nb::module_& m)
 {
-    nb::enum_<Resize>(m, "Resize", "How ImageProcessor resamples.")
+    nb::enum_<Resize>(m, "Resize", "How ImageProcessor resamples; each mode reproduces one reference.")
+        .value("NEAREST", Resize::Nearest,
+               "floor(i * scale), as torch's nearest and cv2 INTER_NEAREST.")
         .value("BILINEAR", Resize::Bilinear,
                "Half-pixel centres, as cv2 and torchvision without antialias.")
         .value("BILINEAR_ALIGN_CORNERS", Resize::BilinearAlignCorners,
                "Corner pixels map to corner pixels.")
+        .value("BICUBIC", Resize::Bicubic,
+               "torch bicubic without antialias: Keys a = -0.75, borders clamped.")
         .value("BILINEAR_ANTIALIAS", Resize::BilinearAntialias,
-               "Pillow: 22-bit integer coefficients, rounded to 0..255 after each axis.")
+               "Pillow BILINEAR: 22-bit integer coefficients, rounded to 0..255 after each axis.")
         .value("BILINEAR_ANTIALIAS_INT16", Resize::BilinearAntialiasInt16,
-               "torchvision uint8 antialias: as above, coefficients capped to fit int16.");
+               "torchvision uint8 antialias: as above, coefficients capped to fit int16.")
+        .value("BICUBIC_ANTIALIAS", Resize::BicubicAntialias,
+               "Pillow BICUBIC, Keys a = -0.5.")
+        .value("BICUBIC_ANTIALIAS_INT16", Resize::BicubicAntialiasInt16,
+               "torchvision uint8 antialias, bicubic.")
+        .value("LANCZOS_ANTIALIAS", Resize::LanczosAntialias,
+               "Pillow LANCZOS, three lobes.");
 
     nb::enum_<Align>(m, "Align", "Where a letterbox puts the image in its square.")
         .value("CENTER",   Align::Center)
@@ -86,7 +96,8 @@ void bindImageProcessor(nb::module_& m)
         "           .normalize(0.0, 1.0)\n"
         "           .chw()\n"
         "           .to_numpy())                    # [3, 640, 640] float32\n\n"
-        "resize() and letterbox() run in call order; normalize(), bgr() and chw() "
+        "resize(), resize_shorter(), letterbox() and center_crop() run in call order; "
+        "normalize(), bgr() and chw() "
         "describe the output, wherever they are called. The steps only record and "
         "to_numpy() runs them. Pixels are RGB, HWC and 0..255 by default.")
         .def(
@@ -143,6 +154,36 @@ void bindImageProcessor(nb::module_& m)
             "Squash the image to size x size, ignoring the aspect ratio."
         )
         .def(
+            "resize",
+            [](nb::handle_t<PyImageProcessor> self, uint32_t width, uint32_t height, Resize mode) -> nb::object
+            {
+                auto& p = nb::cast<PyImageProcessor&>(self);
+                p.proc.resize(width, height, mode);   // ValueError on a size of 0
+                p.width = width;
+                p.height = height;
+                return nb::borrow(self);
+            },
+            nb::arg("width"),
+            nb::arg("height"),
+            nb::arg("mode") = Resize::Bilinear,
+            "Squash the image to width x height."
+        )
+        .def(
+            "resize_shorter",
+            [](nb::handle_t<PyImageProcessor> self, uint32_t size, Resize mode) -> nb::object
+            {
+                auto& p = nb::cast<PyImageProcessor&>(self);
+                p.proc.resizeShorter(size, mode);   // ValueError on size 0
+                p.width = p.proc.outputWidth();
+                p.height = p.proc.outputHeight();
+                return nb::borrow(self);
+            },
+            nb::arg("size"),
+            nb::arg("mode") = Resize::Bilinear,
+            "Scale the shorter side to `size` and the longer one by the same ratio, "
+            "truncated as torchvision's Resize(int) and HF's shortest_edge do."
+        )
+        .def(
             "letterbox",
             [](nb::handle_t<PyImageProcessor> self, uint32_t size, Align align,
                float pad_value, Resize mode) -> nb::object
@@ -158,6 +199,33 @@ void bindImageProcessor(nb::module_& m)
             nb::arg("mode") = Resize::Bilinear,
             "Scale the longer side to `size` and fill the rest of the square with "
             "`pad_value`, a 0..255 pixel value normalized with the image."
+        )
+        .def(
+            "center_crop",
+            [](nb::handle_t<PyImageProcessor> self, uint32_t size) -> nb::object
+            {
+                auto& p = nb::cast<PyImageProcessor&>(self);
+                p.proc.centerCrop(size);   // ValueError unless it fits
+                p.width = p.height = size;
+                return nb::borrow(self);
+            },
+            nb::arg("size"),
+            "Keep the size x size square at the centre, its offset rounded down as "
+            "HF's center_crop does."
+        )
+        .def(
+            "center_crop",
+            [](nb::handle_t<PyImageProcessor> self, uint32_t width, uint32_t height) -> nb::object
+            {
+                auto& p = nb::cast<PyImageProcessor&>(self);
+                p.proc.centerCrop(width, height);
+                p.width = width;
+                p.height = height;
+                return nb::borrow(self);
+            },
+            nb::arg("width"),
+            nb::arg("height"),
+            "Keep the width x height rectangle at the centre."
         )
         .def(
             "normalize",

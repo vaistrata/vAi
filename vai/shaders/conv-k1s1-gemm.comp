@@ -35,25 +35,25 @@ layout(constant_id = SPEC_ID_TYPE_P) const uint typeP = 0u;
 layout(constant_id = SPEC_ID_HAS_SCALE) const uint hasScale = 0u;
 layout(constant_id = SPEC_ID_HAS_BIAS) const uint hasBias = 1u;
 
-layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_F32 { float bufferO_f32[]; };
-layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_F16 { float16_t bufferO_f16[]; };
-layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_4F32 { vec4 bufferO_4f32[]; };
-layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_4F16 { f16vec4 bufferO_4f16[]; };
+layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_F32 { float bO_f32[]; };
+layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_F16 { float16_t bO_f16[]; };
+layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_4F32 { vec4 bO_4f32[]; };
+layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_4F16 { f16vec4 bO_4f16[]; };
 
-layout(set = 0, binding = 1) restrict readonly buffer I_BUF_F32 { float bufferI_f32[]; };
-layout(set = 0, binding = 1) restrict readonly buffer I_BUF_F16 { float16_t bufferI_f16[]; };
-layout(set = 0, binding = 1) restrict readonly buffer I_BUF_4F32 { vec4 bufferI_4f32[]; };
-layout(set = 0, binding = 1) restrict readonly buffer I_BUF_4F16 { f16vec4 bufferI_4f16[]; };
+layout(set = 0, binding = 1) restrict readonly buffer I_BUF_F32 { float bI_f32[]; };
+layout(set = 0, binding = 1) restrict readonly buffer I_BUF_F16 { float16_t bI_f16[]; };
+layout(set = 0, binding = 1) restrict readonly buffer I_BUF_4F32 { vec4 bI_4f32[]; };
+layout(set = 0, binding = 1) restrict readonly buffer I_BUF_4F16 { f16vec4 bI_4f16[]; };
 
-layout(set = 0, binding = 2) restrict readonly buffer W_BUF_F32 { float bufferW_f32[]; };
-layout(set = 0, binding = 2) restrict readonly buffer W_BUF_F16 { float16_t bufferW_f16[]; };
+layout(set = 0, binding = 2) restrict readonly buffer W_BUF_F32 { float bW_f32[]; };
+layout(set = 0, binding = 2) restrict readonly buffer W_BUF_F16 { float16_t bW_f16[]; };
 
-layout(set = 0, binding = 3) restrict readonly buffer BIAS_BUF_F32 { float bufferBias_f32[]; };
-layout(set = 0, binding = 3) restrict readonly buffer BIAS_BUF_F16 { float16_t bufferBias_f16[]; };
-layout(set = 0, binding = 4) restrict readonly buffer SCALE_BUF_F32 { float bufferScale_f32[]; };
-layout(set = 0, binding = 4) restrict readonly buffer SCALE_BUF_F16 { float16_t bufferScale_f16[]; };
-layout(set = 0, binding = 5) restrict readonly buffer RES_BUF_F32 { float bufferRes_f32[]; };
-layout(set = 0, binding = 5) restrict readonly buffer RES_BUF_F16 { float16_t bufferRes_f16[]; };
+layout(set = 0, binding = 3) restrict readonly buffer BIAS_BUF_F32 { float bBias_f32[]; };
+layout(set = 0, binding = 3) restrict readonly buffer BIAS_BUF_F16 { float16_t bBias_f16[]; };
+layout(set = 0, binding = 4) restrict readonly buffer SCALE_BUF_F32 { float bScale_f32[]; };
+layout(set = 0, binding = 4) restrict readonly buffer SCALE_BUF_F16 { float16_t bScale_f16[]; };
+layout(set = 0, binding = 5) restrict readonly buffer RES_BUF_F32 { float bRes_f32[]; };
+layout(set = 0, binding = 5) restrict readonly buffer RES_BUF_F16 { float16_t bRes_f16[]; };
 
 layout(push_constant) uniform PushConstants {
     uint hi;
@@ -84,10 +84,10 @@ shared float Bs[2][wgK * wgN];
 uint imageInputBase = 0u;
 uint imageOutputBase = 0u;
 
-float readI(uint i) { i += imageInputBase; return typeI == DTYPE_F32 ? bufferI_f32[i] : float(bufferI_f16[i]); }
-vec4 readI4(uint i) { i += imageInputBase >> 2u; return typeI == DTYPE_F32 ? bufferI_4f32[i] : vec4(bufferI_4f16[i]); }
-float readW(uint i) { return typeW == DTYPE_F32 ? bufferW_f32[i] : float(bufferW_f16[i]); }
-float readResidual(uint i) { i += imageOutputBase; return typeI == DTYPE_F32 ? bufferRes_f32[i] : float(bufferRes_f16[i]); }
+float readI(uint i) { i += imageInputBase; return typeI == DTYPE_F32 ? bI_f32[i] : float(bI_f16[i]); }
+vec4 readI4(uint i) { i += imageInputBase >> 2u; return typeI == DTYPE_F32 ? bI_4f32[i] : vec4(bI_4f16[i]); }
+float readW(uint i) { return typeW == DTYPE_F32 ? bW_f32[i] : float(bW_f16[i]); }
+float readResidual(uint i) { i += imageOutputBase; return typeI == DTYPE_F32 ? bRes_f32[i] : float(bRes_f16[i]); }
 
 // The residual's first `count` elements from i; the rest read as 0.
 vec4 readResidual4(uint i, uint count)
@@ -102,9 +102,9 @@ void writeO(uint i, float v)
 {
     i += imageOutputBase;
     if (typeO == DTYPE_F32)
-        bufferO_f32[i] = v;
+        bO_f32[i] = v;
     else
-        bufferO_f16[i] = float16_t(v);
+        bO_f16[i] = float16_t(v);
 }
 
 void writeB4(uint tile, uint k, uint n4, vec4 v)
@@ -121,16 +121,16 @@ void writePartial4(uint partialBase, uint m, uint n0, vec4 v)
     uint base = partialBase + m * pc.n + n0;
     if (alignN)
     {
-        bufferO_4f32[base >> 2u] = v;
+        bO_4f32[base >> 2u] = v;
         return;
     }
     if (n0 >= pc.n)
         return;
     uint remaining = pc.n - n0;
-    bufferO_f32[base] = v.x;
-    if (remaining > 1u) bufferO_f32[base + 1u] = v.y;
-    if (remaining > 2u) bufferO_f32[base + 2u] = v.z;
-    if (remaining > 3u) bufferO_f32[base + 3u] = v.w;
+    bO_f32[base] = v.x;
+    if (remaining > 1u) bO_f32[base + 1u] = v.y;
+    if (remaining > 2u) bO_f32[base + 2u] = v.z;
+    if (remaining > 3u) bO_f32[base + 3u] = v.w;
 }
 
 // Output channel i, elements [base, base + count) of O.
@@ -138,15 +138,15 @@ vec4 applyOutput(uint i, uint base, uint count, vec4 acc)
 {
     vec4 value = hasScale == 0u
         ? acc + vec4(typeW == DTYPE_F32
-              ? (hasBias != 0u ? bufferBias_f32[i] : 0.0)
-              : (hasBias != 0u ? float(bufferBias_f16[i]) : 0.0))
+              ? (hasBias != 0u ? bBias_f32[i] : 0.0)
+              : (hasBias != 0u ? float(bBias_f16[i]) : 0.0))
         : fma(vec4(typeP == DTYPE_F32
-                  ? bufferScale_f32[i]
-                  : float(bufferScale_f16[i])),
+                  ? bScale_f32[i]
+                  : float(bScale_f16[i])),
               acc,
               vec4(typeP == DTYPE_F32
-                  ? (hasBias != 0u ? bufferBias_f32[i] : 0.0)
-                  : (hasBias != 0u ? float(bufferBias_f16[i]) : 0.0)));
+                  ? (hasBias != 0u ? bBias_f32[i] : 0.0)
+                  : (hasBias != 0u ? float(bBias_f16[i]) : 0.0)));
     const vec4 residual = shortcut ? readResidual4(base, count) : vec4(0.0);
     if (shortcut && residualOrder == 1u)
         value += residual;
@@ -166,9 +166,9 @@ void writeO4(uint m, uint n0, vec4 acc)
     if (alignN)
     {
         if (typeO == DTYPE_F32)
-            bufferO_4f32[(imageOutputBase + base) >> 2u] = v;
+            bO_4f32[(imageOutputBase + base) >> 2u] = v;
         else
-            bufferO_4f16[(imageOutputBase + base) >> 2u] = f16vec4(v);
+            bO_4f16[(imageOutputBase + base) >> 2u] = f16vec4(v);
         return;
     }
 

@@ -19,3 +19,13 @@ def test_permute(perms, shape):
         lambda in0: in0.permute(perms),
         tol=EXACT,
     )
+
+
+def test_permute_leading_axes():
+    # perms covers the last three axes; the leading two pass through.
+    check_node(
+        lambda: nodes.PermuteNode(perms=[1, 0, 2]),
+        {"in0": (2, 3, 4, 5, 6)},
+        lambda in0: in0.permute(0, 1, 3, 2, 4),
+        tol=EXACT,
+    )
