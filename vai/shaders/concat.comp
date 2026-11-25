@@ -71,14 +71,17 @@ uint srcOffsetOf(uint idx, out uint inputIdx)
     uint outer     = temp / concatDimOut;
 
     inputIdx = 0u;
+    uint prevPrefix = 0u;
+    uint curPrefix  = 0u;
     for (uint i = 0u; i < inputCount; ++i)
     {
-        if (concatPos < prefixSum[i]) { inputIdx = i; break; }
+        curPrefix = prefixSum[i];
+        if (concatPos < curPrefix) { inputIdx = i; break; }
+        prevPrefix = curPrefix;
     }
 
-    uint prevPrefix = (inputIdx > 0u) ? prefixSum[inputIdx - 1u] : 0u;
-    uint localPos   = concatPos - prevPrefix;
-    uint dimSize    = prefixSum[inputIdx] - prevPrefix;
+    uint localPos = concatPos - prevPrefix;
+    uint dimSize  = curPrefix - prevPrefix;
     return outer * (dimSize * innerSize) + localPos * innerSize + inner;
 }
 
