@@ -58,7 +58,8 @@ void checkConfig(const gemma3::ModelConfig& c, uint32_t prefillChunk)
     // A prefill chunk holds an image whole.
     if (c.hasVision() && (prefillChunk == 0 ? d.slidingWindow : prefillChunk) < tokensPerImage)
         configError(
-            who, "effective prefill_chunk must be at least " + std::to_string(tokensPerImage) + ", the tokens of one image");
+            who,
+            "effective prefill_chunk must be at least " + std::to_string(tokensPerImage) + ", the tokens of one image");
 }
 
 }   // namespace

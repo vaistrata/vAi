@@ -40,7 +40,8 @@ void bindRopeConfig(nb::module_& m)
                    uint32_t original_max_pos,
                    float low_freq_factor,
                    float high_freq_factor,
-                   std::array<uint32_t, 3> mrope_section) {
+                   std::array<uint32_t, 3>
+                       mrope_section) {
                     new (self) vai::RopeConfig{
                         .posType = pos_type,
                         .base = base,
@@ -82,8 +83,16 @@ void bindRopeConfig(nb::module_& m)
             .def("__repr__", [](const vai::RopeConfig& c) {
                 return nb::str("RopeConfig(pos_type={}, base={}, factor={}, original_max_pos={}, "
                                "low_freq_factor={}, high_freq_factor={}, mrope_section=[{}, {}, {}])")
-                    .format(c.posType, c.base, c.factor, c.originalMaxPos, c.lowFreqFactor, c.highFreqFactor,
-                            c.mropeSection[0], c.mropeSection[1], c.mropeSection[2]);
+                    .format(
+                        c.posType,
+                        c.base,
+                        c.factor,
+                        c.originalMaxPos,
+                        c.lowFreqFactor,
+                        c.highFreqFactor,
+                        c.mropeSection[0],
+                        c.mropeSection[1],
+                        c.mropeSection[2]);
             });
     // A mutable value type with __eq__ is unhashable, as Python's rule has it.
     cls.attr("__hash__") = nb::none();
@@ -97,20 +106,21 @@ static void bindRope(nb::module_& m)
     bindRopeConfig(m);
 
     using C = vai::node::Rope::Config;
-    bindNode<vai::node::Rope>(m,
-                              "RopeNode",
-                              "Rotary position embedding of Q or K [..., H, Tq, head_dim], head_dim "
-                              "even and >= 2. out0 has in0's shape.",
-                              required("head_dim", &C::headDim)
-                                  .check([](uint32_t d) { return d >= 2 && d % 2 == 0; }, "must be even and >= 2"),
-                              // checkRopeConfig raises its own error, naming the field it rejects.
-                              field("rope", &C::cfg, plainRope)
-                                  .check(
-                                      [](const vai::RopeConfig& rope) {
-                                          checkRopeConfig(rope, "RopeNode", "rope");
-                                          return true;
-                                      },
-                                      ""))
+    bindNode<vai::node::Rope>(
+        m,
+        "RopeNode",
+        "Rotary position embedding of Q or K [..., H, Tq, head_dim], head_dim "
+        "even and >= 2. out0 has in0's shape.",
+        required("head_dim", &C::headDim)
+            .check([](uint32_t d) { return d >= 2 && d % 2 == 0; }, "must be even and >= 2"),
+        // checkRopeConfig raises its own error, naming the field it rejects.
+        field("rope", &C::cfg, plainRope)
+            .check(
+                [](const vai::RopeConfig& rope) {
+                    checkRopeConfig(rope, "RopeNode", "rope");
+                    return true;
+                },
+                ""))
         .def(
             "set_pos_param",
             [](vai::node::Rope& self, KVCacheCounter& pos_param) { self.setPosParam(pos_param.buf); },

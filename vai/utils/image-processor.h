@@ -34,21 +34,20 @@
 namespace vai::utils {
 
 // Each mode reproduces one reference resampler, named by what it matches.
-enum class Resize
-{
+enum class Resize {
     // torch F.interpolate / cv2 on a float image: fixed taps, float arithmetic.
-    Nearest,                    // floor(i * scale), as torch's nearest and cv2 INTER_NEAREST
-    Bilinear,                   // half-pixel centres, as cv2 and torchvision without antialias
-    BilinearAlignCorners,       // corner pixels map to corner pixels
-    Bicubic,                    // torch bicubic without antialias: Keys a = -0.75, borders clamped
+    Nearest,                // floor(i * scale), as torch's nearest and cv2 INTER_NEAREST
+    Bilinear,               // half-pixel centres, as cv2 and torchvision without antialias
+    BilinearAlignCorners,   // corner pixels map to corner pixels
+    Bicubic,                // torch bicubic without antialias: Keys a = -0.75, borders clamped
 
     // Pillow / torchvision on uint8: the kernel widens with the downscale, fixed-point
     // coefficients, rounded to 0~255 after each axis.
-    BilinearAntialias,          // Pillow BILINEAR, 22-bit coefficients
-    BilinearAntialiasInt16,     // torchvision uint8 antialias: as above, coefficients capped to fit int16
-    BicubicAntialias,           // Pillow BICUBIC, Keys a = -0.5
-    BicubicAntialiasInt16,      // torchvision uint8 antialias, bicubic
-    LanczosAntialias,           // Pillow LANCZOS, three lobes
+    BilinearAntialias,        // Pillow BILINEAR, 22-bit coefficients
+    BilinearAntialiasInt16,   // torchvision uint8 antialias: as above, coefficients capped to fit int16
+    BicubicAntialias,         // Pillow BICUBIC, Keys a = -0.5
+    BicubicAntialiasInt16,    // torchvision uint8 antialias, bicubic
+    LanczosAntialias,         // Pillow LANCZOS, three lobes
 };
 
 enum class Align

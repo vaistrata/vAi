@@ -57,10 +57,10 @@ struct RopeConfig
 {
     RopePosType posType = RopePosType::Sequential;
     float base;
-    float factor = 1.0f;             // 1: unscaled; else divides the frequencies (Llama3: the long wavelengths)
-    uint32_t originalMaxPos = 0;     // 0: no Llama3 band; else Llama3 scales by the bounds below
-    float lowFreqFactor = 1.0f;      // Llama3
-    float highFreqFactor = 4.0f;     // Llama3
+    float factor = 1.0f;           // 1: unscaled; else divides the frequencies (Llama3: the long wavelengths)
+    uint32_t originalMaxPos = 0;   // 0: no Llama3 band; else Llama3 scales by the bounds below
+    float lowFreqFactor = 1.0f;    // Llama3
+    float highFreqFactor = 4.0f;   // Llama3
     std::array<uint32_t, 3> mropeSection = {};   // MRoPE: pairs on (t, h, w), interleaved
 };
 

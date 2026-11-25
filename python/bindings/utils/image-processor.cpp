@@ -33,24 +33,19 @@ struct PyImageProcessor
 void bindImageProcessor(nb::module_& m)
 {
     nb::enum_<Resize>(m, "Resize", "How ImageProcessor resamples; each mode reproduces one reference.")
-        .value("NEAREST", Resize::Nearest,
-               "floor(i * scale), as torch's nearest and cv2 INTER_NEAREST.")
-        .value("BILINEAR", Resize::Bilinear,
-               "Half-pixel centres, as cv2 and torchvision without antialias.")
-        .value("BILINEAR_ALIGN_CORNERS", Resize::BilinearAlignCorners,
-               "Corner pixels map to corner pixels.")
-        .value("BICUBIC", Resize::Bicubic,
-               "torch bicubic without antialias: Keys a = -0.75, borders clamped.")
-        .value("BILINEAR_ANTIALIAS", Resize::BilinearAntialias,
+        .value("NEAREST", Resize::Nearest, "floor(i * scale), as torch's nearest and cv2 INTER_NEAREST.")
+        .value("BILINEAR", Resize::Bilinear, "Half-pixel centres, as cv2 and torchvision without antialias.")
+        .value("BILINEAR_ALIGN_CORNERS", Resize::BilinearAlignCorners, "Corner pixels map to corner pixels.")
+        .value("BICUBIC", Resize::Bicubic, "torch bicubic without antialias: Keys a = -0.75, borders clamped.")
+        .value("BILINEAR_ANTIALIAS",
+               Resize::BilinearAntialias,
                "Pillow BILINEAR: 22-bit integer coefficients, rounded to 0..255 after each axis.")
-        .value("BILINEAR_ANTIALIAS_INT16", Resize::BilinearAntialiasInt16,
+        .value("BILINEAR_ANTIALIAS_INT16",
+               Resize::BilinearAntialiasInt16,
                "torchvision uint8 antialias: as above, coefficients capped to fit int16.")
-        .value("BICUBIC_ANTIALIAS", Resize::BicubicAntialias,
-               "Pillow BICUBIC, Keys a = -0.5.")
-        .value("BICUBIC_ANTIALIAS_INT16", Resize::BicubicAntialiasInt16,
-               "torchvision uint8 antialias, bicubic.")
-        .value("LANCZOS_ANTIALIAS", Resize::LanczosAntialias,
-               "Pillow LANCZOS, three lobes.");
+        .value("BICUBIC_ANTIALIAS", Resize::BicubicAntialias, "Pillow BICUBIC, Keys a = -0.5.")
+        .value("BICUBIC_ANTIALIAS_INT16", Resize::BicubicAntialiasInt16, "torchvision uint8 antialias, bicubic.")
+        .value("LANCZOS_ANTIALIAS", Resize::LanczosAntialias, "Pillow LANCZOS, three lobes.");
 
     nb::enum_<Align>(m, "Align", "Where a letterbox puts the image in its square.")
         .value("CENTER",   Align::Center)
@@ -88,7 +83,9 @@ void bindImageProcessor(nb::module_& m)
                  + ", " + std::to_string(g.padY) + "))";
         });
 
-    nb::class_<PyImageProcessor>(m, "ImageProcessor",
+    nb::class_<PyImageProcessor>(
+        m,
+        "ImageProcessor",
         "Image preprocessing: decodes an image, resizes it, normalizes it and "
         "hands the float pixels over.\n\n"
         "    chw = (pyvai.ImageProcessor(\"dog.jpg\")\n"
@@ -102,8 +99,7 @@ void bindImageProcessor(nb::module_& m)
         "to_numpy() runs them. Pixels are RGB, HWC and 0..255 by default.")
         .def(
             "__init__",
-            [](PyImageProcessor* self, const std::filesystem::path& path, uint32_t channels)
-            {
+            [](PyImageProcessor* self, const std::filesystem::path& path, uint32_t channels) {
                 const std::string p = path.string();
                 ensureFileExists("ImageProcessor", p);
                 if (channels == 0)
@@ -116,13 +112,10 @@ void bindImageProcessor(nb::module_& m)
             nb::arg("path"),
             nb::arg("channels") = 3u,
             "Decode the image file at `path` (JPEG, PNG, ...) to `channels` channels: "
-            "3 for RGB, 1 for gray."
-        )
+            "3 for RGB, 1 for gray.")
         .def(
             "__init__",
-            [](PyImageProcessor* self,
-               nb::ndarray<const uint8_t, nb::c_contig, nb::device::cpu> pixels)
-            {
+            [](PyImageProcessor* self, nb::ndarray<const uint8_t, nb::c_contig, nb::device::cpu> pixels) {
                 if (pixels.ndim() != 2 && pixels.ndim() != 3)
                     throw nb::value_error(
                         "ImageProcessor: pixels must be an [H, W, C] or [H, W] uint8 array");
@@ -138,12 +131,10 @@ void bindImageProcessor(nb::module_& m)
             },
             nb::arg("pixels").noconvert(),   // no silent cast of a float image to bytes
             "Take already decoded pixels: an [H, W, C] uint8 array (C-contiguous), "
-            "or [H, W] for one channel. The bytes are copied."
-        )
+            "or [H, W] for one channel. The bytes are copied.")
         .def(
             "resize",
-            [](nb::handle_t<PyImageProcessor> self, uint32_t size, Resize mode) -> nb::object
-            {
+            [](nb::handle_t<PyImageProcessor> self, uint32_t size, Resize mode) -> nb::object {
                 auto& p = nb::cast<PyImageProcessor&>(self);
                 p.proc.resize(size, mode);   // ValueError on size 0
                 p.width = p.height = size;
@@ -151,12 +142,10 @@ void bindImageProcessor(nb::module_& m)
             },
             nb::arg("size"),
             nb::arg("mode") = Resize::Bilinear,
-            "Squash the image to size x size, ignoring the aspect ratio."
-        )
+            "Squash the image to size x size, ignoring the aspect ratio.")
         .def(
             "resize",
-            [](nb::handle_t<PyImageProcessor> self, uint32_t width, uint32_t height, Resize mode) -> nb::object
-            {
+            [](nb::handle_t<PyImageProcessor> self, uint32_t width, uint32_t height, Resize mode) -> nb::object {
                 auto& p = nb::cast<PyImageProcessor&>(self);
                 p.proc.resize(width, height, mode);   // ValueError on a size of 0
                 p.width = width;
@@ -166,12 +155,10 @@ void bindImageProcessor(nb::module_& m)
             nb::arg("width"),
             nb::arg("height"),
             nb::arg("mode") = Resize::Bilinear,
-            "Squash the image to width x height."
-        )
+            "Squash the image to width x height.")
         .def(
             "resize_shorter",
-            [](nb::handle_t<PyImageProcessor> self, uint32_t size, Resize mode) -> nb::object
-            {
+            [](nb::handle_t<PyImageProcessor> self, uint32_t size, Resize mode) -> nb::object {
                 auto& p = nb::cast<PyImageProcessor&>(self);
                 p.proc.resizeShorter(size, mode);   // ValueError on size 0
                 p.width = p.proc.outputWidth();
@@ -181,13 +168,11 @@ void bindImageProcessor(nb::module_& m)
             nb::arg("size"),
             nb::arg("mode") = Resize::Bilinear,
             "Scale the shorter side to `size` and the longer one by the same ratio, "
-            "truncated as torchvision's Resize(int) and HF's shortest_edge do."
-        )
+            "truncated as torchvision's Resize(int) and HF's shortest_edge do.")
         .def(
             "letterbox",
-            [](nb::handle_t<PyImageProcessor> self, uint32_t size, Align align,
-               float pad_value, Resize mode) -> nb::object
-            {
+            [](nb::handle_t<PyImageProcessor> self, uint32_t size, Align align, float pad_value, Resize mode)
+                -> nb::object {
                 auto& p = nb::cast<PyImageProcessor&>(self);
                 p.proc.letterbox(size, align, pad_value, mode);   // ValueError on size 0
                 p.width = p.height = size;
@@ -198,12 +183,10 @@ void bindImageProcessor(nb::module_& m)
             nb::arg("pad_value"),
             nb::arg("mode") = Resize::Bilinear,
             "Scale the longer side to `size` and fill the rest of the square with "
-            "`pad_value`, a 0..255 pixel value normalized with the image."
-        )
+            "`pad_value`, a 0..255 pixel value normalized with the image.")
         .def(
             "center_crop",
-            [](nb::handle_t<PyImageProcessor> self, uint32_t size) -> nb::object
-            {
+            [](nb::handle_t<PyImageProcessor> self, uint32_t size) -> nb::object {
                 auto& p = nb::cast<PyImageProcessor&>(self);
                 p.proc.centerCrop(size);   // ValueError unless it fits
                 p.width = p.height = size;
@@ -211,12 +194,10 @@ void bindImageProcessor(nb::module_& m)
             },
             nb::arg("size"),
             "Keep the size x size square at the centre, its offset rounded down as "
-            "HF's center_crop does."
-        )
+            "HF's center_crop does.")
         .def(
             "center_crop",
-            [](nb::handle_t<PyImageProcessor> self, uint32_t width, uint32_t height) -> nb::object
-            {
+            [](nb::handle_t<PyImageProcessor> self, uint32_t width, uint32_t height) -> nb::object {
                 auto& p = nb::cast<PyImageProcessor&>(self);
                 p.proc.centerCrop(width, height);
                 p.width = width;
@@ -225,47 +206,39 @@ void bindImageProcessor(nb::module_& m)
             },
             nb::arg("width"),
             nb::arg("height"),
-            "Keep the width x height rectangle at the centre."
-        )
+            "Keep the width x height rectangle at the centre.")
         .def(
             "normalize",
-            [](nb::handle_t<PyImageProcessor> self, float min, float max) -> nb::object
-            {
+            [](nb::handle_t<PyImageProcessor> self, float min, float max) -> nb::object {
                 // This is a ValueError unless min < max.
                 nb::cast<PyImageProcessor&>(self).proc.normalize(min, max);
                 return nb::borrow(self);
             },
             nb::arg("min"),
             nb::arg("max"),
-            "Map 0..255 linearly onto [min, max]."
-        )
+            "Map 0..255 linearly onto [min, max].")
         .def(
             "bgr",
-            [](nb::handle_t<PyImageProcessor> self) -> nb::object
-            {
+            [](nb::handle_t<PyImageProcessor> self) -> nb::object {
                 auto& p = nb::cast<PyImageProcessor&>(self);
                 if (p.channels != 3)   // a std::logic_error in the core
                     throw nb::value_error("ImageProcessor.bgr: needs 3 channels");
                 p.proc.bgr();
                 return nb::borrow(self);
             },
-            "Hand the channels over as BGR instead of RGB."
-        )
+            "Hand the channels over as BGR instead of RGB.")
         .def(
             "chw",
-            [](nb::handle_t<PyImageProcessor> self) -> nb::object
-            {
+            [](nb::handle_t<PyImageProcessor> self) -> nb::object {
                 auto& p = nb::cast<PyImageProcessor&>(self);
                 p.proc.chw();
                 p.chw = true;
                 return nb::borrow(self);
             },
-            "Hand the pixels over as CHW instead of HWC."
-        )
+            "Hand the pixels over as CHW instead of HWC.")
         .def(
             "to_numpy",
-            [](PyImageProcessor& self)
-            {
+            [](PyImageProcessor& self) {
                 // The processor lends its buffer and a later run replaces it,
                 // so the ndarray gets a copy of its own.
                 std::vector<float> pixels;
@@ -281,14 +254,12 @@ void bindImageProcessor(nb::module_& m)
             },
             "Run the recorded steps and return the pixels as a float32 array, "
             "[H, W, C] or, after chw(), [C, H, W]. The processor can go on from "
-            "here: a later run starts from this output."
-        )
+            "here: a later run starts from this output.")
         .def_prop_ro(
             "geometry",
             [](const PyImageProcessor& self) { return self.proc.geometry(); },
             "How the output maps onto the source image after the steps recorded "
-            "so far (a copy)."
-        );
+            "so far (a copy).");
 }
 
 }   // namespace pyvai

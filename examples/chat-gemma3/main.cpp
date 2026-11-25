@@ -78,8 +78,8 @@ struct ChatSession
     std::optional<std::string> generate(const std::string& prompt, const Tensor& images = {})
     {
         // The rendered delta already starts with BOS on the first turn.
-        std::vector<int> tokens =
-            tokenizer.encode(gemma3::expandImagePlaceholders(prompt, net.visionEncoder ? net.visionEncoder->tokensPerImage : 0));
+        std::vector<int> tokens = tokenizer.encode(
+            gemma3::expandImagePlaceholders(prompt, net.visionEncoder ? net.visionEncoder->tokensPerImage : 0));
 
         if (net.tokensSoFar_ + tokens.size() > net.runtimeCfg.maxRuntimeContext)
             return std::nullopt;

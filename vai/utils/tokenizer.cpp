@@ -903,8 +903,8 @@ inline const ByteAlphabet& byteAlphabet()
 /////////////////////////////////////////////////////////////////////////////////////////
 namespace nfc {
 
-constexpr uint64_t kCode = (uint64_t{1} << 21) - 1;   // one packed code point
-constexpr uint64_t kPair = (uint64_t{1} << 42) - 1;   // a decomposition's two code points
+constexpr uint64_t kCode = (uint64_t{ 1 } << 21) - 1;   // one packed code point
+constexpr uint64_t kPair = (uint64_t{ 1 } << 42) - 1;   // a decomposition's two code points
 
 constexpr char32_t kSyllableBase = 0xAC00;
 constexpr char32_t kLeadBase = 0x1100;
@@ -912,19 +912,30 @@ constexpr char32_t kVowelBase = 0x1161;
 constexpr char32_t kTrailBase = 0x11A7;   // one before the first trailing consonant
 constexpr uint32_t kLeadCount = 19;
 constexpr uint32_t kVowelCount = 21;
-constexpr uint32_t kTrailCount = 28;      // counting "none"
+constexpr uint32_t kTrailCount = 28;   // counting "none"
 constexpr uint32_t kSyllableCount = kLeadCount * kVowelCount * kTrailCount;
 
-inline bool isSyllable(char32_t c) { return c - kSyllableBase < kSyllableCount; }
-inline bool isVowel(char32_t c) { return c - kVowelBase < kVowelCount; }
-inline bool isTrail(char32_t c) { return c - (kTrailBase + 1) < kTrailCount - 1; }
+inline bool isSyllable(char32_t c)
+{
+    return c - kSyllableBase < kSyllableCount;
+}
+inline bool isVowel(char32_t c)
+{
+    return c - kVowelBase < kVowelCount;
+}
+inline bool isTrail(char32_t c)
+{
+    return c - (kTrailBase + 1) < kTrailCount - 1;
+}
 
 inline uint32_t combiningClass(char32_t c)
 {
     if (c < 0x300)
         return 0;
     const auto& runs = unicode_nfc::kCombiningClasses;
-    auto it = std::upper_bound(std::begin(runs), std::end(runs), c, [](char32_t v, uint64_t run) { return v < (run >> 42); });
+    auto it = std::upper_bound(std::begin(runs), std::end(runs), c, [](char32_t v, uint64_t run) {
+        return v < (run >> 42);
+    });
     if (it == std::begin(runs))
         return 0;
     const uint64_t run = *--it;
@@ -935,7 +946,9 @@ inline uint32_t combiningClass(char32_t c)
 inline const uint64_t* decomposition(char32_t c)
 {
     const auto& entries = unicode_nfc::kDecompositions;
-    auto it = std::lower_bound(std::begin(entries), std::end(entries), c, [](uint64_t e, char32_t v) { return (e >> 42) < v; });
+    auto it = std::lower_bound(std::begin(entries), std::end(entries), c, [](uint64_t e, char32_t v) {
+        return (e >> 42) < v;
+    });
     return it != std::end(entries) && (*it >> 42) == c ? it : nullptr;
 }
 
@@ -974,8 +987,9 @@ inline char32_t compose(char32_t a, char32_t b)
     const uint64_t pair = uint64_t(a) << 21 | b;
     const auto& entries = unicode_nfc::kDecompositions;
     const auto& byPair = unicode_nfc::kCompositions;
-    auto it = std::lower_bound(std::begin(byPair), std::end(byPair), pair,
-                               [&](uint16_t i, uint64_t v) { return (entries[i] & kPair) < v; });
+    auto it = std::lower_bound(std::begin(byPair), std::end(byPair), pair, [&](uint16_t i, uint64_t v) {
+        return (entries[i] & kPair) < v;
+    });
     return it != std::end(byPair) && (entries[*it] & kPair) == pair ? char32_t(entries[*it] >> 42) : 0;
 }
 
@@ -987,7 +1001,8 @@ inline bool isStable(char32_t c)
         return true;
     if (isVowel(c) || isTrail(c) || combiningClass(c) != 0)
         return false;
-    if (std::binary_search(std::begin(unicode_nfc::kComposingStarters), std::end(unicode_nfc::kComposingStarters), uint32_t(c)))
+    if (std::binary_search(
+            std::begin(unicode_nfc::kComposingStarters), std::end(unicode_nfc::kComposingStarters), uint32_t(c)))
         return false;
     const uint64_t* d = decomposition(c);
     return !d || compose(char32_t((*d >> 21) & kCode), char32_t(*d & kCode)) == c;
@@ -1019,8 +1034,9 @@ inline void normalizeNfc(std::string& text)
         size_t end = i;
         while (end < cps.size() && nfc::combiningClass(cps[end]) != 0)
             ++end;
-        std::stable_sort(cps.begin() + i, cps.begin() + end,
-                         [](char32_t a, char32_t b) { return nfc::combiningClass(a) < nfc::combiningClass(b); });
+        std::stable_sort(cps.begin() + i, cps.begin() + end, [](char32_t a, char32_t b) {
+            return nfc::combiningClass(a) < nfc::combiningClass(b);
+        });
         i = end;
     }
 
@@ -1601,8 +1617,10 @@ private:
         {
             std::string k(key.start, key.end);
             if      (k == "model")          loadModel(r, val, path);
-            else if (k == "added_tokens")   loadAddedTokens(r, val, path);
-            else if (k == "pre_tokenizer" && val.type != SJ_NULL) loadPreTokenizer(r, val, path);
+            else if (k == "added_tokens")
+                loadAddedTokens(r, val, path);
+            else if (k == "pre_tokenizer" && val.type != SJ_NULL)
+                loadPreTokenizer(r, val, path);
             else if (k == "post_processor") loadPostProcessor(r, val);
             else if (k == "normalizer")     loadNormalizer(r, val, path);
             else if (k == "decoder")        loadDecoder(r, val, path);
@@ -1971,10 +1989,14 @@ private:
             while (sj_iter_object(&r, entry, &k, &v))
             {
                 std::string key(k.start, k.end);
-                if      (key == "id")         id = int(tokenizer_detail::jsonInt(v));
-                else if (key == "content")    tok.content = tokenizer_detail::jsonString(v);
-                else if (key == "special")    tok.special = tokenizer_detail::jsonBool(v);
-                else if (key == "normalized") tok.normalized = tokenizer_detail::jsonBool(v);
+                if (key == "id")
+                    id = int(tokenizer_detail::jsonInt(v));
+                else if (key == "content")
+                    tok.content = tokenizer_detail::jsonString(v);
+                else if (key == "special")
+                    tok.special = tokenizer_detail::jsonBool(v);
+                else if (key == "normalized")
+                    tok.normalized = tokenizer_detail::jsonBool(v);
                 else if ((key == "lstrip" || key == "rstrip" || key == "single_word") && tokenizer_detail::jsonBool(v))
                     throw std::runtime_error("tokenizer: added token field \"" + key + "\" is not supported — " + path);
             }

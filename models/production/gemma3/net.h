@@ -39,7 +39,7 @@ struct ModelConfig
 
     constexpr bool hasVision() const
     {
-        const std::string_view name{variant};
+        const std::string_view name{ variant };
         return name == "4B" || name == "12B";
     }
 
@@ -86,7 +86,7 @@ struct Net : public vai::NeuralNet
     eva::Buffer kvCacheCounter;
     eva::Buffer causalMask;
     eva::Buffer localMask;   // causalMask spanning the sliding window, the local blocks'
-    eva::Buffer imageIndex;  // the image tokens' rows in this chunk
+    eva::Buffer imageIndex;   // the image tokens' rows in this chunk
 
     Net(const vai::NeuralNetConfig& netCfg, const ModelConfig& modelCfg, const RuntimeConfig& runtimeCfg = {})
     : NeuralNet(netCfg)
@@ -94,10 +94,11 @@ struct Net : public vai::NeuralNet
     , runtimeCfg(runtimeCfg)
     , maxRuntimeContext(std::min(runtimeCfg.maxRuntimeContext, modelCfg.maxTrainedContext))
     , prefillChunk(runtimeCfg.prefillChunk ? runtimeCfg.prefillChunk : modelCfg.trf.slidingWindow)
-    , visionEncoder(modelCfg.hasVision()
-          ? std::make_optional<group::VisionEncoder>(
-                group::VisionEncoder::Config{ .base = {}, .outDim = modelCfg.trf.embedDim })
-          : std::nullopt)
+    , visionEncoder(
+          modelCfg.hasVision()
+              ? std::make_optional<group::VisionEncoder>(
+                    group::VisionEncoder::Config{ .base = {}, .outDim = modelCfg.trf.embedDim })
+              : std::nullopt)
     , embedding({
           .vocabSize = modelCfg.vocabSize,
           .embedDim = modelCfg.trf.embedDim,
@@ -176,7 +177,8 @@ struct Net : public vai::NeuralNet
         std::vector<uint32_t> imageStarts;
         const uint32_t tokensPerImage = visionEncoder ? visionEncoder->tokensPerImage : 0;
         {
-            const uint32_t* ids = modelCfg.hasVision() ? static_cast<const uint32_t*>(promptTokenIds.hostData()) : nullptr;
+            const uint32_t* ids =
+                modelCfg.hasVision() ? static_cast<const uint32_t*>(promptTokenIds.hostData()) : nullptr;
             uint32_t last = 0;
 
             for (uint32_t pos = 0; ids && pos < total;)

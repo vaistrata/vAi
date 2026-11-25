@@ -32,7 +32,7 @@ struct ModelConfig
     const char* variant;   // checkpoint folder under data/ckpts/qwen3vl/qwen/
     VisionConfig vision;
     vai::TransformerConfig trf;
-    bool tiedHead;         // lmHead shares the token embedding's weights
+    bool tiedHead;   // lmHead shares the token embedding's weights
 
     static constexpr uint32_t vocabSize = 151936;
     static constexpr uint32_t maxTrainedContext = 262144;
@@ -78,9 +78,9 @@ struct Net : public vai::NeuralNet
 
     eva::Buffer kvCacheCounter;
     eva::Buffer causalMask;
-    eva::Buffer imageIndex;         // the image tokens' rows in this forward
-    eva::Buffer tokenPositions;     // [T, 3], each token's MRoPE (t, h, w)
-    eva::Buffer gridWidth;          // [1], patches per row of an image
+    eva::Buffer imageIndex;       // the image tokens' rows in this forward
+    eva::Buffer tokenPositions;   // [T, 3], each token's MRoPE (t, h, w)
+    eva::Buffer gridWidth;        // [1], patches per row of an image
 
     Net(const vai::NeuralNetConfig& netCfg, const ModelConfig& modelCfg, const RuntimeConfig& runtimeCfg = {})
     : NeuralNet(netCfg)
@@ -92,10 +92,10 @@ struct Net : public vai::NeuralNet
           .imageSize = runtimeCfg.imageSize,
           .outDim = modelCfg.trf.embedDim,
       })
-    , embedding({ 
-        .vocabSize = modelCfg.vocabSize, 
-        .embedDim = modelCfg.trf.embedDim,
-     })
+    , embedding({
+          .vocabSize = modelCfg.vocabSize,
+          .embedDim = modelCfg.trf.embedDim,
+      })
     , decoder({
           .base = modelCfg.trf,
           .kvCacheSize = maxRuntimeContext,
@@ -183,9 +183,7 @@ struct Net : public vai::NeuralNet
 
             if (imageCount == image || total - n < tokensPerImage ||
                 !std::all_of(
-                    ids + n,
-                    ids + n + tokensPerImage,
-                    [](uint32_t id) { return id == ModelConfig::imageTokenId; }))
+                    ids + n, ids + n + tokensPerImage, [](uint32_t id) { return id == ModelConfig::imageTokenId; }))
                 throw std::runtime_error("Qwen3-VL image placeholders do not match the image batch");
 
             for (uint32_t r = 0; r < tokensPerSide; ++r)

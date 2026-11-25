@@ -81,13 +81,13 @@ struct MultiHeadAttention<QkvLayout::Separate> : public vai::NodeGroup
 
     std::optional<vai::node::Identity> input;   // in0, absent with crossAttention
     vai::node::Linear projQ, projK, projV;      // Q: [..., Tq, D] -> [..., Tq, Hq*Dh],  K/V: -> [..., Tq, Hkv*Dh]
-    vai::node::Reshape splitQ, splitK, splitV;  // Q: [..., Tq, Hq, Dh],                 K/V: [..., Tq, Hkv, Dh]
+    vai::node::Reshape splitQ, splitK, splitV;   // Q: [..., Tq, Hq, Dh],                 K/V: [..., Tq, Hkv, Dh]
     std::optional<vai::node::RmsNorm> normQ, normK;
-    vai::node::Permute perQ, perK, perV;        // Q: -> [..., Hq, Tq, Dh],              K/V: -> [..., Hkv, Tq, Dh]
+    vai::node::Permute perQ, perK, perV;   // Q: -> [..., Hq, Tq, Dh],              K/V: -> [..., Hkv, Tq, Dh]
     std::optional<vai::node::Rope> ropeQ, ropeK;
-    vai::node::Attention attn;                  //    -> [..., Tq, Hq, Dh]
-    vai::node::Reshape mergeOut;                //    -> [..., Tq, Hq*Dh]
-    vai::node::Linear projOut;                  // [..., Tq, Hq*Dh] -> [..., Tq, D]
+    vai::node::Attention attn;     //    -> [..., Tq, Hq, Dh]
+    vai::node::Reshape mergeOut;   //    -> [..., Tq, Hq*Dh]
+    vai::node::Linear projOut;     // [..., Tq, Hq*Dh] -> [..., Tq, D]
 
     MultiHeadAttention(Config config)
     : D(config.embedDim)
@@ -153,15 +153,19 @@ struct MultiHeadAttention<QkvLayout::Separate> : public vai::NodeGroup
     void setKvCacheCounter(eva::Buffer buffer)
     {
         attn.setKvCacheCounter(buffer);
-        if (ropeQ) ropeQ->setPosParam(buffer);
-        if (ropeK) ropeK->setPosParam(buffer);
+        if (ropeQ)
+            ropeQ->setPosParam(buffer);
+        if (ropeK)
+            ropeK->setPosParam(buffer);
     }
 
     // RoPE by the model's per-token positions rather than by the counter (see Rope).
     void setPositions(eva::Buffer buffer)
     {
-        if (ropeQ) ropeQ->setPositions(buffer);
-        if (ropeK) ropeK->setPositions(buffer);
+        if (ropeQ)
+            ropeQ->setPositions(buffer);
+        if (ropeK)
+            ropeK->setPositions(buffer);
     }
 };
 
@@ -192,15 +196,15 @@ struct MultiHeadAttention<QkvLayout::Fused> : public vai::NodeGroup
     uint32_t Hq;      // number of query heads
     uint32_t Hkv;     // number of KV heads
 
-    vai::node::Linear projQKV;                     // [..., Tq, D] -> [..., Tq, (Hq + 2*Hkv)*Dh]
-    vai::node::Reshape splitHeads;                 //              -> [..., Tq, Hq + 2*Hkv, Dh]
-    vai::node::Permute perQKV;                     //              -> [..., Hq + 2*Hkv, Tq, Dh]
-    vai::node::Slice sliceQ, sliceK, sliceV;       //  Q: [..., Hq, Tq, Dh],  K/V: [..., Hkv, Tq, Dh]
+    vai::node::Linear projQKV;                 // [..., Tq, D] -> [..., Tq, (Hq + 2*Hkv)*Dh]
+    vai::node::Reshape splitHeads;             //              -> [..., Tq, Hq + 2*Hkv, Dh]
+    vai::node::Permute perQKV;                 //              -> [..., Hq + 2*Hkv, Tq, Dh]
+    vai::node::Slice sliceQ, sliceK, sliceV;   //  Q: [..., Hq, Tq, Dh],  K/V: [..., Hkv, Tq, Dh]
     std::optional<vai::node::RmsNorm> normQ, normK;
     std::optional<vai::node::Rope> ropeQ, ropeK;
-    vai::node::Attention attn;                     //              -> [..., Tq, Hq, Dh]
-    vai::node::Reshape mergeOut;                   //              -> [..., Tq, Hq*Dh]
-    vai::node::Linear projOut;                     // [..., Tq, Hq*Dh] -> [..., Tq, D]
+    vai::node::Attention attn;     //              -> [..., Tq, Hq, Dh]
+    vai::node::Reshape mergeOut;   //              -> [..., Tq, Hq*Dh]
+    vai::node::Linear projOut;     // [..., Tq, Hq*Dh] -> [..., Tq, D]
 
     MultiHeadAttention(Config config)
     : D(config.embedDim)
@@ -257,15 +261,19 @@ struct MultiHeadAttention<QkvLayout::Fused> : public vai::NodeGroup
     void setKvCacheCounter(eva::Buffer buffer)
     {
         attn.setKvCacheCounter(buffer);
-        if (ropeQ) ropeQ->setPosParam(buffer);
-        if (ropeK) ropeK->setPosParam(buffer);
+        if (ropeQ)
+            ropeQ->setPosParam(buffer);
+        if (ropeK)
+            ropeK->setPosParam(buffer);
     }
 
     // RoPE by the model's per-token positions rather than by the counter (see Rope).
     void setPositions(eva::Buffer buffer)
     {
-        if (ropeQ) ropeQ->setPositions(buffer);
-        if (ropeK) ropeK->setPositions(buffer);
+        if (ropeQ)
+            ropeQ->setPositions(buffer);
+        if (ropeK)
+            ropeK->setPositions(buffer);
     }
 };
 

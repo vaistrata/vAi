@@ -114,9 +114,8 @@ inline void IndexCopy::run(eva::CommandBuffer cmdBuff)
     } constants = { rowUnits, count, axisSize, rows };
 
     descSet.write({ outBuf, srcBuf, index });
-    cmdBuff
-        .bindPipeline(pipe)
-        .bindDescSets({descSet})
+    cmdBuff.bindPipeline(pipe)
+        .bindDescSets({ descSet })
         .setPushConstants(0, sizeof(constants), &constants)
         .dispatch2(rowUnits, rows)
         .barrier(eva::SYNC_SCOPE::COMPUTE_WRITE / outBuf / eva::SYNC_SCOPE::COMPUTE_READ);

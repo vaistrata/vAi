@@ -91,7 +91,7 @@ inline void Permute::prepare()
         inDims_.push_back(shape[lead + i]);
         axes_.push_back(first + perms_[i]);
     }
-    const uint32_t rank = (uint32_t) axes_.size();
+    const uint32_t rank = (uint32_t)axes_.size();
     VAI_ASSERT(rank <= PERMUTE_MAX_RANK);
 
     const PipeParams p = { .iDtype = iDtype, .rank = rank };
@@ -155,7 +155,7 @@ inline void Permute::run(eva::CommandBuffer cmdBuff)
     descSet.write({ outBuf, inBuf });
 
     const auto& D = inDims_;
-    const uint32_t rank = (uint32_t) axes_.size();
+    const uint32_t rank = (uint32_t)axes_.size();
 
     uint32_t inStride[PERMUTE_MAX_RANK];        // input stride per input dim
     inStride[rank - 1] = 1;
@@ -172,7 +172,7 @@ inline void Permute::run(eva::CommandBuffer cmdBuff)
     uint32_t total = 1;
     for (uint32_t i = 0; i < rank; ++i)
     {
-        constants.E[i]  = D[axes_[i]];
+        constants.E[i] = D[axes_[i]];
         constants.IS[i] = inStride[axes_[i]];
         total *= constants.E[i];
     }

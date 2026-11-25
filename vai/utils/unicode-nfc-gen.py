@@ -15,13 +15,13 @@ HANGUL = range(0xAC00, 0xD7A4)
 
 def canonical_decomposition(cp):
     d = unicodedata.decomposition(chr(cp))
-    if not d or d.startswith("<"):   # none, or a compatibility mapping NFC ignores
+    if not d or d.startswith("<"):  # none, or a compatibility mapping NFC ignores
         return None
     return [int(x, 16) for x in d.split()]
 
 
 def main():
-    decompositions = {}    # cp -> one level of its canonical decomposition, 1 or 2 code points
+    decompositions = {}  # cp -> one level of its canonical decomposition, 1 or 2 code points
     for cp in range(0x110000):
         if cp in HANGUL:
             continue
@@ -34,14 +34,16 @@ def main():
     # singleton or a non-starter decomposition: exactly when NFC of the pair gives it back.
     ordered = sorted(decompositions)
     compositions = [
-        i for i, cp in enumerate(ordered)
+        i
+        for i, cp in enumerate(ordered)
         if len(decompositions[cp]) == 2
-        and unicodedata.normalize("NFC", chr(decompositions[cp][0]) + chr(decompositions[cp][1])) == chr(cp)
+        and unicodedata.normalize("NFC", chr(decompositions[cp][0]) + chr(decompositions[cp][1]))
+        == chr(cp)
     ]
     compositions.sort(key=lambda i: tuple(decompositions[ordered[i]]))
     assert len(ordered) < 1 << 16
 
-    classes = []           # [lo, hi, class], runs of one non-zero class
+    classes = []  # [lo, hi, class], runs of one non-zero class
     for cp in range(0x110000):
         c = unicodedata.combining(chr(cp))
         if not c:
@@ -52,15 +54,19 @@ def main():
             classes.append([cp, cp, c])
 
     # Class-0 characters that still compose with the starter before them.
-    composing_starters = sorted({
-        decompositions[ordered[i]][1] for i in compositions
-        if unicodedata.combining(chr(decompositions[ordered[i]][1])) == 0
-    })
+    composing_starters = sorted(
+        {
+            decompositions[ordered[i]][1]
+            for i in compositions
+            if unicodedata.combining(chr(decompositions[ordered[i]][1])) == 0
+        }
+    )
 
     def rows(values, per_line, fmt):
         return "\n".join(
-            "    " + " ".join(fmt(v) + "," for v in values[i:i + per_line])
-            for i in range(0, len(values), per_line))
+            "    " + " ".join(fmt(v) + "," for v in values[i : i + per_line])
+            for i in range(0, len(values), per_line)
+        )
 
     packed_decompositions = []
     for cp in ordered:

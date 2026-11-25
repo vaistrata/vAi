@@ -21,7 +21,7 @@ namespace vai::node {
 =============================================================================*/
 class Slice : public Node
 {
-    eva::ComputePipeline pipe;      // strided path only (outer > 1)
+    eva::ComputePipeline pipe;   // strided path only (outer > 1)
     eva::DescriptorSet descSet;
     uint32_t axisIdx = 0;   // resolved (non-negative) axis, set in prepare()
     uint32_t startIdx = 0;  // resolved (non-negative) start, set in prepare()

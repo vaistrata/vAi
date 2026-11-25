@@ -88,7 +88,7 @@ struct TransformerBlock : public vai::NodeGroup
     struct Config
     {
         TransformerConfig base;
-        uint32_t kvCacheSize = 0;     // 0 = no cache
+        uint32_t kvCacheSize = 0;   // 0 = no cache
         vai::Dtype kvCacheDtype = vai::Dtype::None;
         bool sliceLastRow = false;    // carry only the last row past the attention
         bool gatingLastOut = false;   // a closed gate drops the FFN and everything downstream

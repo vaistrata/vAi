@@ -90,9 +90,12 @@ inline Rope::Rope(Config config)
                 float wavelength = 2.0f * PI / freq;
 
                 // 0 at the low-frequency end, 1 at the high-frequency end.
-                float t = std::fmax(0.0f, std::fmin(1.0f,
-                    (float(cfg.originalMaxPos) / wavelength - cfg.lowFreqFactor)
-                    / (cfg.highFreqFactor - cfg.lowFreqFactor)));
+                float t = std::fmax(
+                    0.0f,
+                    std::fmin(
+                        1.0f,
+                        (float(cfg.originalMaxPos) / wavelength - cfg.lowFreqFactor) /
+                            (cfg.highFreqFactor - cfg.lowFreqFactor)));
 
                 freq = (freq / cfg.factor) * (1.0f - t) + freq * t;
             }

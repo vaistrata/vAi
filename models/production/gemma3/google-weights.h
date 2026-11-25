@@ -86,9 +86,10 @@ inline void loadWeights(Net& net, const vai::Checkpoint& ckpt)
                 vai::Tensor(ckpt[visionRoot + "embeddings.patch_embedding.weight"], wDt)
                     .reshape({ cfg.embedDim, cfg.imageChannels * cfg.patchSize * cfg.patchSize });
 
-            patch.project["bias"] = vai::sum(ckpt[visionRoot + "embeddings.position_embedding.weight"],
-                                             ckpt[visionRoot + "embeddings.patch_embedding.bias"],
-                                             wDt);
+            patch.project["bias"] = vai::sum(
+                ckpt[visionRoot + "embeddings.position_embedding.weight"],
+                ckpt[visionRoot + "embeddings.patch_embedding.bias"],
+                wDt);
         }
 
         // Vision encoder blocks

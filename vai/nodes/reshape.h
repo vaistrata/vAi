@@ -64,7 +64,7 @@ inline void Reshape::prepare()
             continue;
         }
         VAI_ASSERT(dims_[i] > 0);
-        dims[lead + i] = (uint32_t) dims_[i];
+        dims[lead + i] = (uint32_t)dims_[i];
         product *= dims[lead + i];
     }
 

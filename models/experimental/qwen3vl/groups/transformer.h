@@ -23,11 +23,12 @@ constexpr vai::TransformerConfig lm(uint32_t nBlocks, uint32_t embedDim, uint32_
         .ffnActType = vai::ActType::Silu,
         .normEps = 1e-6f,
         .withQkNorm = true,
-        .ropeCfg = vai::RopeConfig{
-            .posType = vai::RopePosType::MRoPE,
-            .base = 5000000.0f,
-            .mropeSection = { 24, 20, 20 },
-        },
+        .ropeCfg =
+            vai::RopeConfig{
+                .posType = vai::RopePosType::MRoPE,
+                .base = 5000000.0f,
+                .mropeSection = { 24, 20, 20 },
+            },
     };
 }
 

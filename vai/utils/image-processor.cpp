@@ -67,7 +67,7 @@ Strides strides(bool chw, uint32_t width, uint32_t height, uint32_t channels)
 }
 
 // A window of a held image, read in place.
-template<class T>
+template <class T>
 struct Source
 {
     const T* data;   // the window's top-left value
@@ -79,11 +79,11 @@ struct Source
     const T* row(uint32_t c, uint32_t y) const { return data + c * s.c + y * s.y; }
 };
 
-template<class T>
+template <class T>
 Source<T> sourceOf(const T* data, bool chw, uint32_t bufWidth, uint32_t bufHeight, uint32_t channels, Window view)
 {
     const Strides s = strides(chw, bufWidth, bufHeight, channels);
-    return {data + view.y * s.y + view.x * s.x, s, view.width, view.height, channels};
+    return { data + view.y * s.y + view.x * s.x, s, view.width, view.height, channels };
 }
 
 // The size a pass resizes to, and the window of it the pass writes.
@@ -153,7 +153,7 @@ void parallelRows(uint32_t rows, F f)
 // each source row first reduced along x, then the rows along y.
 /////////////////////////////////////////////////////////////////////////////////////////
 // One output pixel's taps along an axis.
-template<uint32_t N>
+template <uint32_t N>
 struct Taps
 {
     uint32_t index[N];   // source pixels, clamped to the image
@@ -161,7 +161,7 @@ struct Taps
 };
 
 // One axis: the taps of every output pixel along it.
-template<uint32_t N>
+template <uint32_t N>
 using TapAxis = std::vector<Taps<N>>;
 
 // floor(i * scale), torch's nearest and cv2 INTER_NEAREST.
@@ -171,7 +171,7 @@ TapAxis<1> nearestTaps(uint32_t src, uint32_t dst)
 
     TapAxis<1> axis(dst);
     for (uint32_t i = 0; i < dst; ++i)
-        axis[i] = {{std::min(uint32_t(std::floor(i * scale)), src - 1)}, {1.0f}};
+        axis[i] = { { std::min(uint32_t(std::floor(i * scale)), src - 1) }, { 1.0f } };
     return axis;
 }
 
@@ -188,7 +188,7 @@ TapAxis<2> linearTaps(uint32_t src, uint32_t dst, bool alignCorners)
         const float s = alignCorners ? i * ratio : std::max((i + 0.5f) * ratio - 0.5f, 0.0f);
         const uint32_t i0 = std::min(uint32_t(s), src - 1);
         const float frac = s - i0;
-        axis[i] = {{i0, std::min(i0 + 1, src - 1)}, {1.0f - frac, frac}};
+        axis[i] = { { i0, std::min(i0 + 1, src - 1) }, { 1.0f - frac, frac } };
     }
     return axis;
 }
@@ -229,7 +229,7 @@ TapAxis<4> cubicTaps(uint32_t src, uint32_t dst)
     return axis;
 }
 
-template<uint32_t N, class T>
+template <uint32_t N, class T>
 void interpolate(
     const Source<T>& src, const Target& dst, const TapAxis<N>& xAxis, const TapAxis<N>& yAxis, const Emit& emit)
 {
@@ -304,15 +304,15 @@ struct Kernel
     double (*weight)(double x);
 };
 
-constexpr Kernel triangle = {1.0, triangleWeight};
-constexpr Kernel bicubic = {2.0, bicubicWeight};
-constexpr Kernel lanczos = {3.0, lanczosWeight};
+constexpr Kernel triangle = { 1.0, triangleWeight };
+constexpr Kernel bicubic = { 2.0, bicubicWeight };
+constexpr Kernel lanczos = { 3.0, lanczosWeight };
 
 // One axis: the filter of every output pixel along it. Output i reads count[i]
 // source pixels from first[i], with the fixed-point coefficients at(i).
 struct FilterAxis
 {
-    uint32_t stride = 0;                 // coefficients per output, the widest filter's
+    uint32_t stride = 0;   // coefficients per output, the widest filter's
     std::vector<uint32_t> first;
     std::vector<uint32_t> count;
     std::vector<int32_t> coefficients;   // [dst, stride]
@@ -367,7 +367,7 @@ FilterAxis filterAxis(uint32_t src, uint32_t dst, const Kernel& kernel, bool int
         axis.precision = 22;
 
     // Rounded half away from zero: a negative lobe rounds as Pillow and torchvision do.
-    const double one = double(int64_t{1} << axis.precision);
+    const double one = double(int64_t{ 1 } << axis.precision);
     for (size_t k = 0; k < weights.size(); ++k)
         axis.coefficients[k] = int32_t(weights[k] < 0.0 ? -0.5 + weights[k] * one : 0.5 + weights[k] * one);
     return axis;
@@ -376,13 +376,13 @@ FilterAxis filterAxis(uint32_t src, uint32_t dst, const Kernel& kernel, bool int
 // Horizontal pass into an int32 [channels, rows, keep.width] buffer, then vertical,
 // each clipped to 0~255. Only the source rows the kept output rows reach go through
 // the horizontal pass.
-template<class T>
+template <class T>
 void antialias(
     const Source<T>& src, const Target& dst, const FilterAxis& xAxis, const FilterAxis& yAxis, const Emit& emit)
 {
     const Window& keep = dst.keep;
-    const int64_t xHalf = int64_t{1} << (xAxis.precision - 1);
-    const int64_t yHalf = int64_t{1} << (yAxis.precision - 1);
+    const int64_t xHalf = int64_t{ 1 } << (xAxis.precision - 1);
+    const int64_t yHalf = int64_t{ 1 } << (yAxis.precision - 1);
 
     const uint32_t lastY = keep.y + keep.height - 1;
     const uint32_t rowLo = yAxis.first[keep.y];
@@ -436,15 +436,19 @@ void antialias(
 // Dispatch - each Resize mode to its engine, one case per mode. Both engines take
 // one axis per direction, built here from the same description.
 /////////////////////////////////////////////////////////////////////////////////////////
-template<class T>
+template <class T>
 void resampleImage(const Source<T>& src, const Target& dst, Resize mode, const Emit& emit)
 {
     auto interpolateWith = [&](auto taps, auto... args) {
         interpolate(src, dst, taps(src.width, dst.width, args...), taps(src.height, dst.height, args...), emit);
     };
     auto antialiasWith = [&](const Kernel& kernel, bool int16) {
-        antialias(src, dst, filterAxis(src.width, dst.width, kernel, int16),
-                  filterAxis(src.height, dst.height, kernel, int16), emit);
+        antialias(
+            src,
+            dst,
+            filterAxis(src.width, dst.width, kernel, int16),
+            filterAxis(src.height, dst.height, kernel, int16),
+            emit);
     };
 
     switch (mode)
@@ -480,7 +484,7 @@ void resampleImage(const Source<T>& src, const Target& dst, Resize mode, const E
 }
 
 // The held window to the output as it is, when nothing resamples.
-template<class T>
+template <class T>
 void convert(const Source<T>& src, const Emit& emit)
 {
     for (uint32_t c = 0; c < src.channels; ++c)
@@ -510,10 +514,14 @@ ImageProcessor::ImageProcessor(const std::string& path, uint32_t channels)
 }
 
 ImageProcessor::ImageProcessor(const uint8_t* pixels, uint32_t width, uint32_t height, uint32_t channels)
-    : source(pixels, pixels + size_t(width) * height * channels),
-      bufWidth(width), bufHeight(height), view{0, 0, width, height},
-      width(width), height(height), channels(channels),
-      imageGeometry{.sourceWidth = width, .sourceHeight = height}
+: source(pixels, pixels + size_t(width) * height * channels)
+, bufWidth(width)
+, bufHeight(height)
+, view{ 0, 0, width, height }
+, width(width)
+, height(height)
+, channels(channels)
+, imageGeometry{ .sourceWidth = width, .sourceHeight = height }
 {
     if (width == 0 || height == 0 || channels == 0 || channels > 4)
         throw std::invalid_argument("image dimensions must be non-zero, with at most 4 channels");
@@ -531,7 +539,7 @@ void ImageProcessor::recordResize(uint32_t newWidth, uint32_t newHeight, Resize 
     imageGeometry.padX *= sx;
     imageGeometry.padY *= sy;
 
-    steps.push_back({newWidth, newHeight, {0, 0, newWidth, newHeight}, 0, 0, 0, 0.0f, mode});
+    steps.push_back({ newWidth, newHeight, { 0, 0, newWidth, newHeight }, 0, 0, 0, 0.0f, mode });
     width = newWidth;
     height = newHeight;
 }
@@ -564,7 +572,7 @@ void ImageProcessor::recordLetterbox(uint32_t size, Align align, float padValue,
     imageGeometry.padX = imageGeometry.padX * scale + padX;
     imageGeometry.padY = imageGeometry.padY * scale + padY;
 
-    steps.push_back({dstW, dstH, {0, 0, dstW, dstH}, size, padX, padY, padValue, mode});
+    steps.push_back({ dstW, dstH, { 0, 0, dstW, dstH }, size, padX, padY, padValue, mode });
     width = size;
     height = size;
 }
@@ -584,7 +592,7 @@ void ImageProcessor::recordCenterCrop(uint32_t cropWidth, uint32_t cropHeight)
     imageGeometry.padY -= y;
 
     Window& window = steps.empty() ? view : steps.back().keep;
-    window = {window.x + x, window.y + y, cropWidth, cropHeight};
+    window = { window.x + x, window.y + y, cropWidth, cropHeight };
     width = cropWidth;
     height = cropHeight;
 }
@@ -646,7 +654,7 @@ void ImageProcessor::resample(const Resample& step, bool last)
         forEachValue(dst, outputChw, channels, [&](uint32_t c, float& v) { v = pad[c]; });
     }
 
-    const Target target{step.width, step.height, step.keep};
+    const Target target{ step.width, step.height, step.keep };
     if (isFloat)
         resampleImage(sourceOf(pixels.data(), storedChw, bufWidth, bufHeight, channels, view), target, step.mode, emit);
     else
@@ -658,7 +666,7 @@ void ImageProcessor::resample(const Resample& step, bool last)
     storedChw = outputChw;
     bufWidth = outW;
     bufHeight = outH;
-    view = {0, 0, outW, outH};
+    view = { 0, 0, outW, outH };
     if (last)
     {
         storedBgr = outputBgr;
@@ -672,7 +680,7 @@ void ImageProcessor::resample(const Resample& step, bool last)
 // the output. A whole float image already in the output layout is adjusted in place.
 void ImageProcessor::finish()
 {
-    Emit emit{nullptr, strides(outputChw, view.width, view.height, channels)};
+    Emit emit{ nullptr, strides(outputChw, view.width, view.height, channels) };
     emit.normalize = normalized && !storedNormalized;
     emit.mean = normMean;
     emit.std = normStd;
@@ -705,7 +713,7 @@ void ImageProcessor::finish()
         storedChw = outputChw;
         bufWidth = view.width;
         bufHeight = view.height;
-        view = {0, 0, bufWidth, bufHeight};
+        view = { 0, 0, bufWidth, bufHeight };
     }
     storedBgr = outputBgr;
     storedNormalized = normalized;

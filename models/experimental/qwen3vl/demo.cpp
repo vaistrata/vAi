@@ -145,7 +145,8 @@ int main()
     // Prepare prompt and encode it to token ids
     std::string text = "Describe this image.";
     printf("\nPrompt: \"%s\"\n", text.c_str());
-    std::string prompt = qwen3vl::expandImagePlaceholders(qwen3vl::chatPrompt(text, B), net.visionEncoder.tokensPerImage);
+    std::string prompt =
+        qwen3vl::expandImagePlaceholders(qwen3vl::chatPrompt(text, B), net.visionEncoder.tokensPerImage);
     std::vector<int> ids = tokenizer.encode(prompt);
     const uint32_t promptLength = (uint32_t)ids.size();
 

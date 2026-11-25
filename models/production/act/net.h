@@ -92,7 +92,7 @@ struct Net : public vai::NeuralNet
     vai::node::Concat catTokens;           // [2 + B*h*w, D]
     std::vector<group::EncoderBlock> encoder;
 
-    group::DecoderBlock decoder;    // [actionChunk, D]
+    group::DecoderBlock decoder;   // [actionChunk, D]
     vai::node::LayerNorm decoderNorm;
     vai::node::Linear actionHead;   // [actionChunk, actionDim]
 

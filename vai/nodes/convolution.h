@@ -104,7 +104,7 @@ inline AMDArchitecture classifyAMDArchitecture(uint32_t vendorId, uint32_t devic
     switch (deviceId)
     {
     case kAMDStrixPointDeviceId: // Strix Point
-    case kAMDStrixHaloDeviceId:  // Strix Halo
+    case kAMDStrixHaloDeviceId:   // Strix Halo
         return AMDArchitecture::RDNA3;
     case kAMDNavi48DeviceId: // Navi 48
         return AMDArchitecture::RDNA4;
