@@ -1,0 +1,52 @@
+/*=============================================================================
+ index-select.comp:
+ Copy leading-axis rows selected by uint32 indices, using the input FP32/FP16 dtype.
+ Input: [N, ...], indices: [K]. Output: [K, ...]. D is the row element count.
+=============================================================================*/
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_shader_16bit_storage : require
+#include "common/spec_constants.h"
+
+layout(local_size_x = 64) in;
+
+layout(constant_id = SPEC_ID_TYPE_I) const uint typeI = 0;
+
+layout(set = 0, binding = 0) writeonly buffer O_BUF_F32 { float bufferO_f32[]; };
+layout(set = 0, binding = 0) writeonly buffer O_BUF_F16 { float16_t bufferO_f16[]; };
+layout(set = 0, binding = 1) readonly buffer I_BUF_F32 { float bufferI_f32[]; };
+layout(set = 0, binding = 1) readonly buffer I_BUF_F16 { float16_t bufferI_f16[]; };
+layout(set = 0, binding = 2) readonly buffer IDX_BUF_U32 { uint bufferIdx_u32[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint N;
+    uint D;
+    uint count;
+};
+
+void main()
+{
+    // Spill large dispatches into Y. Reject padded groups before multiplying
+    // by the workgroup size so the element address cannot wrap around.
+    uint group = gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x;
+    if (group > (count - 1u) / gl_WorkGroupSize.x) return;
+    uint i = group * gl_WorkGroupSize.x + gl_LocalInvocationID.x;
+    if (i >= count) return;
+
+    uint row = bufferIdx_u32[i / D];
+    if (row < N)
+    {
+        uint offset = row * D + i % D;
+        if (typeI == 0u)
+            bufferO_f32[i] = bufferI_f32[offset];
+        else
+            bufferO_f16[i] = bufferI_f16[offset];
+    }
+    else
+    {
+        if (typeI == 0u)
+            bufferO_f32[i] = 0.0;
+        else
+            bufferO_f16[i] = float16_t(0.0);
+    }
+}
