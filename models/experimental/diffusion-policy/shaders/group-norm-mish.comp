@@ -1,0 +1,131 @@
+/*=============================================================================
+ group-norm-mish.comp: group normalization over a [C, T] sequence, Mish, then
+ the FiLM and residual the diffusion UNet applies after it
+     y = mish((I[c, t] - μ[g(c)]) · rsqrt(σ²[g(c)] + eps) · scale[c] + shift[c])
+     y = filmScale[c] · y + filmShift[c]      film 2 (ScaleShift)
+     y = y + filmShift[c]                     film 1 (Shift)
+     O[c, t] = y (+ R[c, t])
+
+ One workgroup per (group, sampleIdx): a group's C/G channels are T apart, so its
+ elements are one contiguous run of (C/G)·T. The statistics take two passes
+ over it in fp32 (the mean, then Σ(x − μ)²), reduced through shared memory;
+ a third pass normalizes and writes. The run is short in the UNet (<= 1024),
+ so it stays in L1 / L2 between passes.
+ - O (typeO), I (typeI), R (typeR), F (typeF), scale / shift (typeW) are fp32
+   or fp16 via same-binding buffer aliases.
+ - F holds a sampleIdx's FiLM row: [scale C | shift C] (ScaleShift) or [shift C]
+   (Shift), lerobot's cond_embed order.
+ Bindings: O=0, I=1, scale=2, shift=3, F=4, R=5.
+ Dispatch (host): dispatch(groups, samples).
+ Push constants: C, T, groups, eps.
+=============================================================================*/
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_16bit_storage : require
+#include "common/spec_constants.h"
+
+#define WG_SIZE 256u
+
+layout(local_size_x = WG_SIZE) in;
+
+layout(constant_id = 0) const uint film = 0;          // 0: none, 1: shift, 2: scale and shift
+layout(constant_id = 1) const uint hasResidual = 0;   // 1: R added last
+layout(constant_id = 2) const uint typeF = 0;         // F (FiLM) dtype
+layout(constant_id = 3) const uint typeR = 0;         // R (residual) dtype
+layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0;
+layout(constant_id = SPEC_ID_TYPE_I) const uint typeI = 0;
+layout(constant_id = SPEC_ID_TYPE_W) const uint typeW = 0;   // scale / shift
+
+layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_F32 { float bufferO_f32[]; };
+layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_F16 { float16_t bufferO_f16[]; };
+layout(set = 0, binding = 1) restrict readonly buffer I_BUF_F32 { float bufferI_f32[]; };
+layout(set = 0, binding = 1) restrict readonly buffer I_BUF_F16 { float16_t bufferI_f16[]; };
+layout(set = 0, binding = 2) restrict readonly buffer SCALE_BUF_F32 { float bufferScale_f32[]; };
+layout(set = 0, binding = 2) restrict readonly buffer SCALE_BUF_F16 { float16_t bufferScale_f16[]; };
+layout(set = 0, binding = 3) restrict readonly buffer SHIFT_BUF_F32 { float bufferShift_f32[]; };
+layout(set = 0, binding = 3) restrict readonly buffer SHIFT_BUF_F16 { float16_t bufferShift_f16[]; };
+layout(set = 0, binding = 4) restrict readonly buffer F_BUF_F32 { float bufferF_f32[]; };
+layout(set = 0, binding = 4) restrict readonly buffer F_BUF_F16 { float16_t bufferF_f16[]; };
+layout(set = 0, binding = 5) restrict readonly buffer R_BUF_F32 { float bufferR_f32[]; };
+layout(set = 0, binding = 5) restrict readonly buffer R_BUF_F16 { float16_t bufferR_f16[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint C;
+    uint T;
+    uint groups;
+    float eps;
+};
+
+float readI(uint i)     { return (typeI == DTYPE_F32) ? bufferI_f32[i] : float(bufferI_f16[i]); }
+float readScale(uint c) { return (typeW == DTYPE_F32) ? bufferScale_f32[c] : float(bufferScale_f16[c]); }
+float readShift(uint c) { return (typeW == DTYPE_F32) ? bufferShift_f32[c] : float(bufferShift_f16[c]); }
+float readF(uint i)     { return (typeF == DTYPE_F32) ? bufferF_f32[i] : float(bufferF_f16[i]); }
+float readR(uint i)     { return (typeR == DTYPE_F32) ? bufferR_f32[i] : float(bufferR_f16[i]); }
+void  writeO(uint i, float v) { if (typeO == DTYPE_F32) bufferO_f32[i] = v; else bufferO_f16[i] = float16_t(v); }
+
+float mish(float x)
+{
+    const float sp = (x > 20.0) ? x : log(1.0 + exp(x));   // torch's softplus threshold
+    return x * tanh(sp);
+}
+
+shared float sRed[WG_SIZE];
+
+float reduceSum(float v)
+{
+    const uint tid = gl_LocalInvocationID.x;
+    sRed[tid] = v;
+    barrier();
+    for (uint s = WG_SIZE / 2u; s > 0u; s >>= 1u)
+    {
+        if (tid < s)
+            sRed[tid] += sRed[tid + s];
+        barrier();
+    }
+    const float total = sRed[0];
+    barrier();   // every thread has read it before sRed is reused
+    return total;
+}
+
+void main()
+{
+    const uint g = gl_WorkGroupID.x;
+    const uint sampleIdx = gl_WorkGroupID.y;
+    const uint tid = gl_LocalInvocationID.x;
+
+    const uint chPerGroup = C / groups;
+    const uint n = chPerGroup * T;
+    const uint base = sampleIdx * C * T + g * n;
+
+    // Pass 1: mean
+    float sum = 0.0;
+    for (uint i = tid; i < n; i += WG_SIZE)
+        sum += readI(base + i);
+    const float mean = reduceSum(sum) / float(n);
+
+    // Pass 2: biased variance, Σ(x − μ)² / n as torch's group_norm
+    float sq = 0.0;
+    for (uint i = tid; i < n; i += WG_SIZE)
+    {
+        const float d = readI(base + i) - mean;
+        sq += d * d;
+    }
+    const float rstd = inversesqrt(reduceSum(sq) / float(n) + eps);
+
+    // Pass 3: normalize, affine, mish, FiLM, residual
+    const uint filmRow = sampleIdx * (film == 2u ? 2u * C : C);
+    for (uint i = tid; i < n; i += WG_SIZE)
+    {
+        const uint idx = base + i;
+        const uint c = g * chPerGroup + i / T;
+        float y = mish((readI(idx) - mean) * rstd * readScale(c) + readShift(c));
+        if (film == 2u)
+            y = readF(filmRow + c) * y + readF(filmRow + C + c);
+        else if (film == 1u)
+            y += readF(filmRow + c);
+        if (hasResidual == 1u)
+            y += readR(idx);
+        writeO(idx, y);
+    }
+}

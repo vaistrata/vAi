@@ -1,0 +1,46 @@
+/*=============================================================================
+ mish.comp: O[i] = mish(I[i]) = I[i] · tanh(softplus(I[i]))   (torch.nn.Mish)
+
+ softplus(x) = log(1 + exp(x)), x itself past 20 as torch's threshold has it
+ (exp would overflow long before tanh stops being 1). Math is fp32.
+ - O (typeO), I (typeI) are fp32 or fp16 via same-binding buffer aliases.
+ - inPlace 1 reads and writes O (in0 unbound).
+ Dispatch (host): dispatch2(N).
+=============================================================================*/
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_16bit_storage : require
+#include "common/spec_constants.h"
+
+layout(local_size_x = 256) in;
+
+layout(constant_id = 0) const uint inPlace = 0;                // 0: separate out, 1: in-place
+layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0;     // O (output) dtype
+layout(constant_id = SPEC_ID_TYPE_I) const uint typeI = 0;     // I (input) dtype
+
+layout(set = 0, binding = 0) buffer O_BUF_F32 { float bufferO_f32[]; };
+layout(set = 0, binding = 0) buffer O_BUF_F16 { float16_t bufferO_f16[]; };
+layout(set = 0, binding = 1) readonly buffer I_BUF_F32 { float bufferI_f32[]; };
+layout(set = 0, binding = 1) readonly buffer I_BUF_F16 { float16_t bufferI_f16[]; };
+
+layout(push_constant) uniform PushConstants { uint N; };
+
+float readI(uint i) { return (typeI == DTYPE_F32) ? bufferI_f32[i] : float(bufferI_f16[i]); }
+float readO(uint i) { return (typeO == DTYPE_F32) ? bufferO_f32[i] : float(bufferO_f16[i]); }
+void writeO(uint i, float v) { if (typeO == DTYPE_F32) bufferO_f32[i] = v; else bufferO_f16[i] = float16_t(v); }
+
+float mish(float x)
+{
+    const float sp = (x > 20.0) ? x : log(1.0 + exp(x));
+    return x * tanh(sp);
+}
+
+void main()
+{
+    const uint i = gl_GlobalInvocationID.x;
+    if (i >= N) return;
+
+    const float x = (inPlace != 0u) ? readO(i) : readI(i);
+    writeO(i, mish(x));
+}

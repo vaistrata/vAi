@@ -1,0 +1,94 @@
+/*=============================================================================
+ softmax.comp: softmax along one axis (torch.nn.functional.softmax(I, dim))
+     O[o, :, i] = exp(I[o, :, i] - max(I[o, :, i])) / Σ exp(I[o, :, i] - max(I[o, :, i]))
+
+ The input is seen as [outer, D, inner], D the softmax axis. A row is one
+ (o, i) pair, its D elements inner apart (inner == 1: a contiguous last axis).
+ A workgroup handles one row in three strided sweeps: the row max, the
+ exp-sum, then the normalized write; both reductions run through a
+ shared-memory tree. Accumulation is always fp32.
+
+ - O (typeO), I (typeI) are fp32 or fp16 via same-binding buffer aliases.
+ - Dispatch (host): one workgroup per row, rows folded over grid x/y as
+   .dispatch(gridX, ceil(rows / gridX)) -- grid x alone caps at 65535
+   on some devices (Intel).
+=============================================================================*/
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_16bit_storage : require
+#include "common/spec_constants.h"
+
+#define FLT_LOWEST -3.402823466e+38
+
+layout(constant_id = 0) const uint wgSize = 128;               // threads per workgroup, a power of 2 (host)
+layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0;     // O (output) dtype
+layout(constant_id = SPEC_ID_TYPE_I) const uint typeI = 0;     // I (input) dtype
+
+layout(local_size_x_id = 0) in;
+
+layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_F32 { float bufferO_f32[]; };
+layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_F16 { float16_t bufferO_f16[]; };
+//////////////////////////////////////////////////////////////////////////////
+layout(set = 0, binding = 1) restrict readonly buffer I_BUF_F32 { float bufferI_f32[]; };
+layout(set = 0, binding = 1) restrict readonly buffer I_BUF_F16 { float16_t bufferI_f16[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint rows;      // outer * inner
+    uint D;         // softmax axis length
+    uint inner;     // stride between a row's elements
+    uint gridX;     // dispatch width -- row = y * gridX + x
+};
+
+float readI(uint i)          { return (typeI == DTYPE_F32) ? bufferI_f32[i] : float(bufferI_f16[i]); }
+void  writeO(uint i, float v) { if (typeO == DTYPE_F32) bufferO_f32[i] = v; else bufferO_f16[i] = float16_t(v); }
+
+shared float sRed[wgSize];
+
+void main()
+{
+    const uint row = gl_WorkGroupID.y * gridX + gl_WorkGroupID.x;
+    const uint tid = gl_LocalInvocationID.x;
+    if (row >= rows)
+        return;   // uniform across the workgroup: no barrier is skipped by part of it
+
+    const uint o    = row / inner;
+    const uint i    = row - o * inner;
+    const uint base = o * D * inner + i;
+
+    // Phase 1: row max, for a numerically stable exp
+    float m = FLT_LOWEST;
+    for (uint d = tid; d < D; d += wgSize)
+        m = max(m, readI(base + d * inner));
+    sRed[tid] = m;
+    barrier();
+    for (uint s = wgSize / 2u; s > 0u; s >>= 1u)
+    {
+        if (tid < s)
+            sRed[tid] = max(sRed[tid], sRed[tid + s]);
+        barrier();
+    }
+    m = sRed[0];
+    barrier();   // every thread has read the max before sRed is reused
+
+    // Phase 2: Σ exp(x - max)
+    float sum = 0.0;
+    for (uint d = tid; d < D; d += wgSize)
+        sum += exp(readI(base + d * inner) - m);
+    sRed[tid] = sum;
+    barrier();
+    for (uint s = wgSize / 2u; s > 0u; s >>= 1u)
+    {
+        if (tid < s)
+            sRed[tid] += sRed[tid + s];
+        barrier();
+    }
+    const float invSum = 1.0 / sRed[0];
+
+    // Phase 3: normalized write
+    for (uint d = tid; d < D; d += wgSize)
+    {
+        const uint idx = base + d * inner;
+        writeO(idx, exp(readI(idx) - m) * invSum);
+    }
+}
