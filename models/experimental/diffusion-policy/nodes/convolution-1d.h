@@ -20,41 +20,47 @@ namespace model::experimental::diffusion_policy::node {
   filled it. acceptResidual opens the "residual" input (in0's dtype), added
   after the activation or, with ResidualOrder::BeforeActivation, before it.
 
-  Self-contained: it shares no code with vai::node::Convolution. One path so far,
-  the cooperative-matrix one (conv1d-cm): fp16 weights on a device with a 16x16x16
-  fp16 coopmat shape and 32-lane subgroups. It is an implicit GEMM of M = Co,
-  N = To over Ci·K, the input gathered on the fly; the weight is packed once, at
-  the first run(), into 16x16 fragments (conv1d-cm-transform). Accumulation is
-  fp32 where the device has the f16 x f16 -> f32 shape, fp16 otherwise.
-
-  The tile follows To: the UNet's sequences are short (pushT: 16 -> 8 -> 4), so
-  To <= 16 takes a 64 x 16 tile (four subgroups down Co), longer ones 32 x 32.
+  Self-contained: it shares no code with vai::node::Convolution. Two paths, picked
+  by the device; weight is fp32 or fp16 on either:
+  - conv1d-cm, on a device with a 16x16x16 fp16 coopmat shape and 32-lane
+    subgroups: an implicit GEMM of M = Co, N = To over Ci·K, the input gathered
+    on the fly as fp16. The weight is packed once, at the first run(), into
+    16x16 fp16 fragments (conv1d-cm-transform). Accumulation is fp32 where the
+    device has the f16 x f16 -> f32 shape, fp16 otherwise. The tile follows To:
+    the UNet's sequences are short (pushT: 16 -> 8 -> 4), so To <= 16 takes a
+    64 x 16 tile (four subgroups down Co), longer ones 32 x 32.
+  - conv1d, everywhere else (lavapipe, Intel's integrated GPUs): one thread per
+    output, fp32 accumulation, the weight read as loaded.
   The pipeline is requested in prepare() once the shape is known and
   re-requested from the pool when the parameters change.
 =============================================================================*/
 class Convolution1d : public vai::Node
 {
-    eva::ComputePipeline pipe;
-    eva::DescriptorSet descSet;
-    eva::ComputePipeline transformPipe;
-    eva::DescriptorSet transformDescSet;
-    eva::Buffer packedWeight;   // [Mp/16][Kp/16][16][16] fp16, written once
+    eva::ComputePipeline pipe_;
+    eva::DescriptorSet descSet_;
+    eva::ComputePipeline transformPipe_;
+    eva::DescriptorSet transformDescSet_;
+    eva::Buffer packedWeight_;   // [Mp/16][Kp/16][16][16] fp16, written once
 
 public:
-    struct PipeParams {
+    struct PipeParams
+    {
+        bool coopmat = false;   // conv1d-cm; else conv1d, which reads none of the tile fields
         uint32_t wgSize = 0;    // threads per workgroup, 32-lane subgroups
         uint32_t wgM = 0;       // Co rows per workgroup, a multiple of 16
         uint32_t wgN = 0;       // To columns per workgroup, a multiple of 16
         uint32_t panelK = 0;    // reduction rows staged per shared-memory panel
         bool accF32 = false;    // fp32 coopmat accumulators, else fp16
         vai::Dtype iDtype = vai::Dtype::None;
+        vai::Dtype wDtype = vai::Dtype::None;
         vai::Dtype pDtype = vai::Dtype::None;   // bias
         bool hasBias = false;
 
         bool operator==(const PipeParams&) const = default;
     };
 
-    struct Config {
+    struct Config
+    {
         uint32_t inChannels;
         uint32_t outChannels;
         uint32_t kernelSize;
@@ -75,7 +81,7 @@ public:
 private:
     void packWeight();
 
-    PipeParams pipeParams;
+    PipeParams pipeParams_;
     bool weightPacked_ = false;
     uint32_t seqs_ = 0, Ti_ = 0, To_ = 0;   // sequences, input / output lengths
 };
@@ -96,10 +102,19 @@ inline bool conv1dHasCMShape(const eva::Device& device, eva::COMPONENT_TYPE accT
     return false;
 }
 
+// Whether the device takes conv1d-cm: a 16x16x16 fp16 shape and 32-lane subgroups.
+inline bool conv1dHasCoopmat(const eva::Device& device)
+{
+    return device.supportsCooperativeMatrix() && device.minSubgroupSize() <= 32u && 32u <= device.maxSubgroupSize() &&
+           (conv1dHasCMShape(device, eva::COMPONENT_TYPE::FLOAT32) ||
+            conv1dHasCMShape(device, eva::COMPONENT_TYPE::FLOAT16));
+}
+
 // Tile geometry: four 32-lane subgroups, each one 16x16 output tile.
 inline Convolution1d::PipeParams conv1dTuning(uint32_t To, eva::Device device)
 {
     Convolution1d::PipeParams t;
+    t.coopmat = true;
     t.wgSize = 128u;
     t.wgN = To <= 16u ? 16u : 32u;
     t.wgM = (t.wgSize / 32u) * 256u / t.wgN;
@@ -140,7 +155,6 @@ inline void Convolution1d::prepare()
     VAI_ASSERT(Ti_ != 0u && seqs_ != 0u);
     VAI_ASSERT(seqs_ <= device().maxComputeWorkGroupCount()[2]);
 
-    VAI_ASSERT(wTen.dtype() == vai::Dtype::Fp16 && "Convolution1d: the coopmat path takes fp16 weights");
     VAI_ASSERT(wTen.isShapeOf(config_.outChannels, config_.inChannels, config_.kernelSize));
     if (hasBias())
         VAI_ASSERT((*this)["bias"].isShapeOf(config_.outChannels));
@@ -152,43 +166,63 @@ inline void Convolution1d::prepare()
     }
 
     const eva::Device dev = device();
-    VAI_ASSERT(dev.supportsCooperativeMatrix() && dev.minSubgroupSize() <= 32u && 32u <= dev.maxSubgroupSize() &&
-               (conv1dHasCMShape(dev, eva::COMPONENT_TYPE::FLOAT32) ||
-                conv1dHasCMShape(dev, eva::COMPONENT_TYPE::FLOAT16)) &&
-               "Convolution1d: no 16x16x16 fp16 cooperative matrix on this device (no other path yet)");
-
-    PipeParams p = conv1dTuning(To_, dev);
+    PipeParams p = conv1dHasCoopmat(dev) ? conv1dTuning(To_, dev) : PipeParams{};
     p.iDtype = inTen.dtype();
+    p.wDtype = wTen.dtype();
     p.pDtype = hasBias() ? (*this)["bias"].dtype() : vai::Dtype::Fp32;
     p.hasBias = hasBias();
-    if (!pipe || p != pipeParams)
+    if (!pipe_ || p != pipeParams_)
     {
-        pipeParams = p;
-        // clang-format off
-        pipe = pipelinePool().request(EXPERIMENTAL_DIFFUSION_POLICY_SHADER_OUTPUT_DIR, "conv1d-cm", {
-            eva::constant_id<0>(p.wgSize),                                   // wgSize
-            eva::constant_id<1>(p.wgM),                                      // wgM
-            eva::constant_id<2>(p.wgN),                                      // wgN
-            eva::constant_id<3>(p.panelK),                                   // panelK
-            eva::constant_id<4>(config_.kernelSize),                         // K
-            eva::constant_id<5>(config_.stride),                             // stride
-            eva::constant_id<6>(p.accF32 ? 1u : 0u),                         // accF32
-            eva::constant_id<7>(config_.acceptResidual ? 1u : 0u),           // hasResidual
-            eva::constant_id<8>((uint32_t) config_.residualOrder),           // residualOrder
-            eva::constant_id<SPEC_ID_TYPE_O>(oDtype),                        // typeO
-            eva::constant_id<SPEC_ID_TYPE_I>(p.iDtype),                      // typeI
-            eva::constant_id<SPEC_ID_TYPE_P>(p.pDtype),                      // typeP (bias)
-            eva::constant_id<SPEC_ID_ACT_TYPE>((uint32_t) config_.actType), // actType
-            eva::constant_id<SPEC_ID_HAS_BIAS>(p.hasBias ? 1u : 0u)          // hasBias
-        }, { .requiredSubgroupSize = 32u });
-        // clang-format on
-        if (!descSet)
-            descSet = vai::gVaiDestSetPool(pipe.descSetLayout(0));
+        pipeParams_ = p;
+        if (p.coopmat)
+        {
+            // clang-format off
+            pipe_ = pipelinePool().request(EXPERIMENTAL_DIFFUSION_POLICY_SHADER_OUTPUT_DIR, "conv1d-cm", {
+                eva::constant_id<0>(p.wgSize),                                   // wgSize
+                eva::constant_id<1>(p.wgM),                                      // wgM
+                eva::constant_id<2>(p.wgN),                                      // wgN
+                eva::constant_id<3>(p.panelK),                                   // panelK
+                eva::constant_id<4>(config_.kernelSize),                         // K
+                eva::constant_id<5>(config_.stride),                             // stride
+                eva::constant_id<6>(p.accF32 ? 1u : 0u),                         // accF32
+                eva::constant_id<7>(config_.acceptResidual ? 1u : 0u),           // hasResidual
+                eva::constant_id<8>((uint32_t) config_.residualOrder),           // residualOrder
+                eva::constant_id<SPEC_ID_TYPE_O>(oDtype),                        // typeO
+                eva::constant_id<SPEC_ID_TYPE_I>(p.iDtype),                      // typeI
+                eva::constant_id<SPEC_ID_TYPE_P>(p.pDtype),                      // typeP (bias)
+                eva::constant_id<SPEC_ID_ACT_TYPE>((uint32_t) config_.actType), // actType
+                eva::constant_id<SPEC_ID_HAS_BIAS>(p.hasBias ? 1u : 0u)          // hasBias
+            }, { .requiredSubgroupSize = 32u });
+            // clang-format on
+        }
+        else
+        {
+            // clang-format off
+            pipe_ = pipelinePool().request(EXPERIMENTAL_DIFFUSION_POLICY_SHADER_OUTPUT_DIR, "conv1d", {
+                eva::constant_id<0>(config_.kernelSize),                         // K
+                eva::constant_id<1>(config_.stride),                             // stride
+                eva::constant_id<2>(config_.acceptResidual ? 1u : 0u),           // hasResidual
+                eva::constant_id<3>((uint32_t) config_.residualOrder),           // residualOrder
+                eva::constant_id<SPEC_ID_TYPE_O>(oDtype),                        // typeO
+                eva::constant_id<SPEC_ID_TYPE_I>(p.iDtype),                      // typeI
+                eva::constant_id<SPEC_ID_TYPE_W>(p.wDtype),                      // typeW
+                eva::constant_id<SPEC_ID_TYPE_P>(p.pDtype),                      // typeP (bias)
+                eva::constant_id<SPEC_ID_ACT_TYPE>((uint32_t) config_.actType), // actType
+                eva::constant_id<SPEC_ID_HAS_BIAS>(p.hasBias ? 1u : 0u)          // hasBias
+            });
+            // clang-format on
+        }
+        // Both shaders bind O, I, W, bias and residual alike.
+        if (!descSet_)
+            descSet_ = vai::gVaiDestSetPool(pipe_.descSetLayout(0));
     }
-    if (!transformPipe)
+    if (p.coopmat && !transformPipe_)
     {
-        transformPipe = pipelinePool().request(EXPERIMENTAL_DIFFUSION_POLICY_SHADER_OUTPUT_DIR, "conv1d-cm-transform", eva::SpecializationConstant{});
-        transformDescSet = vai::gVaiDestSetPool(transformPipe.descSetLayout(0));
+        transformPipe_ = pipelinePool().request(
+            EXPERIMENTAL_DIFFUSION_POLICY_SHADER_OUTPUT_DIR,
+            "conv1d-cm-transform",
+            { eva::constant_id<SPEC_ID_TYPE_W>(p.wDtype) });
+        transformDescSet_ = vai::gVaiDestSetPool(transformPipe_.descSetLayout(0));
     }
 
     std::vector<uint32_t> outShape = shape;
@@ -205,26 +239,27 @@ inline void Convolution1d::packWeight()
         return;
 
     const uint32_t Co = config_.outChannels;
-    const uint32_t CiK = config_.inChannels * config_.kernelSize;
-    const uint32_t elements = ROUNDUP(Co, 16u) * ROUNDUP(CiK, 16u);
-    packedWeight = device().createBuffer({
+    const uint32_t ciK = config_.inChannels * config_.kernelSize;
+    const uint32_t elements = ROUNDUP(Co, 16u) * ROUNDUP(ciK, 16u);
+    packedWeight_ = device().createBuffer({
         .size = size_t(elements) * sizeof(uint16_t),
         .usage = eva::BUFFER_USAGE::STORAGE_BUFFER,
         .reqMemProps = eva::MEMORY_PROPERTY::DEVICE_LOCAL,
     });
-    transformDescSet.write({ packedWeight, (*this)["weight"].buffer() });
+    transformDescSet_.write({ packedWeight_, (*this)["weight"].buffer() });
 
-    struct {
-        uint32_t Co, CiK;
-    } constants = { Co, CiK };
+    struct
+    {
+        uint32_t Co, ciK;
+    } constants = { Co, ciK };
 
     auto cmd = device().newCommandBuffer(eva::queue_compute);
     cmd.begin(eva::COMMAND_BUFFER_USAGE::ONE_TIME_SUBMIT)
-        .bindPipeline(transformPipe)
-        .bindDescSets({ transformDescSet })
+        .bindPipeline(transformPipe_)
+        .bindDescSets({ transformDescSet_ })
         .setPushConstants(0, sizeof(constants), &constants)
         .dispatch2(elements)
-        .barrier(eva::SYNC_SCOPE::COMPUTE_WRITE / packedWeight / eva::SYNC_SCOPE::COMPUTE_READ);
+        .barrier(eva::SYNC_SCOPE::COMPUTE_WRITE / packedWeight_ / eva::SYNC_SCOPE::COMPUTE_READ);
     cmd.end();
     device().queue() << cmd << eva::waiting;
     weightPacked_ = true;
@@ -232,28 +267,34 @@ inline void Convolution1d::packWeight()
 
 inline void Convolution1d::run(eva::CommandBuffer cmdBuff)
 {
-    packWeight();
+    if (pipeParams_.coopmat)
+        packWeight();
 
     auto outBuf = (*this)["out0"].buffer();
     auto inBuf = (*this)["in0"].buffer();
     // Unused slots bind an existing buffer; specialization removes every read.
-    auto biasBuf = pipeParams.hasBias ? (*this)["bias"].buffer() : inBuf;
+    auto biasBuf = pipeParams_.hasBias ? (*this)["bias"].buffer() : inBuf;
     auto rBuf = config_.acceptResidual ? (*this)["residual"].buffer() : inBuf;
 
-    descSet.write({ outBuf, inBuf, packedWeight, biasBuf, rBuf });
+    auto wBuf = pipeParams_.coopmat ? packedWeight_ : (*this)["weight"].buffer();
 
-    struct {
+    descSet_.write({ outBuf, inBuf, wBuf, biasBuf, rBuf });
+
+    struct
+    {
         uint32_t Ci, Co, Ti, To;
     } constants = { config_.inChannels, config_.outChannels, Ti_, To_ };
 
-    cmdBuff
-        .bindPipeline(pipe)
+    const uint32_t gx = pipeParams_.coopmat ? CEIL_DIV(To_, pipeParams_.wgN) : CEIL_DIV(config_.outChannels * To_, 64u);
+    const uint32_t gy = pipeParams_.coopmat ? CEIL_DIV(config_.outChannels, pipeParams_.wgM) : 1u;
+
+    cmdBuff.bindPipeline(pipe_)
         .setPushConstants(0, sizeof(constants), &constants)
-        .bindDescSets({descSet})
-        .dispatch(CEIL_DIV(To_, pipeParams.wgN), CEIL_DIV(config_.outChannels, pipeParams.wgM), seqs_)
+        .bindDescSets({ descSet_ })
+        .dispatch(gx, gy, seqs_)
         .barrier(eva::SYNC_SCOPE::COMPUTE_WRITE / outBuf / eva::SYNC_SCOPE::COMPUTE_READ);
 }
 
 }   // namespace model::experimental::diffusion_policy::node
 
-#endif // EXPERIMENTAL_DIFFUSION_POLICY_NODES_CONVOLUTION_1D_H
+#endif   // EXPERIMENTAL_DIFFUSION_POLICY_NODES_CONVOLUTION_1D_H

@@ -30,20 +30,22 @@ enum class PredictionType : uint32_t { Epsilon, Sample };
 =============================================================================*/
 class DdpmStep : public vai::Node
 {
-    eva::ComputePipeline pipe;
-    eva::DescriptorSet descSet;
+    eva::ComputePipeline pipe_;
+    eva::DescriptorSet descSet_;
 
 public:
     static constexpr uint32_t scheduleWidth = 6;   // the schedule row
 
-    struct PipeParams {
+    struct PipeParams
+    {
         vai::Dtype iDtype = vai::Dtype::None;
         vai::Dtype eDtype = vai::Dtype::None;
 
         bool operator==(const PipeParams&) const = default;
     };
 
-    struct Config {
+    struct Config
+    {
         PredictionType predictionType = PredictionType::Epsilon;
         bool clipSample = true;
         float clipSampleRange = 1.0f;
@@ -54,7 +56,7 @@ public:
     void run(eva::CommandBuffer cmdBuff) override;
 
 private:
-    PipeParams pipeParams;
+    PipeParams pipeParams_;
 };
 
 
@@ -80,11 +82,11 @@ inline void DdpmStep::prepare()
     VAI_ASSERT(zTen.dtype() == vai::Dtype::Fp32 && zTen.numElements() % xTen.numElements() == 0u);
 
     const PipeParams p = { .iDtype = xTen.dtype(), .eDtype = eTen.dtype() };
-    if (!pipe || p != pipeParams)
+    if (!pipe_ || p != pipeParams_)
     {
-        pipeParams = p;
+        pipeParams_ = p;
         // clang-format off
-        pipe = pipelinePool().request(EXPERIMENTAL_DIFFUSION_POLICY_SHADER_OUTPUT_DIR, "ddpm-step", {
+        pipe_ = pipelinePool().request(EXPERIMENTAL_DIFFUSION_POLICY_SHADER_OUTPUT_DIR, "ddpm-step", {
             eva::constant_id<0>(config_.predictionType == PredictionType::Sample ? 1u : 0u),   // predictSample
             eva::constant_id<1>(config_.clipSample ? 1u : 0u),                              // clipSample
             eva::constant_id<2>(p.eDtype),                                                  // typeE
@@ -92,8 +94,8 @@ inline void DdpmStep::prepare()
             eva::constant_id<SPEC_ID_TYPE_I>(p.iDtype)                                      // typeI
         });
         // clang-format on
-        if (!descSet)
-            descSet = vai::gVaiDestSetPool(pipe.descSetLayout(0));
+        if (!descSet_)
+            descSet_ = vai::gVaiDestSetPool(pipe_.descSetLayout(0));
     }
 
     (*this)["out0"] = vai::Tensor(xTen.shape(), oDtype);
@@ -103,7 +105,7 @@ inline void DdpmStep::run(eva::CommandBuffer cmdBuff)
 {
     auto outBuf = (*this)["out0"].buffer();
 
-    descSet.write({
+    descSet_.write({
         outBuf,
         (*this)["in0"].buffer(),
         (*this)["modelOutput"].buffer(),
@@ -111,14 +113,14 @@ inline void DdpmStep::run(eva::CommandBuffer cmdBuff)
         (*this)["noise"].buffer(),
     });
 
-    struct {
+    struct
+    {
         uint32_t N;
         float clipRange;
     } constants = { uint32_t((*this)["in0"].numElements()), config_.clipSampleRange };
 
-    cmdBuff
-        .bindPipeline(pipe)
-        .bindDescSets({descSet})
+    cmdBuff.bindPipeline(pipe_)
+        .bindDescSets({ descSet_ })
         .setPushConstants(0, sizeof(constants), &constants)
         .dispatch2(constants.N)
         .barrier(eva::SYNC_SCOPE::COMPUTE_WRITE / outBuf / eva::SYNC_SCOPE::COMPUTE_READ);
@@ -126,4 +128,4 @@ inline void DdpmStep::run(eva::CommandBuffer cmdBuff)
 
 }   // namespace model::experimental::diffusion_policy::node
 
-#endif // EXPERIMENTAL_DIFFUSION_POLICY_NODES_DDPM_STEP_H
+#endif   // EXPERIMENTAL_DIFFUSION_POLICY_NODES_DDPM_STEP_H

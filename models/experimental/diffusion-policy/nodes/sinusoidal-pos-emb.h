@@ -19,17 +19,19 @@ namespace model::experimental::diffusion_policy::node {
 =============================================================================*/
 class SinusoidalPosEmb : public vai::Node
 {
-    eva::ComputePipeline pipe;
-    eva::DescriptorSet descSet;
+    eva::ComputePipeline pipe_;
+    eva::DescriptorSet descSet_;
 
 public:
-    struct PipeParams {
+    struct PipeParams
+    {
         vai::Dtype iDtype = vai::Dtype::None;
 
         bool operator==(const PipeParams&) const = default;
     };
 
-    struct Config {
+    struct Config
+    {
         uint32_t dim;   // even, >= 4
     } config_;
 
@@ -38,7 +40,7 @@ public:
     void run(eva::CommandBuffer cmdBuff) override;
 
 private:
-    PipeParams pipeParams;
+    PipeParams pipeParams_;
 };
 
 
@@ -57,17 +59,17 @@ inline void SinusoidalPosEmb::prepare()
     VAI_ASSERT(inTen.validShape() && inTen.shape().size() == 1u);
 
     const PipeParams p = { .iDtype = inTen.dtype() };
-    if (!pipe || p != pipeParams)
+    if (!pipe_ || p != pipeParams_)
     {
-        pipeParams = p;
+        pipeParams_ = p;
         // clang-format off
-        pipe = pipelinePool().request(EXPERIMENTAL_DIFFUSION_POLICY_SHADER_OUTPUT_DIR, "sinusoidal-pos-emb", {
+        pipe_ = pipelinePool().request(EXPERIMENTAL_DIFFUSION_POLICY_SHADER_OUTPUT_DIR, "sinusoidal-pos-emb", {
             eva::constant_id<SPEC_ID_TYPE_O>(oDtype),     // typeO
             eva::constant_id<SPEC_ID_TYPE_I>(p.iDtype)    // typeI
         });
         // clang-format on
-        if (!descSet)
-            descSet = vai::gVaiDestSetPool(pipe.descSetLayout(0));
+        if (!descSet_)
+            descSet_ = vai::gVaiDestSetPool(pipe_.descSetLayout(0));
     }
 
     (*this)["out0"] = vai::Tensor({ inTen.shape()[0], config_.dim }, oDtype);
@@ -78,15 +80,15 @@ inline void SinusoidalPosEmb::run(eva::CommandBuffer cmdBuff)
     auto outBuf = (*this)["out0"].buffer();
     auto inBuf = (*this)["in0"].buffer();
 
-    descSet.write({ outBuf, inBuf });
+    descSet_.write({ outBuf, inBuf });
 
-    struct {
+    struct
+    {
         uint32_t rows, dim;
     } constants = { (*this)["in0"].shape()[0], config_.dim };
 
-    cmdBuff
-        .bindPipeline(pipe)
-        .bindDescSets({descSet})
+    cmdBuff.bindPipeline(pipe_)
+        .bindDescSets({ descSet_ })
         .setPushConstants(0, sizeof(constants), &constants)
         .dispatch2(constants.rows * constants.dim)
         .barrier(eva::SYNC_SCOPE::COMPUTE_WRITE / outBuf / eva::SYNC_SCOPE::COMPUTE_READ);
@@ -94,4 +96,4 @@ inline void SinusoidalPosEmb::run(eva::CommandBuffer cmdBuff)
 
 }   // namespace model::experimental::diffusion_policy::node
 
-#endif // EXPERIMENTAL_DIFFUSION_POLICY_NODES_SINUSOIDAL_POS_EMB_H
+#endif   // EXPERIMENTAL_DIFFUSION_POLICY_NODES_SINUSOIDAL_POS_EMB_H

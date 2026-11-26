@@ -36,7 +36,8 @@ struct SpatialSoftmax : public vai::NodeGroup
     node::Softmax softmax;          //              -> [B, K, H*W], over H*W
     vai::node::Linear expectedXy;   //              -> [B, K, 2],   @ pos_grid
 
-    struct Config {
+    struct Config
+    {
         uint32_t channels;   // K: one keypoint per channel
         uint32_t height;
         uint32_t width;
@@ -45,8 +46,10 @@ struct SpatialSoftmax : public vai::NodeGroup
 
     SpatialSoftmax(Config config)
     : HW(config.height * config.width)
-    , flatten(config.allowBatch ? std::vector<int64_t>{ 0, config.channels, HW }
-                                : std::vector<int64_t>{ config.channels, HW })
+    , flatten(
+          config.allowBatch
+              ? std::vector<int64_t>{ 0, config.channels, HW }
+              : std::vector<int64_t>{ config.channels, HW })
     , softmax({ .dim = -1 })
     , expectedXy({ .inDim = HW, .outDim = 2 })
     {
@@ -56,8 +59,8 @@ struct SpatialSoftmax : public vai::NodeGroup
         flatten - softmax - expectedXy;
         // clang-format on
 
-        expectedXy["weight"] = vai::Tensor({ 2u, HW }, vai::Dtype::Fp32)
-                                   .setFloats(posGridT(config.height, config.width));
+        expectedXy["weight"] =
+            vai::Tensor({ 2u, HW }, vai::Dtype::Fp32).setFloats(posGridT(config.height, config.width));
 
         defineSlot("in0", flatten.slot("in0"));
         defineSlot("out0", expectedXy.slot("out0"));
@@ -81,12 +84,13 @@ struct SpatialSoftmax : public vai::NodeGroup
     static std::vector<float> posGridT(uint32_t H, uint32_t W)
     {
         const std::vector<double> xs = linspace(W), ys = linspace(H);
-        std::vector<float> grid(2u * H * W);
+        const size_t HW = size_t(H) * W;
+        std::vector<float> grid(2 * HW);
         for (uint32_t h = 0; h < H; ++h)
             for (uint32_t w = 0; w < W; ++w)
             {
-                grid[h * W + w] = float(xs[w]);
-                grid[H * W + h * W + w] = float(ys[h]);
+                grid[size_t(h) * W + w] = float(xs[w]);
+                grid[HW + size_t(h) * W + w] = float(ys[h]);
             }
         return grid;
     }

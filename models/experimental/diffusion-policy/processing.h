@@ -48,8 +48,8 @@ inline std::vector<float> sampleNoise(size_t count, uint64_t seed)
 //   x' = (x − min) / (max − min + 1e-8) · 2 − 1,   x = (x' + 1) / 2 · (max − min) + min
 // values is [rows, dim], one feature vector per row; min / max are [dim].
 /////////////////////////////////////////////////////////////////////////////////////////
-inline std::vector<float> normalizeMinMax(std::vector<float> values, const std::vector<float>& min,
-                                          const std::vector<float>& max)
+inline std::vector<float> normalizeMinMax(
+    std::vector<float> values, const std::vector<float>& min, const std::vector<float>& max)
 {
     const size_t dim = min.size();
     for (size_t i = 0; i < values.size(); ++i)
@@ -60,8 +60,8 @@ inline std::vector<float> normalizeMinMax(std::vector<float> values, const std::
     return values;
 }
 
-inline std::vector<float> unnormalizeMinMax(std::vector<float> values, const std::vector<float>& min,
-                                            const std::vector<float>& max)
+inline std::vector<float> unnormalizeMinMax(
+    std::vector<float> values, const std::vector<float>& min, const std::vector<float>& max)
 {
     const size_t dim = min.size();
     for (size_t i = 0; i < values.size(); ++i)

@@ -59,9 +59,9 @@ struct ModelConfig
     uint32_t numActionSteps;          // n_action_steps: the ones executed
     std::vector<uint32_t> downDims;   // the UNet's channels per level
     uint32_t kernelSize;
-    uint32_t numGroups;               // n_groups
-    uint32_t stepEmbedDim;            // diffusion_step_embed_dim
-    bool filmScale;                   // use_film_scale_modulation
+    uint32_t numGroups;      // n_groups
+    uint32_t stepEmbedDim;   // diffusion_step_embed_dim
+    bool filmScale;          // use_film_scale_modulation
     DdpmConfig scheduler;
 
     // One image's feature: 2 coordinates per keypoint.
@@ -117,10 +117,10 @@ struct Net : public vai::NeuralNet
     RuntimeConfig runtimeCfg;
 
     // Observation encoder
-    group::RgbEncoder rgbEncoder;      // [S*N, 3, H, W] -> [S*N, F], F = imageFeatureDim
-    vai::node::Reshape perStep;        //                -> [S, N*F]
-    vai::node::Concat catFeatures;     // [S, stateDim] + [S, N*F] -> [S, stepFeatureDim]
-    vai::node::Reshape flattenCond;    //                -> [1, globalCondDim]
+    group::RgbEncoder rgbEncoder;     // [S*N, 3, H, W] -> [S*N, F], F = imageFeatureDim
+    vai::node::Reshape perStep;       //                -> [S, N*F]
+    vai::node::Concat catFeatures;    // [S, stateDim] + [S, N*F] -> [S, stepFeatureDim]
+    vai::node::Reshape flattenCond;   //                -> [1, globalCondDim]
 
     // Action denoiser
     vai::node::CyclicTableReader timestepTable;   // [steps, 1] -> [1], the step's timestep
@@ -136,7 +136,7 @@ struct Net : public vai::NeuralNet
     std::array<float, 3> imageStd{};    // + 1e-8, as lerobot divides by it
     std::vector<float> stateMin;        // [stateDim]
     std::vector<float> stateMax;
-    std::vector<float> actionMin;       // [actionDim]
+    std::vector<float> actionMin;   // [actionDim]
     std::vector<float> actionMax;
 
     Net(const vai::NeuralNetConfig& netCfg, const ModelConfig& cfg, const RuntimeConfig& runtimeCfg = {})
@@ -230,17 +230,19 @@ struct Net : public vai::NeuralNet
     {
         VAI_ASSERT(action);
         VAI_ASSERT(action->isShapeOf(cfg.horizon, cfg.actionDim) && action->dtype() == vai::Dtype::Fp32);
-        VAI_ASSERT(stepNoise.isShapeOf(runtimeCfg.denoiseSteps, cfg.horizon, cfg.actionDim) &&
-                   stepNoise.dtype() == vai::Dtype::Fp32);
+        VAI_ASSERT(
+            stepNoise.isShapeOf(runtimeCfg.denoiseSteps, cfg.horizon, cfg.actionDim) &&
+            stepNoise.dtype() == vai::Dtype::Fp32);
 
         sync();   // The GPU may still be reading the readers' counters.
         timestepTable.rewind();
         scheduleTable.rewind();
 
         for (uint32_t step = 0; step < runtimeCfg.denoiseSteps; ++step)
-            (*this)({ { "inActions", *action }, { "inGlobalCond", globalCond }, { "inStepNoise", stepNoise } },
-                    { { "outActions", action } },
-                    false);
+            (*this)(
+                { { "inActions", *action }, { "inGlobalCond", globalCond }, { "inStepNoise", stepNoise } },
+                { { "outActions", action } },
+                false);
     }
 };
 

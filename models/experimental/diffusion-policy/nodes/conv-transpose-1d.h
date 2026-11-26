@@ -25,11 +25,12 @@ namespace model::experimental::diffusion_policy::node {
 =============================================================================*/
 class ConvTranspose1d : public vai::Node
 {
-    eva::ComputePipeline pipe;
-    eva::DescriptorSet descSet;
+    eva::ComputePipeline pipe_;
+    eva::DescriptorSet descSet_;
 
 public:
-    struct PipeParams {
+    struct PipeParams
+    {
         vai::Dtype iDtype = vai::Dtype::None;
         vai::Dtype wDtype = vai::Dtype::None;
         vai::Dtype pDtype = vai::Dtype::None;   // bias
@@ -38,7 +39,8 @@ public:
         bool operator==(const PipeParams&) const = default;
     };
 
-    struct Config {
+    struct Config
+    {
         uint32_t inChannels;
         uint32_t outChannels;
         uint32_t kernelSize;
@@ -57,7 +59,7 @@ public:
     bool hasBias() const { return (*this)["bias"].validShape(); }
 
 private:
-    PipeParams pipeParams;
+    PipeParams pipeParams_;
     uint32_t seqs_ = 0, Ti_ = 0, To_ = 0;
 };
 
@@ -100,11 +102,11 @@ inline void ConvTranspose1d::prepare()
         .pDtype = hasBias() ? (*this)["bias"].dtype() : vai::Dtype::Fp32,
         .hasBias = hasBias(),
     };
-    if (!pipe || p != pipeParams)
+    if (!pipe_ || p != pipeParams_)
     {
-        pipeParams = p;
+        pipeParams_ = p;
         // clang-format off
-        pipe = pipelinePool().request(EXPERIMENTAL_DIFFUSION_POLICY_SHADER_OUTPUT_DIR, "conv-transpose-1d", {
+        pipe_ = pipelinePool().request(EXPERIMENTAL_DIFFUSION_POLICY_SHADER_OUTPUT_DIR, "conv-transpose-1d", {
             eva::constant_id<0>(config_.kernelSize),                          // K
             eva::constant_id<1>(config_.stride),                              // stride
             eva::constant_id<2>(config_.padding),                             // pad
@@ -116,8 +118,8 @@ inline void ConvTranspose1d::prepare()
             eva::constant_id<SPEC_ID_HAS_BIAS>(p.hasBias ? 1u : 0u)           // hasBias
         });
         // clang-format on
-        if (!descSet)
-            descSet = vai::gVaiDestSetPool(pipe.descSetLayout(0));
+        if (!descSet_)
+            descSet_ = vai::gVaiDestSetPool(pipe_.descSetLayout(0));
     }
 
     std::vector<uint32_t> outShape = shape;
@@ -132,22 +134,22 @@ inline void ConvTranspose1d::run(eva::CommandBuffer cmdBuff)
     auto inBuf = (*this)["in0"].buffer();
     auto wBuf = (*this)["weight"].buffer();
     // An unused bias binds the weight; specialization removes every read.
-    auto biasBuf = pipeParams.hasBias ? (*this)["bias"].buffer() : wBuf;
+    auto biasBuf = pipeParams_.hasBias ? (*this)["bias"].buffer() : wBuf;
 
-    descSet.write({ outBuf, inBuf, wBuf, biasBuf });
+    descSet_.write({ outBuf, inBuf, wBuf, biasBuf });
 
-    struct {
+    struct
+    {
         uint32_t Ci, Co, Ti, To;
     } constants = { config_.inChannels, config_.outChannels, Ti_, To_ };
 
-    cmdBuff
-        .bindPipeline(pipe)
+    cmdBuff.bindPipeline(pipe_)
         .setPushConstants(0, sizeof(constants), &constants)
-        .bindDescSets({descSet})
+        .bindDescSets({ descSet_ })
         .dispatch(CEIL_DIV(config_.outChannels * To_, 64u), 1u, seqs_)
         .barrier(eva::SYNC_SCOPE::COMPUTE_WRITE / outBuf / eva::SYNC_SCOPE::COMPUTE_READ);
 }
 
 }   // namespace model::experimental::diffusion_policy::node
 
-#endif // EXPERIMENTAL_DIFFUSION_POLICY_NODES_CONV_TRANSPOSE_1D_H
+#endif   // EXPERIMENTAL_DIFFUSION_POLICY_NODES_CONV_TRANSPOSE_1D_H

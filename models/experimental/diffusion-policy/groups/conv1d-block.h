@@ -25,7 +25,8 @@ struct Conv1dBlock : public vai::NodeGroup
     node::Convolution1d conv;   // [..., Ci, T] -> [..., Co, T]
     node::GroupNormMish norm;   //              -> [..., Co, T]
 
-    struct Config {
+    struct Config
+    {
         uint32_t inChannels;
         uint32_t outChannels;
         uint32_t kernelSize;

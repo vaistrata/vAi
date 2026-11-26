@@ -24,18 +24,20 @@ namespace model::experimental::diffusion_policy::node {
 =============================================================================*/
 class Softmax : public vai::Node
 {
-    eva::ComputePipeline pipe;
-    eva::DescriptorSet descSet;
+    eva::ComputePipeline pipe_;
+    eva::DescriptorSet descSet_;
 
 public:
-    struct PipeParams {
-        uint32_t   wgSize = 0;   // threads per row
+    struct PipeParams
+    {
+        uint32_t wgSize = 0;   // threads per row
         vai::Dtype iDtype = vai::Dtype::None;
 
         bool operator==(const PipeParams&) const = default;
     };
 
-    struct Config {
+    struct Config
+    {
         int32_t dim = -1;   // the softmax axis; negative counts from the back
     } config_;
 
@@ -44,7 +46,7 @@ public:
     void run(eva::CommandBuffer cmdBuff) override;
 
 private:
-    PipeParams pipeParams;
+    PipeParams pipeParams_;
     uint32_t rows_ = 0;    // outer * inner
     uint32_t D_ = 0;       // softmax axis length
     uint32_t inner_ = 0;   // elements past the axis: stride between a row's elements
@@ -58,7 +60,8 @@ inline uint32_t softmaxWgSize(uint32_t D, eva::Device device)
     const uint32_t sg = device.maxSubgroupSize();
     const uint32_t cap = std::max(sg, 256u);
     uint32_t wg = sg;
-    while (wg < D && wg < cap) wg *= 2u;
+    while (wg < D && wg < cap)
+        wg *= 2u;
     return wg;
 }
 
@@ -87,22 +90,22 @@ inline void Softmax::prepare()
         inner_ *= shape[a];
     rows_ = uint32_t(inTen.numElements() / D_);
     // run() folds rows over grid x/y, as LayerNorm does.
-    VAI_ASSERT(uint64_t(rows_) <= uint64_t(device().maxComputeWorkGroupCount()[0])
-                                  * device().maxComputeWorkGroupCount()[1]);
+    VAI_ASSERT(
+        uint64_t(rows_) <= uint64_t(device().maxComputeWorkGroupCount()[0]) * device().maxComputeWorkGroupCount()[1]);
 
     const PipeParams p = { .wgSize = softmaxWgSize(D_, device()), .iDtype = inTen.dtype() };
-    if (!pipe || p != pipeParams)
+    if (!pipe_ || p != pipeParams_)
     {
-        pipeParams = p;
+        pipeParams_ = p;
         // clang-format off
-        pipe = pipelinePool().request(EXPERIMENTAL_DIFFUSION_POLICY_SHADER_OUTPUT_DIR, "softmax", {
+        pipe_ = pipelinePool().request(EXPERIMENTAL_DIFFUSION_POLICY_SHADER_OUTPUT_DIR, "softmax", {
             eva::constant_id<0>(p.wgSize),                 // wgSize
             eva::constant_id<SPEC_ID_TYPE_O>(oDtype),      // typeO
             eva::constant_id<SPEC_ID_TYPE_I>(p.iDtype)     // typeI
         });
         // clang-format on
-        if (!descSet)
-            descSet = vai::gVaiDestSetPool(pipe.descSetLayout(0));
+        if (!descSet_)
+            descSet_ = vai::gVaiDestSetPool(pipe_.descSetLayout(0));
     }
 
     (*this)["out0"] = vai::Tensor(shape, oDtype);
@@ -113,26 +116,26 @@ inline void Softmax::run(eva::CommandBuffer cmdBuff)
     auto outBuf = (*this)["out0"].buffer();
     auto inBuf = (*this)["in0"].buffer();
 
-    descSet.write({ outBuf, inBuf });
+    descSet_.write({ outBuf, inBuf });
 
     // One workgroup per row, rows folded over grid x/y -- x alone caps at 65535
     // on some devices (Intel).
     const uint32_t limX = device().maxComputeWorkGroupCount()[0];
-    const uint32_t gy   = std::max(1u, CEIL_DIV(rows_, limX));
-    const uint32_t gx   = CEIL_DIV(rows_, gy);
+    const uint32_t gy = std::max(1u, CEIL_DIV(rows_, limX));
+    const uint32_t gx = CEIL_DIV(rows_, gy);
 
-    struct {
+    struct
+    {
         uint32_t rows, D, inner, gridX;
     } constants = { rows_, D_, inner_, gx };
 
-    cmdBuff
-        .bindPipeline(pipe)
+    cmdBuff.bindPipeline(pipe_)
         .setPushConstants(0, sizeof(constants), &constants)
-        .bindDescSets({descSet})
+        .bindDescSets({ descSet_ })
         .dispatch(gx, gy)
         .barrier(eva::SYNC_SCOPE::COMPUTE_WRITE / outBuf / eva::SYNC_SCOPE::COMPUTE_READ);
 }
 
 }   // namespace model::experimental::diffusion_policy::node
 
-#endif // EXPERIMENTAL_DIFFUSION_POLICY_NODES_SOFTMAX_H
+#endif   // EXPERIMENTAL_DIFFUSION_POLICY_NODES_SOFTMAX_H

@@ -27,7 +27,8 @@ struct DiffusionStepEncoder : public vai::NodeGroup
     node::Mish mish;                 //     -> [1, 4D]
     vai::node::Linear fc2;           //     -> [1, D]
 
-    struct Config {
+    struct Config
+    {
         uint32_t embedDim;   // diffusion_step_embed_dim
     };
 

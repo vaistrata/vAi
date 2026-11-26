@@ -1,0 +1,87 @@
+/*=============================================================================
+ conv1d.comp: direct 1D convolution, the path without a cooperative matrix
+     O[co, t] = act(Σ_{ci, j} W[co, ci, j] · I[ci, t·stride + j − K/2] + bias[co]) (+ R[co, t])
+
+ What conv1d-cm computes, for a device without its 16x16x16 fp16 shape or
+ 32-lane subgroups (lavapipe, Intel's integrated GPUs). Inputs outside [0, Ti)
+ read as zero (same padding K/2, K odd). Accumulation is fp32, and W is read as
+ loaded, so nothing rounds to fp16 on the way.
+ - O (typeO), I / R (typeI) are fp32 or fp16; W (typeW) and bias (typeP) as loaded.
+ One thread per (co, t), t fastest; dispatch z is the sequence.
+ Bindings: O=0, I=1, W=2, BIAS=3, RESIDUAL=4 (conv1d-cm's, W unpacked).
+ Dispatch (host): dispatch(ceil(Co · To / 64), 1, sequences).
+ Push constants: Ci, Co, Ti, To.
+=============================================================================*/
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_16bit_storage : require
+#include "common/activation.h"
+
+layout(local_size_x = 64) in;
+
+layout(constant_id = 0) const uint K = 1u;               // kernel size, odd
+layout(constant_id = 1) const uint stride = 1u;
+layout(constant_id = 2) const uint hasResidual = 0u;
+layout(constant_id = 3) const uint residualOrder = 0u;   // 0: after the activation, 1: before it
+layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0u;
+layout(constant_id = SPEC_ID_TYPE_I) const uint typeI = 0u;
+layout(constant_id = SPEC_ID_TYPE_W) const uint typeW = 0u;
+layout(constant_id = SPEC_ID_TYPE_P) const uint typeP = 0u;
+layout(constant_id = SPEC_ID_HAS_BIAS) const uint hasBias = 1u;
+
+layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_F32 { float bufferO_f32[]; };
+layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_F16 { float16_t bufferO_f16[]; };
+layout(set = 0, binding = 1) restrict readonly buffer I_BUF_F32 { float bufferI_f32[]; };
+layout(set = 0, binding = 1) restrict readonly buffer I_BUF_F16 { float16_t bufferI_f16[]; };
+layout(set = 0, binding = 2) restrict readonly buffer W_BUF_F32 { float bufferW_f32[]; };
+layout(set = 0, binding = 2) restrict readonly buffer W_BUF_F16 { float16_t bufferW_f16[]; };
+layout(set = 0, binding = 3) restrict readonly buffer BIAS_BUF_F32 { float bufferBias_f32[]; };
+layout(set = 0, binding = 3) restrict readonly buffer BIAS_BUF_F16 { float16_t bufferBias_f16[]; };
+layout(set = 0, binding = 4) restrict readonly buffer RES_BUF_F32 { float bufferRes_f32[]; };
+layout(set = 0, binding = 4) restrict readonly buffer RES_BUF_F16 { float16_t bufferRes_f16[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint Ci;
+    uint Co;
+    uint Ti;    // input length
+    uint To;    // output length, (Ti - 1) / stride + 1
+};
+
+float readI(uint i)        { return (typeI == DTYPE_F32) ? bufferI_f32[i] : float(bufferI_f16[i]); }
+float readW(uint i)        { return (typeW == DTYPE_F32) ? bufferW_f32[i] : float(bufferW_f16[i]); }
+float readResidual(uint i) { return (typeI == DTYPE_F32) ? bufferRes_f32[i] : float(bufferRes_f16[i]); }
+float readBias(uint c)     { return (hasBias == 0u) ? 0.0 : ((typeP == DTYPE_F32) ? bufferBias_f32[c] : float(bufferBias_f16[c])); }
+void  writeO(uint i, float v) { if (typeO == DTYPE_F32) bufferO_f32[i] = v; else bufferO_f16[i] = float16_t(v); }
+
+void main()
+{
+    const uint e = gl_GlobalInvocationID.x;
+    if (e >= Co * To) return;
+
+    const uint seq = gl_WorkGroupID.z;
+    const uint co = e / To;
+    const uint t = e - co * To;
+    const uint inBase = seq * Ci * Ti;
+
+    // The taps that land inside [0, Ti): j in [jBegin, jEnd).
+    const int start = int(t * stride) - int(K >> 1u);
+    const uint jBegin = uint(max(0, -start));
+    const uint jEnd = uint(clamp(int(Ti) - start, 0, int(K)));
+
+    float acc = 0.0;
+    for (uint ci = 0u; ci < Ci; ++ci)
+    {
+        const uint wRow = (co * Ci + ci) * K;   // W [Co, Ci, K]
+        const uint iRow = inBase + ci * Ti;
+        for (uint j = jBegin; j < jEnd; ++j)
+            acc += readW(wRow + j) * readI(iRow + uint(start + int(j)));
+    }
+
+    const uint o = seq * Co * To + e;
+    float value = acc + readBias(co);
+    if (hasResidual == 1u && residualOrder == 1u) value += readResidual(o);
+    value = applyActivation(value);
+    if (hasResidual == 1u && residualOrder == 0u) value += readResidual(o);
+    writeO(o, value);
+}

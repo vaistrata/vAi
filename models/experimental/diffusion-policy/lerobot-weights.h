@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
+#include <numbers>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -72,7 +73,7 @@ inline DdpmTables ddpmTables(const Net& net)
     {
         // betas_for_alpha_bar, cosine: computed in double, stored fp32.
         auto alphaBar = [](double t) {
-            const double c = std::cos((t + 0.008) / 1.008 * M_PI / 2.0);
+            const double c = std::cos((t + 0.008) / 1.008 * std::numbers::pi / 2.0);
             return c * c;
         };
         for (uint32_t i = 0; i < N; ++i)
@@ -124,11 +125,9 @@ inline DdpmTables ddpmTables(const Net& net)
 /////////////////////////////////////////////////////////////////////////////////////////
 inline void loadWeights(Net& net, const vai::Checkpoint& ckpt)
 {
-    // Weights load at the net's wDefaultDtype, norm coefficients at Fp32. The
-    // Conv1d's coopmat path takes fp16 weights whatever the default is.
+    // Weights load at the net's wDefaultDtype, norm coefficients at Fp32.
     const vai::Dtype wDt = net.config().wDefaultDtype;
     const vai::Dtype normDt = vai::Dtype::Fp32;
-    const vai::Dtype conv1dDt = vai::Dtype::Fp16;
 
     const ModelConfig& cfg = net.cfg;
 
@@ -137,8 +136,8 @@ inline void loadWeights(Net& net, const vai::Checkpoint& ckpt)
         const float* p = static_cast<const float*>(t.hostData());
         return std::vector<float>(p, p + t.numElements());
     };
-    auto tensor = [](std::vector<uint32_t> shape, vai::Dtype dt, std::vector<float> data) {
-        return vai::Tensor(std::move(shape), dt).setFloats(std::move(data));
+    auto tensor = [](const std::vector<uint32_t>& shape, vai::Dtype dt, std::vector<float> data) {
+        return vai::Tensor(shape, dt).setFloats(std::move(data));
     };
 
     auto loadLin = [&](vai::node::Linear& lin, const std::string& prefix) {
@@ -206,11 +205,11 @@ inline void loadWeights(Net& net, const vai::Checkpoint& ckpt)
             const auto grid = floats(root + "pool.pos_grid");
             const uint32_t HW = enc.spatialSoftmax.HW;
             VAI_ASSERT(grid.size() == size_t(HW) * 2u);
-            std::vector<float> gridT(2u * HW);
-            for (uint32_t j = 0; j < HW; ++j)
+            std::vector<float> gridT(2 * size_t(HW));
+            for (size_t j = 0; j < HW; ++j)
             {
-                gridT[j] = grid[2u * j];
-                gridT[HW + j] = grid[2u * j + 1u];
+                gridT[j] = grid[2 * j];
+                gridT[HW + j] = grid[2 * j + 1];
             }
             enc.spatialSoftmax.expectedXy["weight"] = tensor({ 2u, HW }, vai::Dtype::Fp32, std::move(gridT));
         }
@@ -224,7 +223,7 @@ inline void loadWeights(Net& net, const vai::Checkpoint& ckpt)
         group::ConditionalUnet1d& unet = net.unet;
 
         auto loadConv1d = [&](node::Convolution1d& conv, const std::string& prefix) {
-            conv["weight"] = vai::Tensor(ckpt[prefix + ".weight"], conv1dDt);
+            conv["weight"] = vai::Tensor(ckpt[prefix + ".weight"], wDt);
             conv["bias"] = vai::Tensor(ckpt[prefix + ".bias"], wDt);
         };
         auto loadConv1dBlock = [&](group::Conv1dBlock& block, const std::string& prefix) {
@@ -235,8 +234,8 @@ inline void loadWeights(Net& net, const vai::Checkpoint& ckpt)
             loadConv1dBlock(block.conv1, prefix + "conv1");
             loadLin(block.condEncoder, prefix + "cond_encoder.1");   // .0 is the Mish, run once by the UNet
             loadConv1dBlock(block.conv2, prefix + "conv2");
-            if (block.residualConv)
-                loadConv1d(*block.residualConv, prefix + "residual_conv");
+            if (auto& residualConv = block.residualConv; residualConv.has_value())
+                loadConv1d(*residualConv, prefix + "residual_conv");
         };
 
         loadLin(unet.stepEncoder.fc1, root + "diffusion_step_encoder.1");
@@ -246,18 +245,18 @@ inline void loadWeights(Net& net, const vai::Checkpoint& ckpt)
         for (uint32_t l = 0; l < L; ++l)
         {
             const std::string path = root + "down_modules." + std::to_string(l) + ".";
-            loadResBlock(unet.downBlocks[2 * l], path + "0.");
-            loadResBlock(unet.downBlocks[2 * l + 1], path + "1.");
-            if (unet.downsamples[l])
-                loadConv1d(*unet.downsamples[l], path + "2");
+            loadResBlock(unet.downBlocks[2 * size_t(l)], path + "0.");
+            loadResBlock(unet.downBlocks[2 * size_t(l) + 1], path + "1.");
+            if (auto& downsample = unet.downsamples[l]; downsample.has_value())
+                loadConv1d(*downsample, path + "2");
         }
         loadResBlock(unet.midBlocks[0], root + "mid_modules.0.");
         loadResBlock(unet.midBlocks[1], root + "mid_modules.1.");
         for (uint32_t u = 0; u + 1 < L; ++u)
         {
             const std::string path = root + "up_modules." + std::to_string(u) + ".";
-            loadResBlock(unet.upBlocks[2 * u], path + "0.");
-            loadResBlock(unet.upBlocks[2 * u + 1], path + "1.");
+            loadResBlock(unet.upBlocks[2 * size_t(u)], path + "0.");
+            loadResBlock(unet.upBlocks[2 * size_t(u) + 1], path + "1.");
             unet.upsamples[u]["weight"] = vai::Tensor(ckpt[path + "2.weight"], wDt);   // [Ci, Co, K]
             unet.upsamples[u]["bias"] = vai::Tensor(ckpt[path + "2.bias"], wDt);
         }
@@ -282,8 +281,8 @@ inline void loadWeights(Net& net, const vai::Checkpoint& ckpt)
             return floats(feature + "." + which);
         std::string buffer = feature;
         std::replace(buffer.begin(), buffer.end(), '.', '_');
-        return floats((feature == "action" ? "unnormalize_outputs.buffer_" : "normalize_inputs.buffer_") + buffer +
-                      "." + which);
+        return floats(
+            (feature == "action" ? "unnormalize_outputs.buffer_" : "normalize_inputs.buffer_") + buffer + "." + which);
     };
     {
         const auto mean = stat("observation.image", "mean");   // [3, 1, 1]
@@ -322,7 +321,13 @@ inline void loadWeights<"lerobot", model::experimental::diffusion_policy::Net>(
         const std::string name = entry.path().filename().string();
         if (name.starts_with("policy_preprocessor_") && name.ends_with("normalizer_processor.safetensors") &&
             name != "policy_preprocessor_step_3_normalizer_processor.safetensors")
-            throw std::runtime_error("unsupported LeRobot preprocessing: " + dir + "/" + name);
+        {
+            std::string message = "unsupported LeRobot preprocessing: ";
+            message += dir;
+            message += "/";
+            message += name;
+            throw std::runtime_error(message);
+        }
     }
 
     model::experimental::diffusion_policy::lerobot::loadWeights(net, vai::Checkpoint(dir));

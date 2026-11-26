@@ -37,11 +37,12 @@ enum class Film : uint32_t {
 =============================================================================*/
 class GroupNormMish : public vai::Node
 {
-    eva::ComputePipeline pipe;
-    eva::DescriptorSet descSet;
+    eva::ComputePipeline pipe_;
+    eva::DescriptorSet descSet_;
 
 public:
-    struct PipeParams {
+    struct PipeParams
+    {
         vai::Dtype iDtype = vai::Dtype::None;
         vai::Dtype wDtype = vai::Dtype::None;   // scale / shift
         vai::Dtype fDtype = vai::Dtype::None;   // film
@@ -50,7 +51,8 @@ public:
         bool operator==(const PipeParams&) const = default;
     };
 
-    struct Config {
+    struct Config
+    {
         uint32_t groups;
         float eps = 1e-5f;
         Film film = Film::None;        // input "film"
@@ -62,7 +64,7 @@ public:
     void run(eva::CommandBuffer cmdBuff) override;
 
 private:
-    PipeParams pipeParams;
+    PipeParams pipeParams_;
     uint32_t C_ = 0, T_ = 0, samples_ = 0;
 };
 
@@ -101,8 +103,9 @@ inline void GroupNormMish::prepare()
     if (config_.film != Film::None)
     {
         const vai::Tensor& filmTen = (*this)["film"];
-        const uint32_t row = config_.film == Film::ScaleShift ? 2u * C_ : C_;
-        VAI_ASSERT(filmTen.shape().back() == row && filmTen.numElements() == size_t(samples_) * row);
+        // One row per sample: [2C] under ScaleShift, [C] under Shift.
+        VAI_ASSERT(filmTen.shape().back() == (config_.film == Film::ScaleShift ? 2u : 1u) * C_);
+        VAI_ASSERT(filmTen.numElements() == size_t(samples_) * filmTen.shape().back());
         p.fDtype = filmTen.dtype();
     }
     if (config_.acceptResidual)
@@ -112,11 +115,11 @@ inline void GroupNormMish::prepare()
         p.rDtype = rTen.dtype();
     }
 
-    if (!pipe || p != pipeParams)
+    if (!pipe_ || p != pipeParams_)
     {
-        pipeParams = p;
+        pipeParams_ = p;
         // clang-format off
-        pipe = pipelinePool().request(EXPERIMENTAL_DIFFUSION_POLICY_SHADER_OUTPUT_DIR, "group-norm-mish", {
+        pipe_ = pipelinePool().request(EXPERIMENTAL_DIFFUSION_POLICY_SHADER_OUTPUT_DIR, "group-norm-mish", {
             eva::constant_id<0>((uint32_t) config_.film),                      // film
             eva::constant_id<1>(config_.acceptResidual ? 1u : 0u),            // hasResidual
             eva::constant_id<2>(p.fDtype == vai::Dtype::None ? vai::Dtype::Fp32 : p.fDtype),   // typeF
@@ -126,8 +129,8 @@ inline void GroupNormMish::prepare()
             eva::constant_id<SPEC_ID_TYPE_W>(p.wDtype)                        // typeW (scale & shift)
         });
         // clang-format on
-        if (!descSet)
-            descSet = vai::gVaiDestSetPool(pipe.descSetLayout(0));
+        if (!descSet_)
+            descSet_ = vai::gVaiDestSetPool(pipe_.descSetLayout(0));
     }
 
     (*this)["out0"] = vai::Tensor(shape, oDtype);
@@ -141,21 +144,21 @@ inline void GroupNormMish::run(eva::CommandBuffer cmdBuff)
     auto filmBuf = config_.film != Film::None ? (*this)["film"].buffer() : inBuf;
     auto rBuf = config_.acceptResidual ? (*this)["residual"].buffer() : inBuf;
 
-    descSet.write({ outBuf, inBuf, (*this)["scale"].buffer(), (*this)["shift"].buffer(), filmBuf, rBuf });
+    descSet_.write({ outBuf, inBuf, (*this)["scale"].buffer(), (*this)["shift"].buffer(), filmBuf, rBuf });
 
-    struct {
+    struct
+    {
         uint32_t C, T, groups;
         float eps;
     } constants = { C_, T_, config_.groups, config_.eps };
 
-    cmdBuff
-        .bindPipeline(pipe)
+    cmdBuff.bindPipeline(pipe_)
         .setPushConstants(0, sizeof(constants), &constants)
-        .bindDescSets({descSet})
+        .bindDescSets({ descSet_ })
         .dispatch(config_.groups, samples_)
         .barrier(eva::SYNC_SCOPE::COMPUTE_WRITE / outBuf / eva::SYNC_SCOPE::COMPUTE_READ);
 }
 
 }   // namespace model::experimental::diffusion_policy::node
 
-#endif // EXPERIMENTAL_DIFFUSION_POLICY_NODES_GROUP_NORM_MISH_H
+#endif   // EXPERIMENTAL_DIFFUSION_POLICY_NODES_GROUP_NORM_MISH_H

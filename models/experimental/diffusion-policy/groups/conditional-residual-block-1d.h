@@ -31,14 +31,15 @@ namespace model::experimental::diffusion_policy::group {
 struct ConditionalResidualBlock1d : public vai::NodeGroup
 {
     vai::node::Identity input;
-    Conv1dBlock conv1;                                  // [Ci, T] -> [Co, T]
-    vai::node::Linear condEncoder;                      // [1, condDim] -> [1, 2·Co] / [1, Co]
-    Film film;                                          // [Co, T] -> [Co, T]
-    Conv1dBlock conv2;                                  // [Co, T] -> [Co, T]
-    std::optional<node::Convolution1d> residualConv;    // [Ci, T] -> [Co, T]; empty: in0
-    vai::node::Add residual;                            // conv2 + residualConv / in0
+    Conv1dBlock conv1;                                 // [Ci, T] -> [Co, T]
+    vai::node::Linear condEncoder;                     // [1, condDim] -> [1, 2·Co] / [1, Co]
+    Film film;                                         // [Co, T] -> [Co, T]
+    Conv1dBlock conv2;                                 // [Co, T] -> [Co, T]
+    std::optional<node::Convolution1d> residualConv;   // [Ci, T] -> [Co, T]; empty: in0
+    vai::node::Add residual;                           // conv2 + residualConv / in0
 
-    struct Config {
+    struct Config
+    {
         uint32_t inChannels;
         uint32_t outChannels;
         uint32_t condDim;

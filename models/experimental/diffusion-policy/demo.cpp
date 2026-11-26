@@ -37,8 +37,9 @@ void setProfileTags(dp::Net& net)
         auto& enc = net.rgbEncoder;
         auto tagConvNorm = [&](vai::group::ConvNorm& cn, uint32_t spatial) {
             const auto& c = cn.conv.config_;
-            cn.conv.setProfileTag("Encoder.Conv" + std::to_string(c.kernelSize) + "s" + std::to_string(c.stride) +
-                                  shape(c.inChannels, c.outChannels, spatial));
+            cn.conv.setProfileTag(
+                "Encoder.Conv" + std::to_string(c.kernelSize) + "s" + std::to_string(c.stride) +
+                shape(c.inChannels, c.outChannels, spatial));
             if (cn.norm)
                 cn.norm->setProfileTag("Encoder.GroupNorm");
         };
@@ -79,21 +80,24 @@ void setProfileTags(dp::Net& net)
         const uint32_t condDim = cfg.stepEmbedDim + cfg.globalCondDim();
         auto tagConv1d = [&](dp::node::Convolution1d& conv, uint32_t length) {
             const auto& c = conv.config_;
-            conv.setProfileTag("UNet.Conv1d.k" + std::to_string(c.kernelSize) + "s" + std::to_string(c.stride) +
-                               shape(c.inChannels, c.outChannels, length));
+            conv.setProfileTag(
+                "UNet.Conv1d.k" + std::to_string(c.kernelSize) + "s" + std::to_string(c.stride) +
+                shape(c.inChannels, c.outChannels, length));
         };
         auto tagBlock = [&](dp::group::Conv1dBlock& block, uint32_t length) {
             tagConv1d(block.conv, length);
-            block.norm.setProfileTag("UNet.GroupNormMish.[" + std::to_string(block.conv.config_.outChannels) + "@" +
-                                     std::to_string(length) + "]");
+            block.norm.setProfileTag(
+                "UNet.GroupNormMish.[" + std::to_string(block.conv.config_.outChannels) + "@" + std::to_string(length) +
+                "]");
         };
         auto tagRes = [&](dp::group::ConditionalResidualBlock1d& res, uint32_t length) {
             tagBlock(res.conv1, length);
             tagBlock(res.conv2, length);
-            res.condEncoder.setProfileTag("UNet.CondEncoder.Linear.[" + std::to_string(condDim) + "x" +
-                                          std::to_string(res.condEncoder.config_.outDim) + "]");
-            const std::string channels = "[" + std::to_string(res.conv2.conv.config_.outChannels) + "@" +
-                                         std::to_string(length) + "]";
+            res.condEncoder.setProfileTag(
+                "UNet.CondEncoder.Linear.[" + std::to_string(condDim) + "x" +
+                std::to_string(res.condEncoder.config_.outDim) + "]");
+            const std::string channels =
+                "[" + std::to_string(res.conv2.conv.config_.outChannels) + "@" + std::to_string(length) + "]";
             res.film.affine.setProfileTag("UNet.Film." + channels);
             if (res.film.scale)
             {
@@ -109,10 +113,10 @@ void setProfileTags(dp::Net& net)
         for (uint32_t l = 0; l < L; ++l)
         {
             const uint32_t length = cfg.horizon >> l;
-            tagRes(unet.downBlocks[2 * l], length);
-            tagRes(unet.downBlocks[2 * l + 1], length);
-            if (unet.downsamples[l])
-                tagConv1d(*unet.downsamples[l], length);
+            tagRes(unet.downBlocks[2 * size_t(l)], length);
+            tagRes(unet.downBlocks[2 * size_t(l) + 1], length);
+            if (auto& downsample = unet.downsamples[l]; downsample.has_value())
+                tagConv1d(*downsample, length);
         }
         for (auto& res : unet.midBlocks)
             tagRes(res, cfg.horizon >> (L - 1));
@@ -120,8 +124,8 @@ void setProfileTags(dp::Net& net)
         {
             const uint32_t length = cfg.horizon >> (L - 1 - u);
             unet.upCats[u].setProfileTag("UNet.Concat");
-            tagRes(unet.upBlocks[2 * u], length);
-            tagRes(unet.upBlocks[2 * u + 1], length);
+            tagRes(unet.upBlocks[2 * size_t(u)], length);
+            tagRes(unet.upBlocks[2 * size_t(u) + 1], length);
             const auto& c = unet.upsamples[u].config_;
             unet.upsamples[u].setProfileTag("UNet.ConvTranspose1d" + shape(c.inChannels, c.outChannels, length));
         }
@@ -204,7 +208,9 @@ int main()
     const std::vector<float> initNoise = dp::sampleNoise(size_t(modelCfg.horizon) * modelCfg.actionDim, seed);
     Tensor stepNoise = Tensor({ steps, modelCfg.horizon, modelCfg.actionDim }, Dtype::Fp32);
     stepNoise.setFloats(dp::sampleNoise(stepNoise.numElements(), seed + 1));
-    auto initSample = [&] { return Tensor({ modelCfg.horizon, modelCfg.actionDim }, Dtype::Fp32).setFloats(initNoise); };
+    auto initSample = [&] {
+        return Tensor({ modelCfg.horizon, modelCfg.actionDim }, Dtype::Fp32).setFloats(initNoise);
+    };
     Tensor sample;
 
     // Warm-up.

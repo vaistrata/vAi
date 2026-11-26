@@ -31,13 +31,14 @@ namespace model::experimental::diffusion_policy::group {
 struct Film : public vai::NodeGroup
 {
     vai::node::Identity input;
-    vai::node::Reshape filmView;                // [1, 2C] -> [2C, 1]  /  [1, C] -> [C, 1]
-    std::optional<vai::node::Slice> scale;      // [2C, 1] -> [C, 1]: rows [0, C); ScaleShift only
-    std::optional<vai::node::Slice> shift;      // [2C, 1] -> [C, 1]: rows [C, 2C); ScaleShift only
-    vai::node::EleAffine affine;                // [C, T] -> [C, T]
+    vai::node::Reshape filmView;             // [1, 2C] -> [2C, 1]  /  [1, C] -> [C, 1]
+    std::optional<vai::node::Slice> scale;   // [2C, 1] -> [C, 1]: rows [0, C); ScaleShift only
+    std::optional<vai::node::Slice> shift;   // [2C, 1] -> [C, 1]: rows [C, 2C); ScaleShift only
+    vai::node::EleAffine affine;             // [C, T] -> [C, T]
 
-    struct Config {
-        uint32_t channels;                       // C
+    struct Config
+    {
+        uint32_t channels;   // C
         node::Film mode = node::Film::ScaleShift;
     };
 

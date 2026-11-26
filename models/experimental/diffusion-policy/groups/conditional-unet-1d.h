@@ -36,30 +36,31 @@ namespace model::experimental::diffusion_policy::group {
 /////////////////////////////////////////////////////////////////////////////////////////
 struct ConditionalUnet1d : public vai::NodeGroup
 {
-    vai::node::Permute toChannels;    // [T, A] -> [A, T]
-    DiffusionStepEncoder stepEncoder; // [1] -> [1, D]
-    vai::node::Concat catCond;        // [1, D] + [1, G] -> [1, D + G]   (global_feature)
-    node::Mish condMish;              //                -> [1, D + G]
+    vai::node::Permute toChannels;      // [T, A] -> [A, T]
+    DiffusionStepEncoder stepEncoder;   // [1] -> [1, D]
+    vai::node::Concat catCond;          // [1, D] + [1, G] -> [1, D + G]   (global_feature)
+    node::Mish condMish;                //                -> [1, D + G]
 
-    std::vector<ConditionalResidualBlock1d> downBlocks;           // two per level: down_modules.l.{0, 1}
-    std::vector<std::optional<node::Convolution1d>> downsamples;  // down_modules.l.2; the last level's empty
-    std::vector<ConditionalResidualBlock1d> midBlocks;            // mid_modules.{0, 1}
-    std::vector<vai::node::Concat> upCats;                        // cat(x, skip) on channels
-    std::vector<ConditionalResidualBlock1d> upBlocks;             // two per level: up_modules.u.{0, 1}
-    std::vector<node::ConvTranspose1d> upsamples;                 // up_modules.u.2
+    std::vector<ConditionalResidualBlock1d> downBlocks;            // two per level: down_modules.l.{0, 1}
+    std::vector<std::optional<node::Convolution1d>> downsamples;   // down_modules.l.2; the last level's empty
+    std::vector<ConditionalResidualBlock1d> midBlocks;             // mid_modules.{0, 1}
+    std::vector<vai::node::Concat> upCats;                         // cat(x, skip) on channels
+    std::vector<ConditionalResidualBlock1d> upBlocks;              // two per level: up_modules.u.{0, 1}
+    std::vector<node::ConvTranspose1d> upsamples;                  // up_modules.u.2
 
-    Conv1dBlock finalBlock;              // final_conv.0: [C0, T] -> [C0, T]
-    node::Convolution1d finalConv;       // final_conv.1: [C0, T] -> [A, T]
-    vai::node::Permute toTime;           // [A, T] -> [T, A]
+    Conv1dBlock finalBlock;          // final_conv.0: [C0, T] -> [C0, T]
+    node::Convolution1d finalConv;   // final_conv.1: [C0, T] -> [A, T]
+    vai::node::Permute toTime;       // [A, T] -> [T, A]
 
-    struct Config {
-        uint32_t actionDim;                 // A
-        uint32_t globalCondDim;             // G
-        std::vector<uint32_t> downDims;     // channels per level, e.g. { 512, 1024, 2048 }
+    struct Config
+    {
+        uint32_t actionDim;               // A
+        uint32_t globalCondDim;           // G
+        std::vector<uint32_t> downDims;   // channels per level, e.g. { 512, 1024, 2048 }
         uint32_t kernelSize = 5;
-        uint32_t groups = 8;                // n_groups
-        uint32_t stepEmbedDim = 128;        // D, diffusion_step_embed_dim
-        bool filmScale = true;              // use_film_scale_modulation
+        uint32_t groups = 8;           // n_groups
+        uint32_t stepEmbedDim = 128;   // D, diffusion_step_embed_dim
+        bool filmScale = true;         // use_film_scale_modulation
     };
 
     ConditionalUnet1d(const Config& config)
@@ -92,7 +93,7 @@ struct ConditionalUnet1d : public vai::NodeGroup
         };
 
         // Built in place: a block's slots point back at it, so it cannot move.
-        downBlocks.reserve(2 * L);
+        downBlocks.reserve(2 * size_t(L));
         downsamples.reserve(L);
         for (uint32_t l = 0; l < L; ++l)
         {
@@ -100,8 +101,10 @@ struct ConditionalUnet1d : public vai::NodeGroup
             downBlocks.emplace_back(block(in, dims[l]));
             downBlocks.emplace_back(block(dims[l], dims[l]));
             if (l + 1 < L)
-                downsamples.emplace_back(std::in_place, node::Convolution1d::Config{
-                    .inChannels = dims[l], .outChannels = dims[l], .kernelSize = 3, .stride = 2 });
+                downsamples.emplace_back(
+                    std::in_place,
+                    node::Convolution1d::Config{
+                        .inChannels = dims[l], .outChannels = dims[l], .kernelSize = 3, .stride = 2 });
             else
                 downsamples.emplace_back(std::nullopt);
         }
@@ -111,11 +114,11 @@ struct ConditionalUnet1d : public vai::NodeGroup
         midBlocks.emplace_back(block(dims.back(), dims.back()));
 
         upCats.reserve(L - 1);
-        upBlocks.reserve(2 * (L - 1));
+        upBlocks.reserve(2 * size_t(L - 1));
         upsamples.reserve(L - 1);
         for (uint32_t u = 0; u + 1 < L; ++u)
         {
-            const uint32_t in = dims[L - 1 - u];    // the level below, and its skip
+            const uint32_t in = dims[L - 1 - u];   // the level below, and its skip
             const uint32_t out = dims[L - 2 - u];
             upCats.emplace_back(vai::node::Concat::Config{ .axis = -2, .inputCount = 2 });
             upBlocks.emplace_back(block(2 * in, out));
@@ -135,8 +138,9 @@ struct ConditionalUnet1d : public vai::NodeGroup
         toChannels - downBlocks[0];
         for (uint32_t l = 0; l < L; ++l)
         {
-            vai::NodeGroup& next = l + 1 < L ? static_cast<vai::NodeGroup&>(downBlocks[2 * (l + 1)]) : midBlocks[0];
-            downBlocks[2 * l] - downBlocks[2 * l + 1] - downsamples[l] - next;
+            const size_t b = 2 * size_t(l);
+            vai::NodeGroup& next = l + 1 < L ? static_cast<vai::NodeGroup&>(downBlocks[b + 2]) : midBlocks[0];
+            downBlocks[b] - downBlocks[b + 1] - downsamples[l] - next;
         }
         midBlocks[0] - midBlocks[1];
 
@@ -147,8 +151,8 @@ struct ConditionalUnet1d : public vai::NodeGroup
             midBlocks[1] - "in0"/upCats[0];
         for (uint32_t u = 0; u + 1 < L; ++u)
         {
-            downBlocks[2 * (L - 1 - u) + 1] - "in1"/upCats[u];
-            upCats[u] - upBlocks[2 * u] - upBlocks[2 * u + 1] - upsamples[u];
+            downBlocks[2 * size_t(L - 1 - u) + 1] - "in1"/upCats[u];
+            upCats[u] - upBlocks[2 * size_t(u)] - upBlocks[2 * size_t(u) + 1] - upsamples[u];
             if (u + 2 < L)
                 upsamples[u] - "in0"/upCats[u + 1];
             else

@@ -39,19 +39,20 @@ struct RgbEncoder : public vai::NodeGroup
     uint32_t featureSize;   // side of the backbone's last feature map
     uint32_t featureDim;    // 2 * K
 
-    vai::node::Identity input;           // [B, 3, S, S]
-    std::optional<CenterCrop> crop;      //              -> [B, 3, c, c]     (crop_shape)
-    vai::group::ResNet18 backbone;       //              -> [B, 512, f, f]
-    vai::node::Convolution keypointProj; //              -> [B, K, f, f]     (pool.nets)
-    SpatialSoftmax spatialSoftmax;       //              -> [B, K, 2]        (pool)
-    vai::node::Reshape flatten;          //              -> [B, 2 * K]
-    vai::node::Linear out;               //              -> [B, 2 * K], + relu (out, relu)
+    vai::node::Identity input;             // [B, 3, S, S]
+    std::optional<CenterCrop> crop;        //              -> [B, 3, c, c]     (crop_shape)
+    vai::group::ResNet18 backbone;         //              -> [B, 512, f, f]
+    vai::node::Convolution keypointProj;   //              -> [B, K, f, f]     (pool.nets)
+    SpatialSoftmax spatialSoftmax;         //              -> [B, K, 2]        (pool)
+    vai::node::Reshape flatten;            //              -> [B, 2 * K]
+    vai::node::Linear out;                 //              -> [B, 2 * K], + relu (out, relu)
 
-    struct Config {
+    struct Config
+    {
         vai::ResNetConfig backbone;
-        uint32_t imageSize;      // S, the input side
-        uint32_t cropSize = 0;   // the center crop's side; 0: no crop
-        uint32_t numKeypoints;   // K
+        uint32_t imageSize;        // S, the input side
+        uint32_t cropSize = 0;     // the center crop's side; 0: no crop
+        uint32_t numKeypoints;     // K
         bool allowBatch = false;   // true: a leading batch axis, kept the whole way
     };
 

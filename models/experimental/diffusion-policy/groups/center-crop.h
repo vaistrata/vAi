@@ -22,7 +22,8 @@ struct CenterCrop : public vai::NodeGroup
     vai::node::Slice cropRows;   // [B, C, S, S] -> [B, C, cropSize, S]
     vai::node::Slice cropCols;   //              -> [B, C, cropSize, cropSize]
 
-    struct Config {
+    struct Config
+    {
         uint32_t imageSize;   // S
         uint32_t cropSize;
         bool allowBatch = false;   // true: a leading batch axis, kept the whole way
@@ -37,12 +38,14 @@ struct CenterCrop : public vai::NodeGroup
     }
 
     CenterCrop(Config config)
-    : cropRows({ .axis = config.allowBatch ? 2u : 1u,
-                 .start = cropStart(config.imageSize, config.cropSize),
-                 .count = config.cropSize })
-    , cropCols({ .axis = config.allowBatch ? 3u : 2u,
-                 .start = cropStart(config.imageSize, config.cropSize),
-                 .count = config.cropSize })
+    : cropRows(
+          { .axis = config.allowBatch ? 2u : 1u,
+            .start = cropStart(config.imageSize, config.cropSize),
+            .count = config.cropSize })
+    , cropCols(
+          { .axis = config.allowBatch ? 3u : 2u,
+            .start = cropStart(config.imageSize, config.cropSize),
+            .count = config.cropSize })
     {
         VAI_ASSERT(config.cropSize >= 1u && config.cropSize <= config.imageSize);
 

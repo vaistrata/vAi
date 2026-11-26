@@ -19,17 +19,19 @@ namespace model::experimental::diffusion_policy::node {
 =============================================================================*/
 class Mish : public vai::Node
 {
-    eva::ComputePipeline pipe;
-    eva::DescriptorSet descSet;
+    eva::ComputePipeline pipe_;
+    eva::DescriptorSet descSet_;
 
 public:
-    struct PipeParams {
+    struct PipeParams
+    {
         vai::Dtype iDtype = vai::Dtype::None;
 
         bool operator==(const PipeParams&) const = default;
     };
 
-    struct Config {
+    struct Config
+    {
         bool inPlace = false;
     } config_;
 
@@ -39,7 +41,7 @@ public:
     void run(eva::CommandBuffer cmdBuff) override;
 
 private:
-    PipeParams pipeParams;
+    PipeParams pipeParams_;
 };
 
 
@@ -66,18 +68,18 @@ inline void Mish::prepare()
         VAI_ASSERT(oDtype == iDtype);
 
     const PipeParams p = { .iDtype = iDtype };
-    if (!pipe || p != pipeParams)
+    if (!pipe_ || p != pipeParams_)
     {
-        pipeParams = p;
+        pipeParams_ = p;
         // clang-format off
-        pipe = pipelinePool().request(EXPERIMENTAL_DIFFUSION_POLICY_SHADER_OUTPUT_DIR, "mish", {
+        pipe_ = pipelinePool().request(EXPERIMENTAL_DIFFUSION_POLICY_SHADER_OUTPUT_DIR, "mish", {
             eva::constant_id<0>(config_.inPlace ? 1u : 0u),   // inPlace
             eva::constant_id<SPEC_ID_TYPE_O>(oDtype),         // typeO
             eva::constant_id<SPEC_ID_TYPE_I>(iDtype)          // typeI
         });
         // clang-format on
-        if (!descSet)
-            descSet = vai::gVaiDestSetPool(pipe.descSetLayout(0));
+        if (!descSet_)
+            descSet_ = vai::gVaiDestSetPool(pipe_.descSetLayout(0));
     }
 
     (*this)["out0"] = config_.inPlace ? inTen : vai::Tensor(inTen.shape(), oDtype);
@@ -88,17 +90,17 @@ inline void Mish::run(eva::CommandBuffer cmdBuff)
     auto outBuf = (*this)["out0"].buffer();
     auto inBuf = config_.inPlace ? eva::Buffer() : (*this)["in0"].buffer();
 
-    descSet.write({ outBuf, inBuf });
+    descSet_.write({ outBuf, inBuf });
 
     const uint32_t N = uint32_t((*this)["out0"].numElements());
 
-    struct {
+    struct
+    {
         uint32_t N;
     } constants = { N };
 
-    cmdBuff
-        .bindPipeline(pipe)
-        .bindDescSets({descSet})
+    cmdBuff.bindPipeline(pipe_)
+        .bindDescSets({ descSet_ })
         .setPushConstants(0, sizeof(constants), &constants)
         .dispatch2(N)
         .barrier(eva::SYNC_SCOPE::COMPUTE_WRITE / outBuf / eva::SYNC_SCOPE::COMPUTE_READ);
@@ -106,4 +108,4 @@ inline void Mish::run(eva::CommandBuffer cmdBuff)
 
 }   // namespace model::experimental::diffusion_policy::node
 
-#endif // EXPERIMENTAL_DIFFUSION_POLICY_NODES_MISH_H
+#endif   // EXPERIMENTAL_DIFFUSION_POLICY_NODES_MISH_H
