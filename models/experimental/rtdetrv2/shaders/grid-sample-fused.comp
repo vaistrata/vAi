@@ -1,0 +1,86 @@
+/*=============================================================================
+ grid-sample-fused.comp:
+     Weighted bilinear sampling of level-concatenated [B, S, M, D] values.
+
+ One invocation owns one output channel; weights are provided by the caller.
+ Values use FP32 or FP16. Coordinates, interpolation, accumulation and output
+ use FP32. Host: 64 invocations per group, with dispatch X/Y flattened.
+=============================================================================*/
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_shader_16bit_storage : require
+#include "common/spec_constants.h"
+
+layout(local_size_x = 64) in;
+layout(constant_id = SPEC_ID_TYPE_I) const uint typeI = 0;
+
+layout(set = 0, binding = 0) writeonly buffer O_BUF_F32 { float bufferO_f32[]; };
+layout(set = 0, binding = 1) readonly buffer V_BUF_F32 { float bufferV_f32[]; };
+layout(set = 0, binding = 1) readonly buffer V_BUF_F16 { float16_t bufferV_f16[]; };
+layout(set = 0, binding = 2) readonly buffer LOC_BUF_F32 { vec2 bufferLoc_f32[]; };
+layout(set = 0, binding = 3) readonly buffer PROB_BUF_F32 { float bufferProb_f32[]; };
+layout(set = 0, binding = 4) readonly buffer LEVEL_BUF_U32 { uint bufferLevel_u32[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint count;
+    uint Q;
+    uint S;
+    uint M;
+    uint D;
+    uint P;
+    uint L;
+};
+
+float sampleAt(int x, int y, uint height, uint width, uint base, uint channel)
+{
+    if (x < 0 || y < 0 || x >= int(width) || y >= int(height)) return 0.0;
+    uint address = (base + uint(y) * width + uint(x)) * (M * D) + channel;
+    return typeI == 0 ? bufferV_f32[address] : float(bufferV_f16[address]);
+}
+
+void main()
+{
+    // Split large outputs over dispatch X/Y, preserving the flat channel order.
+    uint group = gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x;
+    if (group > (count - 1u) / gl_WorkGroupSize.x) return;
+    uint index = group * gl_WorkGroupSize.x + gl_LocalInvocationID.x;
+    if (index >= count) return;
+
+    uint channels = M * D;
+    uint channel = index % channels;
+    uint row = index / channels; // batch * Q + query
+    uint batch = row / Q;
+    uint head = channel / D;
+    uint sampleStart = (row * M + head) * P;
+    float accumulator = 0.0;
+
+    for (uint l = 0; l < L; ++l)
+    {
+        uint height = bufferLevel_u32[l * 5];
+        uint width = bufferLevel_u32[l * 5 + 1];
+        uint base = batch * S + bufferLevel_u32[l * 5 + 2];
+        uint pointStart = bufferLevel_u32[l * 5 + 3];
+        uint pointCount = bufferLevel_u32[l * 5 + 4];
+        for (uint p = 0; p < pointCount; ++p)
+        {
+            uint sampleIndex = sampleStart + pointStart + p;
+            vec2 xy = bufferLoc_f32[sampleIndex] * vec2(width, height) - 0.5;
+            // A sample just outside an edge can still have an in-bounds neighbor.
+            // Reject only when all neighbors are outside; this also prevents
+            // float-to-int overflow for very large finite input coordinates.
+            if (!(xy.x > -1.0 && xy.y > -1.0 && xy.x < float(width) && xy.y < float(height)))
+                continue;
+            ivec2 lower = ivec2(floor(xy));
+            vec2 fraction = xy - vec2(lower);
+            float topLeft = sampleAt(lower.x, lower.y, height, width, base, channel);
+            float topRight = sampleAt(lower.x + 1, lower.y, height, width, base, channel);
+            float bottomLeft = sampleAt(lower.x, lower.y + 1, height, width, base, channel);
+            float bottomRight = sampleAt(lower.x + 1, lower.y + 1, height, width, base, channel);
+            accumulator += ((1.0 - fraction.x) * (1.0 - fraction.y) * topLeft
+                          + fraction.x * (1.0 - fraction.y) * topRight
+                          + (1.0 - fraction.x) * fraction.y * bottomLeft
+                          + fraction.x * fraction.y * bottomRight) * bufferProb_f32[sampleIndex];
+        }
+    }
+    bufferO_f32[index] = accumulator;
+}

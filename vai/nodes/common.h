@@ -16,7 +16,8 @@
 #include <map>
 #include "vai/shaders/common/spec_constants.h"
 
-#define CEIL_DIV(M, N) (((M) + (N) - 1) / (N))
+// (M + N - 1) / N overflows when N is near 2^32 (RADV's maxComputeWorkGroupCount[0]).
+#define CEIL_DIV(M, N) ((M) / (N) + ((M) % (N) != 0 ? 1 : 0))
 #define ROUNDUP(M, N) (CEIL_DIV(M, N) * (N))
 #define ROUNDUP_POW2(M, N) (((M) + (N) - 1) & ~((N) - 1))   // N must be a power of 2
 #define SHADER_SPV(name) SHADER_OUTPUT_DIR "/" name ".comp.spv"

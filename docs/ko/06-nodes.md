@@ -880,8 +880,8 @@ Replicates CHW pixels by an integer scale factor.
 
 **시그니처**
 
-- 입력: in0 [C, H, W]
-- 출력: out0 [C, H*scale, W*scale]
+- 입력: in0 [..., C, H, W]
+- 출력: out0 [..., C, H*scale, W*scale]
 
 **슬롯**
 

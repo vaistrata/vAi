@@ -101,7 +101,9 @@ inline void TypeCast::run(eva::CommandBuffer cmdBuff)
     // One thread per element; workgroups past the x limit fold into y (cast.comp re-linearizes).
     constexpr uint32_t wgSize = 64;   // = local_size_x of cast
     const uint32_t groups = CEIL_DIV(N, wgSize);
-    const uint32_t gy = CEIL_DIV(groups, device().maxComputeWorkGroupCount()[0]), gx = CEIL_DIV(groups, gy);
+    const uint32_t limX = device().maxComputeWorkGroupCount()[0];
+    const uint32_t gy = std::max(1u, CEIL_DIV(groups, limX));
+    const uint32_t gx = CEIL_DIV(groups, gy);
 
     cmdBuff.bindPipeline(pipe)
         .setPushConstants(0, sizeof(constants), &constants)
