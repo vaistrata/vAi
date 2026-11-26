@@ -27,6 +27,10 @@ NOT_NODES = {
 }  # node headers that declare no node
 NODE_NAME = re.compile(r'"(\w+Node)"')
 
+# models/<impl>/<model>/ whose nodes have no Python binding yet: the model is not
+# official, so pyvai does not expose it. Drop a name when its bindings land.
+UNBOUND_MODELS = frozenset({"diffusion-policy"})
+
 # Stateful nodes (KV cache, counters, sampling, branches) whose tests need
 # multi-step runs. Only shrinks: drop a name when its test lands. A new node
 # never goes here; it comes with its test.
@@ -61,6 +65,8 @@ def _nodes():
     ]
     for model_dir in sorted(p.parent for p in (ROOT / "models").glob("*/*/nodes")):
         model = model_dir.name
+        if model in UNBOUND_MODELS:
+            continue
         groups.append(
             (
                 model_dir / "nodes",
@@ -126,3 +132,15 @@ def test_untested_list_is_current():
     unknown = sorted(UNTESTED - set(named))
     assert not tested, f"remove from UNTESTED, a test names them now: {tested}"
     assert not unknown, f"remove from UNTESTED, no binding names them: {unknown}"
+
+
+def test_unbound_models_list_is_current():
+    models = {p.parent.name for p in (ROOT / "models").glob("*/*/nodes")}
+    bound = sorted(
+        m
+        for m in UNBOUND_MODELS
+        if (ROOT / "python" / "bindings" / "models" / m / "nodes").exists()
+    )
+    unknown = sorted(UNBOUND_MODELS - models)
+    assert not bound, f"remove from UNBOUND_MODELS, their nodes have bindings now: {bound}"
+    assert not unknown, f"remove from UNBOUND_MODELS, no models/<impl>/<model>/nodes: {unknown}"
