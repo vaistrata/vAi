@@ -51,12 +51,14 @@ layout(constant_id = 7) const uint residualElems = 0;  // 0: the residual covers
 layout(constant_id = 8) const uint residualOrder = 0;  // 0: after the activation, 1: before it
 layout(constant_id = 9) const uint typeB = 0;          // bias dtype
 layout(constant_id = 10) const uint glu = 0;           // 1: O = activation(gate) * up (see above)
+layout(constant_id = 11) const uint weightLayout = 0;  // LAYOUT_* below
 
 layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0;  // O (output) dtype
 layout(constant_id = SPEC_ID_TYPE_I) const uint typeI = 0;  // I (input) dtype
 layout(constant_id = SPEC_ID_TYPE_W) const uint typeW = 0;  // W (weight) dtype
 layout(constant_id = SPEC_ID_ALIGNED) const uint aligned = 1;  // 1: K % 4 == 0, 0: masked K tail
 
+const uint LAYOUT_ROWS = 0u, LAYOUT_FRAGMENTS = 1u, LAYOUT_PERMUTE_N = 2u;
 const uint K_PER_ITER = 4;    // k elements per thread per iteration (ggml non-quant width)
 
 layout(set = 0, binding = 0) writeonly buffer O_BUF_F32  { float bufferO_f32[]; };
@@ -110,22 +112,46 @@ vec4 readI4Masked(uint rowBase, uint k0, bool lastIter)
         (lastIter && k0 + 3 >= K) ? 0.0 : readI(rowBase + k0 + 3));
 }
 
-vec4 readW4Masked(uint rowBase, uint k0, bool lastIter)
+// W[n, k]'s element index in weightLayout (see linear-preshuffle.comp):
+// Fragments keeps a 16x16 block's rows of 16 k, PermuteN a block's lanes of
+// 8 k; the blocks of one 16 (Fragments) or 128 (PermuteN) channel band run
+// over K, ceil(K / 16) of them.
+uint wIndex(uint n, uint k)
+{
+    if (weightLayout == LAYOUT_ROWS)
+        return n * K + k;
+    const uint numKb = (K + 15u) / 16u;
+    if (weightLayout == LAYOUT_FRAGMENTS)
+        return ((n / 16u) * numKb + k / 16u) * 256u + (n % 16u) * 16u + k % 16u;
+    // PermuteN: block nb holds channels nb/8*128 + nb%4*32 + 2*j + nb/4%2 (j < 16).
+    const uint c = n % 32u;
+    const uint nb = n / 128u * 8u + (c % 2u) * 4u + (n % 128u) / 32u;
+    const uint lane = (k % 16u) / 8u * 16u + c / 2u;
+    return (nb * numKb + k / 16u) * 256u + lane * 8u + k % 8u;
+}
+
+// A thread's chunk moves K_PER_ITER * wgSize along k per iteration, whole
+// 16-k blocks (wgSize is a multiple of 4), so in every layout its element
+// index moves by a constant: wIndex(n, 4 * tid) + it * W_STEP. The four k of a
+// chunk sit at that index + 0..3.
+const uint W_STEP = (weightLayout == LAYOUT_ROWS) ? K_PER_ITER * wgSize : K_PER_ITER * wgSize / 16u * 256u;
+
+vec4 readW4Masked(uint w, uint k0, bool lastIter)
 {
     if (aligned != 0u)
-        return readW4((rowBase + k0) >> 2);
+        return readW4(w >> 2);
     return vec4(
-        readW(rowBase + k0),
-        (lastIter && k0 + 1 >= K) ? 0.0 : readW(rowBase + k0 + 1),
-        (lastIter && k0 + 2 >= K) ? 0.0 : readW(rowBase + k0 + 2),
-        (lastIter && k0 + 3 >= K) ? 0.0 : readW(rowBase + k0 + 3));
+        readW(w),
+        (lastIter && k0 + 1 >= K) ? 0.0 : readW(w + 1u),
+        (lastIter && k0 + 2 >= K) ? 0.0 : readW(w + 2u),
+        (lastIter && k0 + 3 >= K) ? 0.0 : readW(w + 3u));
 }
 
 // One iteration: this thread's K_PER_ITER chunk dotted for every
 // (batch entry, N position) pair. W re-loads per batch entry are CSE'd by
 // the compiler — one input load feeds nCount chains, unrolled over M.
-void dotKChunk(inout float sums[M][wgN],
-               uint n0, uint nCount, uint tid, uint it, bool lastIter)
+void dotKChunk(inout float sums[M][wgN], const uint wBase[wgN],
+               uint nCount, uint tid, uint it, bool lastIter)
 {
     const uint k0 = K_PER_ITER * (it * wgSize + tid);
 
@@ -133,12 +159,8 @@ void dotKChunk(inout float sums[M][wgN],
     {
         vec4 iv = readI4Masked(j * K, k0, lastIter);
 
-        uint wRow = n0 * K;
         [[unroll]] for (uint n = 0; n < nCount; n++)
-        {
-            sums[j][n] += dot(readW4Masked(wRow, k0, lastIter), iv);
-            wRow += K;
-        }
+            sums[j][n] += dot(readW4Masked(wBase[n] + it * W_STEP, k0, lastIter), iv);
     }
 }
 
@@ -162,6 +184,11 @@ void computeOutputs(const uint n0, const uint nCount)
         [[unroll]] for (uint n = 0; n < wgN; n++)
             sums[j][n] = 0.0;
 
+    // Each output row's element index at this thread's first chunk (see W_STEP).
+    uint wBase[wgN];
+    [[unroll]] for (uint n = 0; n < wgN; n++)
+        wBase[n] = wIndex(n0 + n, K_PER_ITER * tid);
+
     // This thread owns the K_PER_ITER-wide chunks at
     // K_PER_ITER * (i * wgSize + tid), i = 0..numIters-1.
     uint numIters = K / (K_PER_ITER * wgSize);
@@ -181,7 +208,7 @@ void computeOutputs(const uint n0, const uint nCount)
     {
         [[unroll]] for (uint u = 0; u < 4; u++)
         {
-            dotKChunk(sums, n0, nCount, tid, i, false);
+            dotKChunk(sums, wBase, nCount, tid, i, false);
             i++;
         }
     }
@@ -195,14 +222,14 @@ void computeOutputs(const uint n0, const uint nCount)
     {
         [[unroll]] for (uint u = 0; u < 2; u++)
         {
-            dotKChunk(sums, n0, nCount, tid, i, false);
+            dotKChunk(sums, wBase, nCount, tid, i, false);
             i++;
         }
     }
 
     while (i < numIters)
     {
-        dotKChunk(sums, n0, nCount, tid, i, true);
+        dotKChunk(sums, wBase, nCount, tid, i, true);
         i++;
     }
 

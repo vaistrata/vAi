@@ -244,6 +244,7 @@ public:
         uint32_t biasRepeat = 0;
         uint32_t residualRepeat = 0;
         vai::Dtype iDtype = vai::Dtype::None;
+        WeightLayout layout = WeightLayout::Rows;   // the slot's (AMD)
 
         bool operator==(const PipeParamsSlab&) const = default;
     };
@@ -392,7 +393,12 @@ private:
 
     // Small batches run the slab kernel instead of the tile one;
     // 8 = ggml mul_mat_vec_max_cols.
-    bool useSlabPath(uint32_t M) const { return M <= 8u && !intel_ && !xe3_ && (!config_.glu || gluSlabOk_); }
+    // An AMD slot packed as Kn has no slab reader: its small batches run the KN tile.
+    bool useSlabPath(uint32_t M) const
+    {
+        return M <= 8u && !intel_ && !xe3_ && (!config_.glu || gluSlabOk_) &&
+               !(amd_ && weightLayoutAmd() == WeightLayout::Kn);
+    }
 
     // The epilogue: O = s * activation(C + bias) + residual (or the GLU, with
     // its bias), as linear-reduce computes it. With K not split, linear-cm-xe3,
@@ -419,25 +425,22 @@ private:
     uint32_t gluBlock_ = 0;   // the block the rows went into (0: not yet permuted)
     bool gluSlabOk_ = true;   // the slab kernel can take the GLU (fp16 W pairs, plain output)
 
-    // Strix Point / Halo: the "weight" slot holds the layout the picked tile
-    // reads, as on the Intel path, and is rewritten when a shape picks another
-    // (repackWeightAmd). weightLayoutAmd() reads the slot's layout off its shape.
+    // AMD: the "weight" slot holds one layout for every M, as on the Intel
+    // path. It starts as the loader's Rows; the first tile that asks for a
+    // packed layout packs it in place (settleWeightAmd), and from then on every
+    // shape reads that layout: the slab kernel at M <= 8 (Rows, Fragments,
+    // PermuteN), the tiles conformed to it. Only an fp16 weight is packed: an
+    // fp32 one stays Rows in fp32, as on NVIDIA, where the tile kernels round
+    // it to fp16 as they load it and the slab kernel reads it in fp32.
+    // weightLayoutAmd() reads the slot's layout off its shape.
     WeightLayout weightLayoutAmd() const;
-    void repackWeightAmd(WeightLayout layout);
-    // `source` (Rows) rewritten into `target` by linear-preshuffle, in a buffer
-    // from the net's pool.
-    Tensor packWeightAmd(
-        const Tensor& source, WeightLayout target, eva::MEMORY_PROPERTY memory = eva::MEMORY_PROPERTY::DEVICE_LOCAL);
+    bool packableAmd() const;   // the slot is Rows that settleWeightAmd may still pack
+    WeightLayout settleWeightAmd(WeightLayout wanted);
+    // `source` (fp16 Rows) rewritten into `target` by linear-preshuffle, in a
+    // buffer from the net's pool.
+    Tensor packWeightAmd(const Tensor& source, WeightLayout target);
 
-    // Strix: the Rows weight a packed slot was made from, kept so the next
-    // layout is packed from it.
-    Tensor rowWeight_;
-    // Other AMD parts: the slot stays Rows and a packed lane tile reads this
-    // PermuteN copy instead. To update a packed weight, bind a new source range
-    // and record the graph again. The source is kept alive so the pool cannot
-    // recycle its buffer.
-    Tensor packedWeight_, packedSource_;
-    eva::BufferRange packedSourceRange_;
+    bool amd_ = false;     // an AMD device, set by prepare()
     bool intel_ = false;   // the Intel tile path (useIntelTile), set by prepare()
     bool xe3_ = false;     // the Xe3 coopmat path (useXe3Cm), set by prepare()
     // Xe3 with an fp32 I: prepare() sets it from the input's dtype and lays out
@@ -1862,35 +1865,40 @@ inline Linear::PipeParamsTile amdHaloLinearTile(
     return t;
 }
 
+// Strix Halo, the KN schedule's tile: 64x64 k16 at wave32 on Kn weights, in
+// N-first order without schedule options.
+inline void amdHaloKnTile(uint32_t M, Linear::PipeParamsTile& t, Linear::StrixTile& plan)
+{
+    t.wgM = 64;
+    t.wgN = 64;
+    t.wgK = 16;
+    t.sgM = M == 50 ? 32 : 16;
+    t.sgN = M == 50 ? 32 : 64;
+    t.wgSize = 128;
+    t.sgSize = 32;
+    plan.weights = Linear::WeightLayout::Kn;
+    plan.groupM = 0;
+    plan.schedule = 0;
+}
+
 // Strix Halo, a plain fp16 layer (no bias / activation / residual / scale, fp32
 // accumulation, K not split): two layers leave the cooperative schedule's
 // Fragments tiles. The prefix gate+up runs the lane schedule on PermuteN
 // weights (the returned pick); the action expert's gate+up runs the KN
 // schedule on a 64x64 k16 wave32 tile, taken only while `weight` starts at
-// offset 0 of its buffer. Every other shape keeps `t` and its `plan`
-// (t.strix).
+// offset 0 of its buffer and the slot can hold Kn (`knOk`). Every other shape
+// keeps `t` and its `plan` (t.strix).
 inline std::optional<Linear::RadvPick> amdHaloPlainTile(
-    uint32_t M, uint32_t N, uint32_t K, const Tensor& weight, Linear::PipeParamsTile& t, Linear::StrixTile& plan,
-    eva::Device device)
+    uint32_t M, uint32_t N, uint32_t K, const Tensor& weight, bool knOk, Linear::PipeParamsTile& t,
+    Linear::StrixTile& plan, eva::Device device)
 {
     if (M >= 768 && M < 1024 && K == 2048 && N == 32768)
     {
         plan.weights = Linear::WeightLayout::PermuteN;
         return amdLinearLaneTile(M, N, K, 1, device);
     }
-    if ((M == 50 || M == 51) && K == 1024 && N == 8192 && weight.buffer().offset == 0)
-    {
-        t.wgM = 64;
-        t.wgN = 64;
-        t.wgK = 16;
-        t.sgM = M == 50 ? 32 : 16;
-        t.sgN = M == 50 ? 32 : 64;
-        t.wgSize = 128;
-        t.sgSize = 32;
-        plan.weights = Linear::WeightLayout::Kn;
-        plan.groupM = 0;
-        plan.schedule = 0;
-    }
+    if (knOk && (M == 50 || M == 51) && K == 1024 && N == 8192 && weight.buffer().offset == 0)
+        amdHaloKnTile(M, t, plan);
     return {};
 }
 
@@ -2608,7 +2616,7 @@ inline Linear::WeightLayout Linear::weightLayoutAmd() const
 // linear-preshuffle: one workgroup per 16x16 block of W (64x64 for Kn), over
 // (gx, gy) = (K blocks, N blocks); PermuteN lays 8 blocks out per 128 channels.
 // Run once and waited for, like packWeightIntel.
-inline Tensor Linear::packWeightAmd(const Tensor& source, WeightLayout target, eva::MEMORY_PROPERTY memory)
+inline Tensor Linear::packWeightAmd(const Tensor& source, WeightLayout target)
 {
     const uint32_t N = config_.outDim, K = config_.inDim;
     const uint32_t kb = CEIL_DIV(K, 16u);
@@ -2636,7 +2644,7 @@ inline Tensor Linear::packWeightAmd(const Tensor& source, WeightLayout target, e
     Tensor packed(shape, Dtype::Fp16);
     packed.bindBuffer(bufferPool().requestBuffer(
         eva::BUFFER_USAGE::STORAGE_BUFFER | eva::BUFFER_USAGE::TRANSFER_DST,
-        memory,
+        eva::MEMORY_PROPERTY::DEVICE_LOCAL,
         packed.numBytes(),
         packed.numBytes()));
     const auto destination = packed.buffer();
@@ -2657,38 +2665,19 @@ inline Tensor Linear::packWeightAmd(const Tensor& source, WeightLayout target, e
     return packed;
 }
 
-// Puts the "weight" slot into `layout`. A packed slot is repacked from the
-// Rows weight kept in rowWeight_, never from another packed layout. On Strix
-// Point an fp16 Rows weight is first copied into host-cached memory, and into
-// a device-local buffer again when Rows itself is asked for.
-inline void Linear::repackWeightAmd(WeightLayout layout)
+inline bool Linear::packableAmd() const
 {
-    Tensor& weight = (*this)["weight"];
-    const WeightLayout current = weightLayoutAmd();
-    if (current == WeightLayout::Rows)
-        rowWeight_ = {};
-    if (current == layout)
-        return;
+    const Tensor& weight = (*this)["weight"];
+    return weightLayoutAmd() == WeightLayout::Rows && weight.dtype() == Dtype::Fp16 && !weight.lastSubmission().first;
+}
 
-    if (current != WeightLayout::Rows)
-    {
-        VAI_ASSERT(rowWeight_.validShape());
-        weight = rowWeight_;
-    }
-    const bool point = amdLinearDevice(device()) == AmdLinearDevice::StrixPoint && weight.dtype() == Dtype::Fp16;
-    if (layout == WeightLayout::Rows)
-    {
-        if (point)
-            weight = packWeightAmd(weight, WeightLayout::Rows);
-        rowWeight_ = {};
-        return;
-    }
-    // Keep Point originals in cached memory. Keep packed weights in device local memory.
-    if (point && !eva::hasFlag(weight.buffer().buffer.memoryProperties(), eva::MEMORY_PROPERTY::HOST_CACHED))
-        weight = packWeightAmd(
-            weight, WeightLayout::Rows, eva::MEMORY_PROPERTY::HOST_VISIBLE | eva::MEMORY_PROPERTY::HOST_CACHED);
-    rowWeight_ = weight;
-    weight = packWeightAmd(weight, layout);
+inline Linear::WeightLayout Linear::settleWeightAmd(WeightLayout wanted)
+{
+    if (wanted == WeightLayout::Rows || !packableAmd())
+        return weightLayoutAmd();
+    Tensor& weight = (*this)["weight"];
+    weight = packWeightAmd(weight, wanted);
+    return wanted;
 }
 
 // The layout the "weight" slot holds on the Xe3 path, by its shape (see WeightLayout).
@@ -2802,17 +2791,6 @@ inline void Linear::prepare()
     const Tensor& inTen = (*this)["in0"];
     const Tensor& wTen  = (*this)["weight"];
 
-    // The packed lane copy follows its source: drop it when a net writes the
-    // weight or the slot moved to another buffer range.
-    if (packedWeight_.gpuBufferBound() &&
-        (wTen.lastSubmission().first || wTen.buffer().buffer != packedSourceRange_.buffer ||
-         wTen.byteOffset() != packedSourceRange_.offset))
-    {
-        packedWeight_ = {};
-        packedSource_ = {};
-        packedSourceRange_ = {};
-    }
-
     uint32_t N = config_.outDim;
     uint32_t K = config_.inDim;
     VAI_ASSERT(inTen.shape().back() == K);
@@ -2821,11 +2799,8 @@ inline void Linear::prepare()
     const Dtype iDtype = inTen.dtype();
     const AmdLinearDevice chip = amdLinearDevice(device());
     const bool strix = chip != AmdLinearDevice::Other;
-    // A packed Strix slot is fp16; the tile is still chosen by the dtype the
-    // loader gave, which the Rows weight keeps.
-    const Dtype wDtype =
-        strix && weightLayoutAmd() != WeightLayout::Rows && rowWeight_.validShape() ? rowWeight_.dtype() : wTen.dtype();
-    const bool amd = device().vendorID() == eva::VENDOR_ID::AMD;
+    const bool amd = amd_ = device().vendorID() == eva::VENDOR_ID::AMD;
+    const Dtype wDtype = wTen.dtype();   // packing keeps it (only fp16 is packed)
     const Dtype accDtype = (accDtype_ == Dtype::None) ? Dtype::Fp32 : accDtype_;
 
     const auto& inShape = inTen.shape();
@@ -2840,9 +2815,7 @@ inline void Linear::prepare()
         repackWeightXe3(WeightLayout::KnPitch32);
     if (intel_ && wTen.isShapeOf(N, K))
         packWeightIntel();
-    VAI_ASSERT(strix || xe3_ || (intel_ ? weightPackedIntel() : wTen.isShapeOf(N, K)));
-    if (strix && useSlabPath(M))
-        repackWeightAmd(WeightLayout::Rows);
+    VAI_ASSERT(amd || xe3_ || (intel_ ? weightPackedIntel() : wTen.isShapeOf(N, K)));
 
     // An operand block that covers O is 0, so the shader indexes it directly;
     // a shorter one ([N], or one image's rows) is its length, read modulo.
@@ -2874,11 +2847,15 @@ inline void Linear::prepare()
         // the tile params below; run() only re-derives wgN.
         const uint32_t sgSize = ggmlSlabSgSize(device());
         const uint32_t wgSize = selectLinearSlabWgSize(K, N, sgSize, device());
+        // The slot as it is: on AMD Rows, or packed (fp16).
+        const WeightLayout layout = amd ? weightLayoutAmd() : WeightLayout::Rows;
         const uint32_t wgN = (wDtype == Dtype::Fp16) ? 2u : 1u;   // fp16 W pairs N positions
         const bool     aligned = (K % 4 == 0);   // K_PER_ITER = 4 wide loads
 
         storeInKernel_ = true;   // the slab kernel does the whole epilogue (and only a GLU it can take reaches it)
-        const PipeParamsSlab p = { .M = M, .biasRepeat = biasElems, .residualRepeat = residualElems, .iDtype = iDtype };
+        const PipeParamsSlab p = {
+            .M = M, .biasRepeat = biasElems, .residualRepeat = residualElems, .iDtype = iDtype, .layout = layout
+        };
         if (!pipeSlab || p != pipeParamsSlab)
         {
             pipeParamsSlab = p;
@@ -2896,6 +2873,7 @@ inline void Linear::prepare()
                 eva::constant_id<8>((uint32_t) config_.residualOrder),   // residualOrder
                 eva::constant_id<9>(bDtype),                          // typeB (bias)
                 eva::constant_id<10>(config_.glu ? 1u : 0u),          // glu
+                eva::constant_id<11>(layout),                         // weightLayout
                 eva::constant_id<SPEC_ID_TYPE_O>(oDtype),     // typeO
                 eva::constant_id<SPEC_ID_TYPE_I>(iDtype),             // typeI
                 eva::constant_id<SPEC_ID_TYPE_W>(wDtype),             // typeW
@@ -3049,13 +3027,50 @@ inline void Linear::prepare()
             const bool fp16Io = iDtype == Dtype::Fp16 && wDtype == Dtype::Fp16 && oDtype == Dtype::Fp16;
             std::optional<RadvPick> radv;   // a lane tile or a linear-cm geometry to lay over t
 
+            // A Strix cm tile without a measured plan reads Rows through linear-cm; once
+            // the slot is packed it runs on linear-cm-amd's cooperative schedule instead.
+            if (strix && !t.strix && t.tK != 0u && weightLayoutAmd() != WeightLayout::Rows)
+            {
+                t.strix = StrixTile{};
+                t.strix->splits = splitCount;
+            }
             if (t.strix)
             {
                 StrixTile& a = *t.strix;
                 a.accType = cmAccDtype;
-                if (chip == AmdLinearDevice::StrixHalo && plainOutput() && fp16Io && a.accType == Dtype::Fp32 &&
-                    !config_.splitSize && splitCount == 1)
-                    radv = amdHaloPlainTile(M, N, K, wTen, t, a, device());
+                const bool plainF16 = plainOutput() && fp16Io && cmAccDtype == Dtype::Fp32 && !config_.splitSize;
+                const bool knOk = weightLayoutAmd() == WeightLayout::Kn || packableAmd();
+                if (chip == AmdLinearDevice::StrixHalo && plainF16 && splitCount == 1)
+                    radv = amdHaloPlainTile(M, N, K, wTen, knOk, t, a, device());
+
+                // One layout for every M: the slot settles in the first packed layout a
+                // tile asks for, and a tile that asked for another reads it instead.
+                const WeightLayout wanted = a.weights;
+                const WeightLayout layout = settleWeightAmd(wanted);
+                if (layout != wanted)
+                {
+                    VAI_ASSERT(wanted != WeightLayout::Kn);   // knOk: a Kn pick gets its layout
+                    radv.reset();
+                    a.weights = layout;
+                    if (layout == WeightLayout::PermuteN)
+                    {
+                        // The lane schedule is PermuteN's only reader.
+                        VAI_ASSERT(fp16Io && cmAccDtype == Dtype::Fp32 && !config_.splitSize);
+                        radv = amdLinearLaneTile(M, N, K, splitCount, device());
+                        if (!radv || radv->cmSubgroup || !radv->packed)
+                            radv = RadvPick{ 128, 64, 128, 64, 32, 1, LaneOrder::Blocks, true };
+                    }
+                    else if (layout == WeightLayout::Kn)
+                    {
+                        // The KN schedule is Kn's only reader; it never splits.
+                        VAI_ASSERT(plainF16);
+                        splitCount = 1;
+                        splitSize = K;
+                        a.splits = 1;
+                        amdHaloKnTile(M, t, a);
+                    }
+                }
+
                 // An unsplit cooperative tile applies the activation itself.
                 a.fused =
                     !radv && splitCount == 1 && !plainOutput() && !config_.glu;   // the GLU goes to the reduce pass
@@ -3071,33 +3086,42 @@ inline void Linear::prepare()
                 // The schedule options need Fragments weights and whole k-blocks.
                 if (a.weights != WeightLayout::Fragments || a.loadWidth != 1)
                     a.schedule = 0;
-                repackWeightAmd(a.weights);
             }
             else if (strix)
-                repackWeightAmd(WeightLayout::Rows);
+                VAI_ASSERT(weightLayoutAmd() == WeightLayout::Rows);   // ggml's scalar tile: no packed reader
 
             // The locked cooperative matrix shape may only support FP32 accumulation.
             const Dtype acc = t.tK && amd ? Dtype::Fp32 : cmAccDtype;
             const bool fullResidual =
                 splitCount == 1 && config_.acceptResidual && residualElems == 0 && !hasBias() &&
                 config_.actType == vai::ActType::None && config_.scalarScale == 1.0f;
-            if (amd && !strix && t.tM == 16 && t.tN == 16 && t.tK == 16 && !config_.splitSize && acc == Dtype::Fp32 &&
-                fp16Io)
+            const bool laneGate =
+                amd && !strix && t.tM == 16 && t.tN == 16 && t.tK == 16 && !config_.splitSize && acc == Dtype::Fp32 &&
+                fp16Io;
+            if (laneGate)
                 radv = amdLinearLaneTile(M, N, K, splitCount, device(), fullResidual);
-            // A packed lane tile reads a copy of W made once, which a weight a
+            // A packed lane tile reads W packed in the slot, which a weight a
             // net writes would leave behind.
             if (radv && radv->packed && wTen.lastSubmission().first)
                 radv.reset();
-            if (radv)
+            if (amd && !strix)
             {
-                amdApplyRadvPick(*radv, M, t);
-                if (t.lane && t.lane->packed && !t.strix && !packedWeight_.gpuBufferBound())
+                // One layout for every M: a packed lane tile settles the slot in
+                // PermuteN, and every later tile reads it on the lane schedule.
+                const bool packedLane = radv && !radv->cmSubgroup && radv->packed;
+                const WeightLayout layout = settleWeightAmd(packedLane ? WeightLayout::PermuteN : WeightLayout::Rows);
+                VAI_ASSERT(layout == WeightLayout::Rows || layout == WeightLayout::PermuteN);
+                if (layout == WeightLayout::PermuteN && !packedLane)
                 {
-                    packedWeight_ = packWeightAmd(wTen, WeightLayout::PermuteN);
-                    packedSource_ = wTen;
-                    packedSourceRange_ = wTen.buffer();
+                    VAI_ASSERT(laneGate);
+                    if (radv && !radv->cmSubgroup)
+                        radv->packed = true;
+                    else
+                        radv = RadvPick{ 128, 64, 128, 64, 32, 1, LaneOrder::Blocks, true };
                 }
             }
+            if (radv)
+                amdApplyRadvPick(*radv, M, t);
             else if (!strix && splitSize == K && acc == Dtype::Fp32 && fp16Io && useAmdMFirst(M, N, K, t, device()))
                 t.rowMajor = CEIL_DIV(M, t.wgM);
             else
@@ -3385,8 +3409,6 @@ inline void Linear::run(eva::CommandBuffer cmdBuff)
     else
     {
         const TileGrid grid(M, N, pipeParamsTile.wgM, pipeParamsTile.wgN);
-        if (pipeParamsTile.lane && pipeParamsTile.lane->packed && !pipeParamsTile.strix)
-            wBuf = packedWeight_.buffer();   // the PermuteN copy; a Strix slot is packed itself
         gx = grid.tilesN;
         gy = grid.tilesM;
     }
