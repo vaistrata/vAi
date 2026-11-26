@@ -43,6 +43,8 @@ inline void checkRopeConfig(const vai::RopeConfig& cfg, const char* who, const c
         fail("factor must be > 0");
     if (cfg.originalMaxPos > 0 && cfg.lowFreqFactor == cfg.highFreqFactor)
         fail("low_freq_factor and high_freq_factor must differ");
+    if (cfg.tileSize == 0)
+        fail("tile_size must be >= 1");
 }
 
 }   // namespace pyvai

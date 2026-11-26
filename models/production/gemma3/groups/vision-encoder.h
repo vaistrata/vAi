@@ -90,7 +90,6 @@ struct VisionEncoder : public vai::NodeGroup
     , tokensPerImage(tokensPerSide * tokensPerSide)
     , patchEmbed({
           .imageChannels = config.base.trf.imageChannels,
-          .imageSize = config.base.trf.imageSize,
           .patchSize = config.base.trf.patchSize,
           .embedDim = config.base.trf.embedDim,
       })

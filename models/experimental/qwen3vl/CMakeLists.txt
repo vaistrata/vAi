@@ -6,3 +6,5 @@ project(demo-qwen3vl)
 add_executable(${PROJECT_NAME}
     demo.cpp
 )
+
+add_dependencies(${PROJECT_NAME} experimental-qwen3vl-shaders)

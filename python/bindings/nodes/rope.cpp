@@ -41,7 +41,8 @@ void bindRopeConfig(nb::module_& m)
                    float low_freq_factor,
                    float high_freq_factor,
                    std::array<uint32_t, 3>
-                       mrope_section) {
+                       mrope_section,
+                   uint32_t tile_size) {
                     new (self) vai::RopeConfig{
                         .posType = pos_type,
                         .base = base,
@@ -50,6 +51,7 @@ void bindRopeConfig(nb::module_& m)
                         .lowFreqFactor = low_freq_factor,
                         .highFreqFactor = high_freq_factor,
                         .mropeSection = mrope_section,
+                        .tileSize = tile_size,
                     };
                 },
                 nb::arg("pos_type") = plainRope.posType,
@@ -59,11 +61,14 @@ void bindRopeConfig(nb::module_& m)
                 nb::arg("low_freq_factor") = plainRope.lowFreqFactor,
                 nb::arg("high_freq_factor") = plainRope.highFreqFactor,
                 nb::arg("mrope_section") = plainRope.mropeSection,
+                nb::arg("tile_size") = plainRope.tileSize,
                 "RoPE parameters of a model, HF's rope_parameters. factor 1 leaves the "
                 "frequencies alone, any other divides them; a nonzero original_max_pos makes "
                 "it Llama 3's band, read with the two frequency bounds. mrope_section gives "
-                "MROPE's pairs on (t, h, w). Consumers require base > 0, factor > 0, and "
-                "low_freq_factor != high_freq_factor when original_max_pos is set.")
+                "MROPE's pairs on (t, h, w). tile_size is GRID2D's token order: tokens in "
+                "tile_size x tile_size tiles, 1 for raster. Consumers require base > 0, "
+                "factor > 0, and low_freq_factor != high_freq_factor when original_max_pos "
+                "is set.")
             .def_rw("pos_type", &vai::RopeConfig::posType)
             .def_rw("base", &vai::RopeConfig::base)
             .def_rw("factor", &vai::RopeConfig::factor)
@@ -71,18 +76,21 @@ void bindRopeConfig(nb::module_& m)
             .def_rw("low_freq_factor", &vai::RopeConfig::lowFreqFactor)
             .def_rw("high_freq_factor", &vai::RopeConfig::highFreqFactor)
             .def_rw("mrope_section", &vai::RopeConfig::mropeSection)
+            .def_rw("tile_size", &vai::RopeConfig::tileSize)
             .def(
                 "__eq__",
                 [](const vai::RopeConfig& self, const vai::RopeConfig& other) {
                     return self.posType == other.posType && self.base == other.base && self.factor == other.factor &&
                            self.originalMaxPos == other.originalMaxPos && self.lowFreqFactor == other.lowFreqFactor &&
-                           self.highFreqFactor == other.highFreqFactor && self.mropeSection == other.mropeSection;
+                           self.highFreqFactor == other.highFreqFactor && self.mropeSection == other.mropeSection &&
+                           self.tileSize == other.tileSize;
                 },
                 nb::arg("other"),
                 nb::is_operator())
             .def("__repr__", [](const vai::RopeConfig& c) {
                 return nb::str("RopeConfig(pos_type={}, base={}, factor={}, original_max_pos={}, "
-                               "low_freq_factor={}, high_freq_factor={}, mrope_section=[{}, {}, {}])")
+                               "low_freq_factor={}, high_freq_factor={}, mrope_section=[{}, {}, {}], "
+                               "tile_size={})")
                     .format(
                         c.posType,
                         c.base,
@@ -92,7 +100,8 @@ void bindRopeConfig(nb::module_& m)
                         c.highFreqFactor,
                         c.mropeSection[0],
                         c.mropeSection[1],
-                        c.mropeSection[2]);
+                        c.mropeSection[2],
+                        c.tileSize);
             });
     // A mutable value type with __eq__ is unhashable, as Python's rule has it.
     cls.attr("__hash__") = nb::none();

@@ -1,6 +1,6 @@
 # Built-in nodes
 
-28 built-in nodes. See [Node](03-usage/node.md) for the concept and [Writing custom nodes and kernels](contributing/nodes.md) for instructions on creating new nodes.
+29 built-in nodes. See [Node](03-usage/node.md) for the concept and [Writing custom nodes and kernels](contributing/nodes.md) for instructions on creating new nodes.
 
 ## List
 
@@ -34,6 +34,7 @@
 | [TokenEmbedding](#tokenembedding) | token embedding, optionally fused with positional embedding | `token-embedding.comp` |
 | [TopKSampling](#topksampling) | row-wise top-k sampling, one kernel run as two passes | `topk-sampling.comp` |
 | [TypeCast](#typecast) | Casts each tensor element to another dtype. | `cast.comp` |
+| [Unflatten](#unflatten) | Split one axis into several, as torch.unflatten | None |
 
 ---
 
@@ -1311,5 +1312,37 @@ dispatch.
 **Kernels**
 
 - `vai/shaders/cast.comp`
+
+---
+
+## Unflatten
+
+Split one axis into several, as torch.unflatten
+
+Source: [`vai/nodes/unflatten.h`](../../vai/nodes/unflatten.h)
+
+**Signature**
+
+- Input: in0 [d0, .., d(r-1)]
+- Output: out0 in0's shape with d(axis) replaced by sizes (shares buffer with input)
+
+**Slots**
+
+| Slot | Type | Notes |
+|---|---|---|
+| `in0` | input |  |
+| `out0` | output |  |
+
+**Config**
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `axis` | `int` | Not specified | the axis to split; negative counts from the end |
+| `sizes` | `std::vector<int64_t>` | Not specified | what it splits into; one may be -1 |
+
+**Behavior and constraints**
+
+A negative axis counts from the end. Each size is positive, or -1 for whatever
+d(axis) leaves over, at most once. The sizes must multiply to d(axis).
 
 ---

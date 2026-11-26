@@ -26,7 +26,7 @@ class Permute : public vai::Node
     eva::ComputePipeline pipe;
     eva::DescriptorSet descSet;
     std::vector<uint32_t> perms_;
-    std::vector<uint32_t> inDims_;   // in0 with its leading axes folded into one
+    std::vector<uint32_t> inDims_;   // in0 as the kernel sees it: size-1 axes dropped, runs merged
     std::vector<uint32_t> axes_;     // perms over inDims_, the folded axis kept first
     bool skip = false;
 
@@ -75,22 +75,72 @@ inline void Permute::prepare()
     VAI_ASSERT(shape.size() >= k);
     const size_t lead = shape.size() - k;
 
-    inDims_.clear();
-    axes_.clear();
+    std::vector<uint32_t> dims, order;
     if (lead > 0)
     {
         uint32_t outer = 1;
         for (size_t i = 0; i < lead; ++i)
             outer *= shape[i];
-        inDims_.push_back(outer);
-        axes_.push_back(0);
+        dims.push_back(outer);
+        order.push_back(0);
     }
     const uint32_t first = lead > 0 ? 1u : 0u;
     for (size_t i = 0; i < k; ++i)
     {
-        inDims_.push_back(shape[lead + i]);
-        axes_.push_back(first + perms_[i]);
+        dims.push_back(shape[lead + i]);
+        order.push_back(first + perms_[i]);
     }
+
+    // Size-1 axes carry no offset, so the kernel sees only the rest; the output keeps
+    // its full shape.
+    std::vector<uint32_t> kept(dims.size());   // input axis -> its index among the kept
+    inDims_.clear();
+    for (size_t i = 0; i < dims.size(); ++i)
+    {
+        kept[i] = (uint32_t)inDims_.size();
+        if (dims[i] > 1)
+            inDims_.push_back(dims[i]);
+    }
+    axes_.clear();
+    for (uint32_t axis : order)
+        if (dims[axis] > 1)
+            axes_.push_back(kept[axis]);
+    if (axes_.empty())   // a single element
+    {
+        inDims_.push_back(1);
+        axes_.push_back(0);
+    }
+
+    // Axes adjacent in in0 that stay adjacent, in order, in out0 move as one axis.
+    std::vector<uint32_t> runFirst, runLast;   // in0 axes of each run, in out0 order
+    for (uint32_t axis : axes_)
+    {
+        if (!runLast.empty() && axis == runLast.back() + 1)
+            runLast.back() = axis;
+        else
+        {
+            runFirst.push_back(axis);
+            runLast.push_back(axis);
+        }
+    }
+    std::vector<int> runAt(inDims_.size(), -1);   // in0 axis -> the run it starts
+    for (size_t r = 0; r < runFirst.size(); ++r)
+        runAt[runFirst[r]] = (int)r;
+    std::vector<uint32_t> mergedDims, runIndex(runFirst.size());
+    for (uint32_t axis = 0; axis < inDims_.size(); ++axis)
+    {
+        if (runAt[axis] < 0)
+            continue;
+        const uint32_t r = (uint32_t)runAt[axis];
+        uint32_t size = 1;
+        for (uint32_t a = runFirst[r]; a <= runLast[r]; ++a)
+            size *= inDims_[a];
+        runIndex[r] = (uint32_t)mergedDims.size();
+        mergedDims.push_back(size);
+    }
+    inDims_ = std::move(mergedDims);
+    axes_ = std::move(runIndex);
+
     const uint32_t rank = (uint32_t)axes_.size();
     VAI_ASSERT(rank <= PERMUTE_MAX_RANK);
 
@@ -109,23 +159,12 @@ inline void Permute::prepare()
             descSet = gVaiDestSetPool(pipe.descSetLayout(0));
     }
 
-    const auto& D = inDims_;
-
-    // Size-1 axes carry no offset, so only the rest fix the layout: a reshape reproduces
-    // the permutation exactly when those axes keep their relative order.
+    // With the size-1 axes gone and the runs merged, a reshape reproduces the
+    // permutation exactly when the rest keep their relative order.
     bool canSkip = true;
-    bool seen = false;
-    uint32_t prevAxis = 0;
-    for (uint32_t i = 0; i < rank && canSkip; ++i)
-    {
-        uint32_t axis = axes_[i];
-        if (D[axis] == 1)
-            continue;
-        if (seen && axis < prevAxis)
+    for (uint32_t i = 1; i < rank && canSkip; ++i)
+        if (axes_[i] < axes_[i - 1])
             canSkip = false;
-        prevAxis = axis;
-        seen = true;
-    }
 
     std::vector<uint32_t> outShape(shape.begin(), shape.begin() + lead);
     for (size_t i = 0; i < k; ++i)

@@ -75,7 +75,6 @@ struct Net : public vai::NeuralNet
     , maxRuntimeContext(std::min(runtimeCfg.maxRuntimeContext, modelCfg.maxTrainedContext))
     , patchEmbed({
           .imageChannels = modelCfg.visionTrf.imageChannels,
-          .imageSize = modelCfg.visionTrf.imageSize,
           .patchSize = modelCfg.visionTrf.patchSize,
           .embedDim = modelCfg.visionTrf.embedDim,
       })

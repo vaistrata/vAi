@@ -162,15 +162,17 @@ struct Net : public vai::NeuralNet
         sync();   // The GPU may still be reading the positions and imageIndex.
 
         // A text token takes the next position on all three axes. An image's tokens
-        // share t, spread over h and w by their row and column, and move the text
-        // after them on by the grid's side.
+        // share t, spread over h and w by their row and column of its th x tw token
+        // grid, and move the text after them on by the longer side.
         const uint32_t* ids = static_cast<const uint32_t*>(promptTokenIds.hostData());
         uint32_t* pos = (uint32_t*)tokenPositions.map();
         uint32_t* rows = (uint32_t*)imageIndex.map();
         uint32_t p = nextPosition_;
         uint32_t image = 0;
-        const uint32_t tokensPerSide = visionEncoder.tokensPerSide;
-        const uint32_t tokensPerImage = visionEncoder.tokensPerImage;
+        const uint32_t pixelsPerToken = modelCfg.vision.trf.patchSize * VisionConfig::mergeSize;
+        const uint32_t th = imageCount > 0 ? shape[2] / pixelsPerToken : 0;
+        const uint32_t tw = imageCount > 0 ? shape[3] / pixelsPerToken : 0;
+        const uint32_t tokensPerImage = th * tw;
 
         for (uint32_t n = 0; n < total;)
         {
@@ -186,17 +188,17 @@ struct Net : public vai::NeuralNet
                     ids + n, ids + n + tokensPerImage, [](uint32_t id) { return id == ModelConfig::imageTokenId; }))
                 throw std::runtime_error("Qwen3-VL image placeholders do not match the image batch");
 
-            for (uint32_t r = 0; r < tokensPerSide; ++r)
-                for (uint32_t c = 0; c < tokensPerSide; ++c)
+            for (uint32_t r = 0; r < th; ++r)
+                for (uint32_t c = 0; c < tw; ++c)
                 {
-                    const uint32_t k = n + r * tokensPerSide + c;
+                    const uint32_t k = n + r * tw + c;
                     pos[3 * k] = p;
                     pos[3 * k + 1] = p + r;
                     pos[3 * k + 2] = p + c;
                     *rows++ = k;
                 }
 
-            p += tokensPerSide;
+            p += std::max(th, tw);
             n += tokensPerImage;
             ++image;
         }

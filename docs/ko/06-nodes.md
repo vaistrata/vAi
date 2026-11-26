@@ -1,6 +1,6 @@
 # 제공 노드들
 
-빌트인 노드 28종. 개념은 [노드(Node)](03-usage/node.md)를, 새 노드를 만드는 법은 [커스텀 노드와 커널](contributing/nodes.md)을 참조하세요.
+빌트인 노드 29종. 개념은 [노드(Node)](03-usage/node.md)를, 새 노드를 만드는 법은 [커스텀 노드와 커널](contributing/nodes.md)을 참조하세요.
 
 ## 목록
 
@@ -34,6 +34,7 @@
 | [TokenEmbedding](#tokenembedding) | token embedding, optionally fused with positional embedding | `token-embedding.comp` |
 | [TopKSampling](#topksampling) | row-wise top-k sampling, one kernel run as two passes | `topk-sampling.comp` |
 | [TypeCast](#typecast) | Casts each tensor element to another dtype. | `cast.comp` |
+| [Unflatten](#unflatten) | Split one axis into several, as torch.unflatten | — |
 
 ---
 
@@ -1311,5 +1312,37 @@ dispatch.
 **커널**
 
 - `vai/shaders/cast.comp`
+
+---
+
+## Unflatten
+
+Split one axis into several, as torch.unflatten
+
+소스: [`vai/nodes/unflatten.h`](../../vai/nodes/unflatten.h)
+
+**시그니처**
+
+- 입력: in0 [d0, .., d(r-1)]
+- 출력: out0 in0's shape with d(axis) replaced by sizes (shares buffer with input)
+
+**슬롯**
+
+| 슬롯 | 종류 | 비고 |
+|---|---|---|
+| `in0` | input |  |
+| `out0` | output |  |
+
+**Config**
+
+| 필드 | 타입 | 기본값 | 설명 |
+|---|---|---|---|
+| `axis` | `int` | — | the axis to split; negative counts from the end |
+| `sizes` | `std::vector<int64_t>` | — | what it splits into; one may be -1 |
+
+**동작 및 제약**
+
+A negative axis counts from the end. Each size is positive, or -1 for whatever
+d(axis) leaves over, at most once. The sizes must multiply to d(axis).
 
 ---

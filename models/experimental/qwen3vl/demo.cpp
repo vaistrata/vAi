@@ -54,14 +54,13 @@ void setProfileTags(qwen3vl::Net& net)
     vision.patchEmbed.perPatches.setProfileTag("Vision.Permute");
     vision.patchEmbed.project.setProfileTag(
         lin("Vision", vitCfg.imageChannels * vitCfg.patchSize * vitCfg.patchSize, Dv));
+    vision.posEmbed.setProfileTag("Vision.PosEmbed");
 
     vision.encoder.finalNorm.setProfileTag("Vision.LayerNorm");
-    vision.connector.perBlocks.setProfileTag("Vision.Permute");
     vision.connector.projector.fc1.setProfileTag(lin("Vision", 4 * Dv, 4 * Dv));
     vision.connector.projector.fc2.setProfileTag(lin("Vision", 4 * Dv, D));
     for (auto& c : vision.deepConnectors)
     {
-        c.perBlocks.setProfileTag("Vision.Permute");
         c.tokenNorm->setProfileTag("Vision.LayerNorm");
         c.projector.fc1.setProfileTag(lin("Vision", 4 * Dv, 4 * Dv));
         c.projector.fc2.setProfileTag(lin("Vision", 4 * Dv, D));

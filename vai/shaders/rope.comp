@@ -14,9 +14,10 @@
  - posType picks how pair d of token tq gets its position. posParam is one
    uint the host writes, read at dispatch time; what it means depends on posType:
      POS_SEQUENTIAL: posParam + tq, posParam the first input token's position
-     POS_GRID2D:     tokens are a raster grid posParam wide; the first half of
-                     the pairs turns by the row tq / posParam, the second by the
-                     column tq % posParam
+     POS_GRID2D:     tokens are a grid posParam wide, in tileSize x tileSize
+                     tiles (raster within a tile and across tiles; 1 = plain
+                     raster); the first half of the pairs turns by the token's
+                     row, the second by its column
      POS_MROPE:      positions[tq * 3 + axisOf(d)], (t, h, w) rows the model
                      writes
    Only POS_MROPE reads positions, and it alone leaves posParam unread; the
@@ -39,6 +40,7 @@ layout(constant_id = SPEC_ID_TYPE_I) const uint typeI = 0;  // I (input) dtype
 layout(constant_id = 0) const uint posType = 0u;           // POS_* below
 layout(constant_id = 1) const uint sectionH = 0u;          // MRoPE pairs on h (POS_MROPE only)
 layout(constant_id = 2) const uint sectionW = 0u;          // ... on w
+layout(constant_id = 3) const uint tileSize = 1u;          // POS_GRID2D token order; 1 = raster
 
 const uint POS_SEQUENTIAL = 0u;
 const uint POS_GRID2D = 1u;
@@ -63,6 +65,15 @@ layout(push_constant) uniform PushConstants {
 float readI(uint i)          { return (typeI == DTYPE_F32) ? bI_f32[i] : float(bI_f16[i]); }
 void writeO(uint i, float v) { if (typeO == DTYPE_F32) bO_f32[i] = v; else bO_f16[i] = float16_t(v); }
 
+// The grid row (axis 0) or column (axis 1) of token tq, posParam wide, in tiles.
+uint gridOf(uint tq, uint axis)
+{
+    uint tile = tq / (tileSize * tileSize), inTile = tq % (tileSize * tileSize);
+    uint tilesW = posParam / tileSize;
+    return (axis == 0u) ? (tile / tilesW) * tileSize + inTile / tileSize
+                        : (tile % tilesW) * tileSize + inTile % tileSize;
+}
+
 // The MRoPE axis pair d turns by: 0 t, 1 h, 2 w.
 uint axisOf(uint d)
 {
@@ -80,7 +91,7 @@ void main()
 
     uint pos = 
         (posType == POS_SEQUENTIAL) ? posParam + tq : 
-        (posType == POS_GRID2D) ? (d < halfDh / 2) ? tq / posParam : tq % posParam : 
+        (posType == POS_GRID2D) ? gridOf(tq, (d < halfDh / 2) ? 0u : 1u) :
           bPositions[tq * 3u + axisOf(d)];
 
     float angle = float(pos) * bFreqs[d];

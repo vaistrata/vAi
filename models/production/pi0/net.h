@@ -100,7 +100,6 @@ struct Net : public vai::NeuralNet
     , runtimeCfg(runtimeCfg)
     , patchEmbed({
           .imageChannels = modelCfg.visionTrf.imageChannels,
-          .imageSize = modelCfg.visionTrf.imageSize,
           .patchSize = modelCfg.visionTrf.patchSize,
           .embedDim = modelCfg.visionTrf.embedDim,
       })

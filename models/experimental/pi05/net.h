@@ -42,7 +42,6 @@ struct PrefillNet : public vai::NeuralNet
     : NeuralNet(netCfg)
     , patchEmbed({
           .imageChannels = modelCfg.visionTrf.imageChannels,
-          .imageSize = modelCfg.visionTrf.imageSize,
           .patchSize = modelCfg.visionTrf.patchSize,
           .embedDim = modelCfg.visionTrf.embedDim,
       })

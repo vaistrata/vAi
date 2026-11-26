@@ -12,8 +12,6 @@
 
 #include "net.h"
 #include "vai/engine/weights.h"
-#include <algorithm>
-#include <cmath>
 #include <string>
 #include <vector>
 
@@ -53,7 +51,6 @@ inline void loadWeights(Net& net, const vai::Checkpoint& ckpt)
         const uint32_t D = cfg.trf.embedDim;
         const uint32_t C = cfg.trf.imageChannels;
         const uint32_t PP = cfg.trf.patchSize * cfg.trf.patchSize;
-        const uint32_t G = vision.patchesPerSide;
 
         // The patch projection is a Conv3d over two frames, [D, C, 2, P, P]. An image
         // is its own frame twice, so the two temporal taps sum to one [D, C * P * P]
@@ -73,45 +70,10 @@ inline void loadWeights(Net& net, const vai::Checkpoint& ckpt)
             vision.patchEmbed.project["weight"] = vai::Tensor({ D, C * PP }, wDt).setFloats(std::move(kernel));
         }
 
-        // The learned position table is a side x side grid, resampled bilinearly
-        // (corners aligned) to G x G and added to the projection's bias, so each
-        // raster patch carries its own [D] bias.
-        {
-            const vai::Tensor table(ckpt[root + "pos_embed.weight"], vai::Dtype::Fp32);
-            const vai::Tensor bias(ckpt[root + "patch_embed.proj.bias"], vai::Dtype::Fp32);
-            const float* t = static_cast<const float*>(table.hostData());
-            const float* b = static_cast<const float*>(bias.hostData());
-            const uint32_t side = uint32_t(std::lround(std::sqrt(double(table.shape()[0]))));
-
-            struct Taps
-            {
-                uint32_t lo, hi;
-                float frac;
-            };
-            auto taps = [&](uint32_t i) {
-                const float src = G > 1 ? float(i) * float(side - 1) / float(G - 1) : 0.0f;
-                const uint32_t lo = uint32_t(src);
-                return Taps{ lo, std::min(lo + 1, side - 1), src - float(lo) };
-            };
-
-            std::vector<float> patchBias(size_t(G) * G * D);
-            for (uint32_t r = 0; r < G; ++r)
-                for (uint32_t c = 0; c < G; ++c)
-                {
-                    const Taps tr = taps(r), tc = taps(c);
-                    const float w00 = (1 - tr.frac) * (1 - tc.frac), w01 = (1 - tr.frac) * tc.frac;
-                    const float w10 = tr.frac * (1 - tc.frac), w11 = tr.frac * tc.frac;
-                    const float* t00 = t + (size_t(tr.lo) * side + tc.lo) * D;
-                    const float* t01 = t + (size_t(tr.lo) * side + tc.hi) * D;
-                    const float* t10 = t + (size_t(tr.hi) * side + tc.lo) * D;
-                    const float* t11 = t + (size_t(tr.hi) * side + tc.hi) * D;
-
-                    float* out = patchBias.data() + (size_t(r) * G + c) * D;
-                    for (uint32_t d = 0; d < D; ++d)
-                        out[d] = b[d] + w00 * t00[d] + w01 * t01[d] + w10 * t10[d] + w11 * t11[d];
-                }
-            vision.patchEmbed.project["bias"] = vai::Tensor({ G * G, D }, wDt).setFloats(std::move(patchBias));
-        }
+        // The learned position table stays a side x side grid; posEmbed resamples it
+        // to each image's patch grid.
+        vision.patchEmbed.project["bias"] = vai::Tensor(ckpt[root + "patch_embed.proj.bias"], wDt);
+        vision.posEmbed["table"] = vai::Tensor(ckpt[root + "pos_embed.weight"], wDt);
 
         for (uint32_t i = 0; i < cfg.trf.nBlocks; ++i)
         {

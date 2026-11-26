@@ -128,7 +128,8 @@ inline void Rope::prepare()
             eva::constant_id<SPEC_ID_TYPE_I>(iDtype),           // typeI
             eva::constant_id<0>((uint32_t) config_.cfg.posType),   // posType
             eva::constant_id<1>(section[1]),                    // sectionH
-            eva::constant_id<2>(section[2])                     // sectionW
+            eva::constant_id<2>(section[2]),                    // sectionW
+            eva::constant_id<3>(config_.cfg.tileSize)           // tileSize
         });
         // clang-format on
         if (!descSet)
@@ -145,7 +146,8 @@ inline void Rope::prepare()
     {
         VAI_ASSERT(posParam && "Rope: setPosParam() was never called");
         const uint32_t gridW = *(uint32_t*)posParam.map();
-        VAI_ASSERT(gridW > 0 && Tq % gridW == 0);
+        const uint32_t T = config_.cfg.tileSize;
+        VAI_ASSERT(gridW > 0 && Tq % gridW == 0 && gridW % T == 0 && (Tq / gridW) % T == 0);
     }
 
     (*this)["out0"] = Tensor(inTen.shape(), oDtype);

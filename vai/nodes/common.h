@@ -62,6 +62,7 @@ struct RopeConfig
     float lowFreqFactor = 1.0f;    // Llama3
     float highFreqFactor = 4.0f;   // Llama3
     std::array<uint32_t, 3> mropeSection = {};   // MRoPE: pairs on (t, h, w), interleaved
+    uint32_t tileSize = 1;                       // Grid2D: tokens come in tileSize x tileSize tiles; 1 = raster
 };
 
 
