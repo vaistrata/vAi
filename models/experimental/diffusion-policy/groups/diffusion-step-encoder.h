@@ -12,7 +12,7 @@ namespace model::experimental::diffusion_policy::group {
 
 /////////////////////////////////////////////////////////////////////////////////////////
 // DiffusionStepEncoder - lerobot's diffusion_step_encoder
-// Input : in0  [1] the denoising timestep
+// Input:  in0  [1] the denoising timestep
 // Output: out0 [1, D], D = embedDim
 //
 // out0 = fc2(mish(fc1(posEmb(in0))))

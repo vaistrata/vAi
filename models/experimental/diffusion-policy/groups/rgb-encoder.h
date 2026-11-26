@@ -18,7 +18,7 @@ namespace model::experimental::diffusion_policy::group {
 
 /////////////////////////////////////////////////////////////////////////////////////////
 // RgbEncoder - lerobot's DiffusionRgbEncoder: one image to one feature vector
-// Input : in0  [3, S, S],  or [B, 3, S, S] with allowBatch
+// Input:  in0  [3, S, S],  or [B, 3, S, S] with allowBatch
 // Output: out0 [2 * K],    or [B, 2 * K]    with allowBatch; K = numKeypoints
 //
 // out0 = relu(out(flatten(spatialSoftmax(keypointProj(backbone(crop(in0)))))))
@@ -83,7 +83,7 @@ struct RgbEncoder : public vai::NodeGroup
           .allowBatch = config.allowBatch,
       })
     , flatten(config.allowBatch ? std::vector<int64_t>{ 0, featureDim } : std::vector<int64_t>{ featureDim })
-    , out({ .inDim = featureDim, .outDim = featureDim, .epilogue = vai::Epilogue::Relu })
+    , out({ .inDim = featureDim, .outDim = featureDim, .actType = vai::ActType::Relu })
     {
         VAI_ASSERT(encodedSize >= 32u && config.numKeypoints >= 1u);
 

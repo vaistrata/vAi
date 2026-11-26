@@ -1,9 +1,11 @@
 #ifndef EXPERIMENTAL_DIFFUSION_POLICY_GROUPS_CONDITIONAL_RESIDUAL_BLOCK_1D_H
 #define EXPERIMENTAL_DIFFUSION_POLICY_GROUPS_CONDITIONAL_RESIDUAL_BLOCK_1D_H
 
+#include "vai/nodes/add.h"
 #include "vai/nodes/identity.h"
 #include "vai/nodes/linear.h"
 #include "conv1d-block.h"
+#include "film.h"
 #include <cstdint>
 #include <optional>
 
@@ -13,14 +15,14 @@ namespace model::experimental::diffusion_policy::group {
 
 /////////////////////////////////////////////////////////////////////////////////////////
 // ConditionalResidualBlock1d - lerobot's DiffusionConditionalResidualBlock1d
-// Input : in0  [Ci, T]
+// Input:  in0  [Ci, T]
 //         cond [1, condDim], mish(global_feature): the Mish of cond_encoder, shared by
 //              every block, so the UNet runs it once
 // Output: out0 [Co, T]
 //
 // out  = conv1(in0)                                   Conv1dBlock(Ci, Co)
-// out  = scale · out + bias, (scale | bias) = condEncoder(cond)   (FiLM, fused in conv1)
-// out0 = conv2(out) + residualConv(in0)               Conv1dBlock(Co, Co), residual fused
+// out  = scale · out + bias, (scale | bias) = condEncoder(cond)   Film
+// out0 = conv2(out) + residualConv(in0)               Conv1dBlock(Co, Co), Add
 //
 // condEncoder is cond_encoder.1, Linear(condDim -> 2·Co), or -> Co without filmScale
 // (lerobot's use_film_scale_modulation: the bias alone). residualConv is the 1x1
@@ -29,10 +31,12 @@ namespace model::experimental::diffusion_policy::group {
 struct ConditionalResidualBlock1d : public vai::NodeGroup
 {
     vai::node::Identity input;
-    Conv1dBlock conv1;                                  // [Ci, T] -> [Co, T], + FiLM
+    Conv1dBlock conv1;                                  // [Ci, T] -> [Co, T]
     vai::node::Linear condEncoder;                      // [1, condDim] -> [1, 2·Co] / [1, Co]
-    Conv1dBlock conv2;                                  // [Co, T] -> [Co, T], + residual
+    Film film;                                          // [Co, T] -> [Co, T]
+    Conv1dBlock conv2;                                  // [Co, T] -> [Co, T]
     std::optional<node::Convolution1d> residualConv;    // [Ci, T] -> [Co, T]; empty: in0
+    vai::node::Add residual;                            // conv2 + residualConv / in0
 
     struct Config {
         uint32_t inChannels;
@@ -49,15 +53,17 @@ struct ConditionalResidualBlock1d : public vai::NodeGroup
           .outChannels = config.outChannels,
           .kernelSize = config.kernelSize,
           .groups = config.groups,
-          .film = config.filmScale ? node::Film::ScaleShift : node::Film::Shift,
       })
     , condEncoder({ .inDim = config.condDim, .outDim = config.filmScale ? 2 * config.outChannels : config.outChannels })
+    , film({
+          .channels = config.outChannels,
+          .mode = config.filmScale ? node::Film::ScaleShift : node::Film::Shift,
+      })
     , conv2({
           .inChannels = config.outChannels,
           .outChannels = config.outChannels,
           .kernelSize = config.kernelSize,
           .groups = config.groups,
-          .acceptResidual = true,
       })
     {
         if (config.inChannels != config.outChannels)
@@ -68,14 +74,14 @@ struct ConditionalResidualBlock1d : public vai::NodeGroup
             });
 
         // clang-format off
-        input - conv1 -                    conv2;
-        condEncoder -              "film"/conv1;
-        input - residualConv - "residual"/conv2;
+        input - conv1 - film - conv2 - "in0"/residual;
+        condEncoder -  "film"/film;
+        input - residualConv - "in1"/residual;
         // clang-format on
 
         defineSlot("in0", input.slot("in0"));
         defineSlot("cond", condEncoder.slot("in0"));
-        defineSlot("out0", conv2.slot("out0"));
+        defineSlot("out0", residual.slot("out0"));
     }
 };
 

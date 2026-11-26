@@ -1,12 +1,12 @@
 /*=============================================================================
   Written by   qkrtmddn0507@vaistrata.com
-  Model        diffusion policy (pushT)
+  Model        Diffusion Policy (0.3B — a ResNet18 keypoint encoder and a 1-D conditional
+               UNet on DDPM)
 =============================================================================*/
 
 #ifndef EXPERIMENTAL_DIFFUSION_POLICY_NET_H
 #define EXPERIMENTAL_DIFFUSION_POLICY_NET_H
 
-#include "ddpm-scheduler.h"
 #include "processing.h"
 #include "groups/conditional-unet-1d.h"
 #include "groups/rgb-encoder.h"
@@ -20,6 +20,26 @@
 
 namespace model::experimental::diffusion_policy {
 
+
+enum class BetaSchedule { Linear, SquaredCosCapV2 };
+
+// diffusers' DDPMScheduler as lerobot configures it (variance_type "fixed_small",
+// timestep_spacing "leading").
+struct DdpmConfig
+{
+    uint32_t numTrainTimesteps = 100;
+    BetaSchedule betaSchedule = BetaSchedule::SquaredCosCapV2;
+    float betaStart = 0.0001f;   // Linear only
+    float betaEnd = 0.02f;
+    bool clipSample = true;
+    float clipSampleRange = 1.0f;
+    node::PredictionType predictionType = node::PredictionType::Epsilon;
+};
+
+
+/////////////////////////////////////////////////////////////////////////////////////////
+// ModelConfig - Diffusion Policy (0.3B) - a ResNet18 keypoint encoder and a 1-D UNet
+/////////////////////////////////////////////////////////////////////////////////////////
 struct ModelConfig
 {
     const char* variant;   // checkpoint folder under data/ckpts/diffusion-policy/lerobot/
@@ -55,62 +75,42 @@ struct ModelConfig
 
     // The executed actions start at the current observation's step in the sample.
     uint32_t actionStart() const { return numObsSteps - 1; }
+
+    // lerobot/diffusion_pusht: GroupNorm ResNet18 on 84x84 crops of 96x96 images, 32
+    // keypoints, one camera, a 2-D agent position, two observation steps; a 3-level UNet
+    // denoising a 16-step 2-D action sample with 100-step squaredcos DDPM, 8 actions
+    // executed.
+    static ModelConfig _0_3B()
+    {
+        return {
+            .variant = "0.3B",
+            .backbone = { .norm = vai::ResNetNorm::GroupNorm, .groupNormWidth = 16 },
+            .imageSize = 96u,
+            .cropSize = 84u,
+            .numKeypoints = 32u,
+            .numCameras = 1u,
+            .stateDim = 2u,
+            .numObsSteps = 2u,
+            .actionDim = 2u,
+            .horizon = 16u,
+            .numActionSteps = 8u,
+            .downDims = { 512u, 1024u, 2048u },
+            .kernelSize = 5u,
+            .numGroups = 8u,
+            .stepEmbedDim = 128u,
+            .filmScale = true,
+            .scheduler = {},
+        };
+    }
 };
+
 
 struct RuntimeConfig
 {
     uint32_t denoiseSteps = 100;   // num_inference_steps; lerobot's None is the training count
 };
 
-// lerobot/diffusion_pusht: GroupNorm ResNet18 on 84x84 crops of 96x96 images, 32 keypoints,
-// one camera, a 2-D agent position, two observation steps; a 3-level UNet denoising a
-// 16-step 2-D action sample with 100-step squaredcos DDPM, 8 actions executed.
-inline ModelConfig getConfigPushT()
-{
-    return {
-        .variant = "pusht",
-        .backbone = { .norm = vai::ResNetNorm::GroupNorm, .groupNormWidth = 16 },
-        .imageSize = 96u,
-        .cropSize = 84u,
-        .numKeypoints = 32u,
-        .numCameras = 1u,
-        .stateDim = 2u,
-        .numObsSteps = 2u,
-        .actionDim = 2u,
-        .horizon = 16u,
-        .numActionSteps = 8u,
-        .downDims = { 512u, 1024u, 2048u },
-        .kernelSize = 5u,
-        .numGroups = 8u,
-        .stepEmbedDim = 128u,
-        .filmScale = true,
-        .scheduler = {},
-    };
-}
 
-
-/////////////////////////////////////////////////////////////////////////////////////////
-// Net - Diffusion Policy: observation encoder, then a DDPM loop over a conditional UNet
-//
-// encode() - lerobot's _prepare_global_conditioning
-//   Input : inImages [numObsSteps * numCameras, 3, imageSize, imageSize], step-major,
-//                    normalized; the encoder center-crops them to cropSize
-//           inState  [numObsSteps, stateDim] Fp32, normalized
-//   Output: outGlobalCond [1, globalCondDim], e.g. [1, 132] for pushT = 2 * (2 + 64)
-//
-// decode() - lerobot's conditional_sample, one forward per denoising step
-//   Input : inActions    [horizon, actionDim] Fp32, x_t (noise before the first step)
-//           inGlobalCond [1, globalCondDim], encode()'s output, kept on the GPU
-//           inStepNoise  [denoiseSteps, horizon, actionDim] Fp32, each step's z
-//   Output: outActions   [horizon, actionDim] Fp32, x_{t-1}, into the same tensor
-//
-// As pi0.5 runs its flow, the loop re-runs one recording: the timestep and the DDPM
-// coefficients a step needs come from two CyclicTableReaders, one row per forward,
-// rewound by decode(); the sample goes back in as the next step's input. DDPM's
-// update is not a residual Linear (x0 is clipped, noise is added), so DdpmStep
-// applies it after the UNet. Its noise is drawn on the host per inference
-// (drawNoise(seed)), so a run is reproducible from a seed, though not torch's stream.
-/////////////////////////////////////////////////////////////////////////////////////////
 struct Net : public vai::NeuralNet
 {
     ModelConfig cfg;
@@ -129,7 +129,6 @@ struct Net : public vai::NeuralNet
     node::DdpmStep ddpmStep;                      // x_t, ε -> x_{t-1}
 
     vai::Tensor globalCond;   // encode()'s output, decode()'s condition
-    vai::Tensor stepNoise;    // [steps, horizon, A], drawNoise() refills it
 
     // Filled by the loader: the statistics the caller normalizes with. pushT maps the
     // images MEAN_STD, the state and the action MIN_MAX (to [-1, 1]).
@@ -170,7 +169,6 @@ struct Net : public vai::NeuralNet
           .clipSample = cfg.scheduler.clipSample,
           .clipSampleRange = cfg.scheduler.clipSampleRange,
       })
-    , stepNoise({ runtimeCfg.denoiseSteps, cfg.horizon, cfg.actionDim }, vai::Dtype::Fp32)
     {
         VAI_ASSERT(cfg.numCameras >= 1u && cfg.stateDim >= 1u && cfg.numObsSteps >= 1u);
         VAI_ASSERT(cfg.actionStart() + cfg.numActionSteps <= cfg.horizon);
@@ -192,15 +190,11 @@ struct Net : public vai::NeuralNet
         ddpmStep - output("outActions");
         // clang-format on
 
-        const DdpmSchedule schedule = DdpmSchedule::make(cfg.scheduler, runtimeCfg.denoiseSteps);
-        timestepTable["table"] = vai::Tensor({ runtimeCfg.denoiseSteps, 1u }, vai::Dtype::Fp32)
-                                     .setFloats(schedule.timesteps);
-        scheduleTable["table"] = vai::Tensor({ runtimeCfg.denoiseSteps, DdpmSchedule::rowWidth }, vai::Dtype::Fp32)
-                                     .setFloats(schedule.rows);
-
         // Concat joins one dtype: the image features come out in the state's Fp32,
-        // the step embedding in the global condition's.
+        // the global condition stays Fp32 whatever the activations are, and the step
+        // embedding comes out in its dtype.
         rgbEncoder.out.setODtype(vai::Dtype::Fp32, dtypeKey());
+        catFeatures.setODtype(vai::Dtype::Fp32, dtypeKey());
         unet.stepEncoder.fc2.setODtype(vai::Dtype::Fp32, dtypeKey());
         // The schedule and the sample stay Fp32 whatever the activations are.
         timestepTable.setODtype(vai::Dtype::Fp32, dtypeKey());
@@ -208,30 +202,36 @@ struct Net : public vai::NeuralNet
         ddpmStep.setODtype(vai::Dtype::Fp32, dtypeKey());
     }
 
-    // Input: images [numObsSteps * numCameras, 3, S, S], state [numObsSteps, stateDim].
+    // lerobot's _prepare_global_conditioning.
+    // Input: images [numObsSteps * numCameras, 3, S, S], step-major, normalized; the
+    //        encoder center-crops them to cropSize
+    //        state  [numObsSteps, stateDim] Fp32, normalized
+    // Output: globalCond [1, globalCondDim], e.g. [1, 132] for pushT = 2 * (2 + 64),
+    //         kept on the GPU for decode().
     void encode(const vai::Tensor& images, const vai::Tensor& state)
     {
         (*this)({ { "inImages", images }, { "inState", state } }, { { "outGlobalCond", &globalCond } }, false);
     }
 
-    // Draws the loop's noise from seed: the starting sample x_T into action
-    // [horizon, actionDim], and every step's z into stepNoise. Call it ahead of decode().
-    void drawNoise(uint64_t seed, vai::Tensor* action)
+    // lerobot's conditional_sample, one forward per denoising step. As pi0.5 runs its
+    // flow, the loop re-runs one recording: the timestep and the DDPM coefficients a
+    // step needs come from two CyclicTableReaders, one row per forward, rewound here;
+    // the sample goes back in as the next step's input. DDPM's update is not a
+    // residual Linear (x0 is clipped, noise is added), so DdpmStep applies it after
+    // the UNet. The noise is the caller's, so a run is as reproducible as the noise
+    // handed in (sampleNoise draws it from a seed, though not torch's stream).
+    // Input: action    [horizon, actionDim] Fp32, x_T, the starting noise
+    //        stepNoise [denoiseSteps, horizon, actionDim] Fp32, every step's z
+    //        encode() ran first.
+    // Output: the denoised sample x_0 in action's GPU tensor. The executed actions are
+    //         its rows actionStart() .. actionStart() + numActionSteps, still normalized.
+    // The GPU reads stepNoise until the next sync(): refill it only after one.
+    void decode(const vai::Tensor& stepNoise, vai::Tensor* action)
     {
         VAI_ASSERT(action);
-        const size_t sampleSize = size_t(cfg.horizon) * cfg.actionDim;
-
-        sync();   // The GPU may still be reading stepNoise.
-        *action = vai::Tensor({ cfg.horizon, cfg.actionDim }, vai::Dtype::Fp32).setFloats(sampleNoise(sampleSize, seed));
-        stepNoise.setFloats(sampleNoise(stepNoise.numElements(), seed + 1));
-    }
-
-    // Input: action [horizon, actionDim], x_T (drawNoise()'s); encode() ran first.
-    // Output: the denoised sample x_0 in the same GPU tensor. The executed actions are
-    // its rows actionStart() .. actionStart() + numActionSteps, still normalized.
-    void decode(vai::Tensor* action)
-    {
-        VAI_ASSERT(action);
+        VAI_ASSERT(action->isShapeOf(cfg.horizon, cfg.actionDim) && action->dtype() == vai::Dtype::Fp32);
+        VAI_ASSERT(stepNoise.isShapeOf(runtimeCfg.denoiseSteps, cfg.horizon, cfg.actionDim) &&
+                   stepNoise.dtype() == vai::Dtype::Fp32);
 
         sync();   // The GPU may still be reading the readers' counters.
         timestepTable.rewind();
@@ -244,6 +244,7 @@ struct Net : public vai::NeuralNet
     }
 };
 
+
 }   // namespace model::experimental::diffusion_policy
 
-#endif //EXPERIMENTAL_DIFFUSION_POLICY_NET_H
+#endif   // EXPERIMENTAL_DIFFUSION_POLICY_NET_H

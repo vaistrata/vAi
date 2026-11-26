@@ -17,7 +17,7 @@ namespace model::experimental::diffusion_policy::group {
 
 /////////////////////////////////////////////////////////////////////////////////////////
 // ConditionalUnet1d - lerobot's DiffusionConditionalUnet1d: one denoising step
-// Input : in0        [T, A]   the noisy action sequence, T = horizon, A = action dim
+// Input:  in0        [T, A]   the noisy action sequence, T = horizon, A = action dim
 //         timestep   [1]      the denoising timestep
 //         globalCond [1, G]   the observation encoder's global_cond
 // Output: out0       [T, A]   the model's prediction (noise, or the sample, per prediction_type)
@@ -163,21 +163,6 @@ struct ConditionalUnet1d : public vai::NodeGroup
         defineSlot("out0", toTime.slot("out0"));
     }
 };
-
-
-// lerobot/diffusion_pusht's UNet: 2-D actions, three levels, FiLM scale and shift.
-inline ConditionalUnet1d::Config unetConfigPushT(uint32_t globalCondDim)
-{
-    return {
-        .actionDim = 2u,
-        .globalCondDim = globalCondDim,
-        .downDims = { 512u, 1024u, 2048u },
-        .kernelSize = 5u,
-        .groups = 8u,
-        .stepEmbedDim = 128u,
-        .filmScale = true,
-    };
-}
 
 
 }   // namespace model::experimental::diffusion_policy::group

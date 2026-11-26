@@ -1,6 +1,6 @@
 /*=============================================================================
  conv1d-cm.comp: FP16 cooperative-matrix implicit-GEMM 1D convolution
-     O[co, t] = epilogue(Σ_{ci, j} W[co, ci, j] · I[ci, t·stride + j − K/2] + bias[co]) (+ R[co, t])
+     O[co, t] = act(Σ_{ci, j} W[co, ci, j] · I[ci, t·stride + j − K/2] + bias[co]) (+ R[co, t])
 
  A GEMM of M = Co, N = To over the reduction k = ci·K + j (Ci·K long). The
  input is gathered (implicit im2col) into shared memory one panel at a time,
@@ -38,7 +38,7 @@ layout(constant_id = 4) const uint K = 1u;                // kernel size, odd
 layout(constant_id = 5) const uint stride = 1u;
 layout(constant_id = 6) const uint accF32 = 1u;           // 1: fp32 accumulators, 0: fp16
 layout(constant_id = 7) const uint hasResidual = 0u;
-layout(constant_id = 8) const uint residualOrder = 0u;    // 0: after the epilogue, 1: before it
+layout(constant_id = 8) const uint residualOrder = 0u;    // 0: after the activation, 1: before it
 layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0u;
 layout(constant_id = SPEC_ID_TYPE_I) const uint typeI = 0u;
 layout(constant_id = SPEC_ID_TYPE_P) const uint typeP = 0u;
@@ -66,9 +66,11 @@ const uint subgroupSize = 32u;
 const uint subgroupCount = wgSize / subgroupSize;
 const uint tileElements = tile * tile;
 // An FP32 scratch tile ahead of the FP16 one keeps NVIDIA's FP16 coopMatStore
-// base aligned (the layout vai's CM kernels settled on).
+// base aligned (the layout vai's CM kernels settled on). Cs16 stays a multiple
+// of 16 bytes even when unused, so Bs behind it keeps the 16-byte alignment
+// coopMatLoad needs: at 2 bytes NVIDIA read every B panel one element early.
 shared float Cs32[accF32 == 1u ? subgroupCount * tileElements : tileElements];
-shared float16_t Cs16[accF32 == 1u ? 1u : subgroupCount * tileElements];
+shared float16_t Cs16[accF32 == 1u ? 8u : subgroupCount * tileElements];
 shared float16_t Bs[panelK * wgN];
 
 #define matA coopmat<float16_t, gl_ScopeSubgroup, tile, tile, gl_MatrixUseA>
@@ -98,7 +100,7 @@ float finishOutput(uint channel, uint index, float value)
 {
     value += readBias(channel);
     if (hasResidual == 1u && residualOrder == 1u) value += readResidual(index);
-    value = applyEpilogue(value);
+    value = applyActivation(value);
     if (hasResidual == 1u && residualOrder == 0u) value += readResidual(index);
     return value;
 }

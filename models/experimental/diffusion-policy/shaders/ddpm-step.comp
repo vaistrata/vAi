@@ -5,8 +5,8 @@
      O       = c_x0 · x0 + c_xt · X + σ_t · Z[k]
 
  S holds the step's row { k, sqrt(ᾱ_t), sqrt(1 − ᾱ_t), c_x0, c_xt, σ_t }
- (DdpmSchedule); Z is the loop's noise, [steps, N], row k this step's. Element-
- wise, so O may alias X. Math is fp32.
+ (the loader's ddpmTables); Z is the loop's noise, [steps, N], row k this
+ step's. Element-wise, so O may alias X. Math is fp32.
  - O (typeO), X (typeI), E (typeE) are fp32 or fp16; S and Z are fp32.
  Bindings: O=0, X=1, E=2, S=3, Z=4.
  Dispatch (host): dispatch2(N). Push constants: N, clipRange.

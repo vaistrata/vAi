@@ -13,7 +13,7 @@ namespace model::experimental::diffusion_policy::group {
 
 /////////////////////////////////////////////////////////////////////////////////////////
 // SpatialSoftmax - spatial soft-argmax (Finn et al., "Deep Spatial Autoencoders")
-// Input : in0  [K, H, W], or [B, K, H, W] with allowBatch
+// Input:  in0  [K, H, W], or [B, K, H, W] with allowBatch
 // Output: out0 [K, 2],    or [B, K, 2]    with allowBatch
 //
 // out0 = softmax(in0 as [K, H*W], dim=-1) @ pos_grid

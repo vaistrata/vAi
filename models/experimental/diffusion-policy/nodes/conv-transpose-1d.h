@@ -11,7 +11,7 @@ namespace model::experimental::diffusion_policy::node {
   Input : in0  [..., Ci, Ti]
   Output: out0 [..., Co, To], To = (Ti − 1) · stride − 2 · padding + K
 
-  O[co, t] = epilogue(bias[co] + Σ_ci Σ_j W[ci, co, j] · I[ci, s]),  t + padding − j = s · stride
+  O[co, t] = act(bias[co] + Σ_ci Σ_j W[ci, co, j] · I[ci, s]),  t + padding − j = s · stride
 
   The diffusion UNet's upsample, ConvTranspose1d(C, C, 4, 2, 1): T doubles.
   weight [Ci, Co, K] (torch's transposed layout) and bias [Co] are parameters,
@@ -44,7 +44,7 @@ public:
         uint32_t kernelSize;
         uint32_t stride = 1;
         uint32_t padding = 0;
-        vai::Epilogue epilogue = vai::Epilogue::None;
+        vai::ActType actType = vai::ActType::None;
     } config_;
 
     static constexpr uint32_t maxTaps = 8;   // the shader's MAX_TAPS: ceil(K / stride)
@@ -69,7 +69,7 @@ inline ConvTranspose1d::ConvTranspose1d(Config config)
     VAI_ASSERT(config_.kernelSize != 0u && config_.stride != 0u);
     VAI_ASSERT(CEIL_DIV(config_.kernelSize, config_.stride) <= maxTaps);
     VAI_ASSERT(2u * config_.padding < config_.kernelSize);   // To > 0 down to Ti = 1
-    VAI_ASSERT(config_.epilogue < vai::Epilogue::Max);
+    VAI_ASSERT(config_.actType < vai::ActType::Max);
     addSlot("out0", vai::NodeSlot::output);
     addSlot("in0", vai::NodeSlot::input);
     addSlot("weight", vai::NodeSlot::persistent);
@@ -112,7 +112,7 @@ inline void ConvTranspose1d::prepare()
             eva::constant_id<SPEC_ID_TYPE_I>(p.iDtype),                       // typeI
             eva::constant_id<SPEC_ID_TYPE_W>(p.wDtype),                       // typeW
             eva::constant_id<SPEC_ID_TYPE_P>(p.pDtype),                       // typeP (bias)
-            eva::constant_id<SPEC_ID_EPILOGUE>((uint32_t) config_.epilogue),  // epilogue
+            eva::constant_id<SPEC_ID_ACT_TYPE>((uint32_t) config_.actType),  // actType
             eva::constant_id<SPEC_ID_HAS_BIAS>(p.hasBias ? 1u : 0u)           // hasBias
         });
         // clang-format on

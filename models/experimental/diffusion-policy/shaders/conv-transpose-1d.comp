@@ -1,6 +1,6 @@
 /*=============================================================================
  conv-transpose-1d.comp: transposed 1D convolution (torch.nn.ConvTranspose1d)
-     O[co, t] = epilogue(bias[co] + Σ_ci Σ_j W[ci, co, j] · I[ci, s]),
+     O[co, t] = act(bias[co] + Σ_ci Σ_j W[ci, co, j] · I[ci, s]),
                 over the taps j with t + pad − j = s · stride, 0 <= s < Ti
 
  Each output gathers the inputs that scatter into it, so no two threads write
@@ -86,5 +86,5 @@ void main()
             acc += readW(wRow + tapJ[q]) * readI(iRow + tapS[q]);
     }
 
-    writeO(seq * Co * To + e, applyEpilogue(acc + readBias(co)));
+    writeO(seq * Co * To + e, applyActivation(acc + readBias(co)));
 }

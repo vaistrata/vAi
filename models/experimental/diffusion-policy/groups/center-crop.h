@@ -10,7 +10,7 @@ namespace model::experimental::diffusion_policy::group {
 
 /////////////////////////////////////////////////////////////////////////////////////////
 // CenterCrop - torchvision's CenterCrop: the middle cropSize x cropSize of an image
-// Input : in0  [C, S, S],                or [B, C, S, S] with allowBatch
+// Input:  in0  [C, S, S],                or [B, C, S, S] with allowBatch
 // Output: out0 [C, cropSize, cropSize],  or [B, C, cropSize, cropSize]
 //
 // The window starts at round((S - cropSize) / 2) on each axis, Python's round (half to

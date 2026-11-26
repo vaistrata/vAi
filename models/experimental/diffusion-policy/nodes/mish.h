@@ -11,7 +11,7 @@ namespace model::experimental::diffusion_policy::node {
   Input : in0  [any shape]
   Output: out0 [same shape] = in0 · tanh(softplus(in0)); optionally in-place
 
-  vai::Epilogue has no Mish, so the diffusion UNet's standalone ones (its step
+  vai::ActType has no Mish, so the diffusion UNet's standalone ones (its step
   encoder's, and the Mish its condition passes through) run here; the one after
   each GroupNorm is fused into GroupNormMish. Math is fp32; softplus switches to
   the identity past 20, as torch's does. The inPlace option aliases the output

@@ -2,16 +2,20 @@
 #define EXPERIMENTAL_DIFFUSION_POLICY_NODES_DDPM_STEP_H
 
 #include "vai/nodes/common.h"
-#include "../ddpm-scheduler.h"
 
 namespace model::experimental::diffusion_policy::node {
+
+
+// What the denoiser predicts: lerobot's prediction_type.
+enum class PredictionType : uint32_t { Epsilon, Sample };
 
 
 /*=============================================================================
   DdpmStep - one DDPM denoising step (diffusers' DDPMScheduler.step)
   Input : in0         [...] the sample x_t
           modelOutput [...] the UNet's prediction for it: ε, or x0 (PredictionType)
-          schedule    [6]   the step's DdpmSchedule row (a CyclicTableReader's)
+          schedule    [6]   the step's row { k, sqrt(ᾱ_t), sqrt(1 − ᾱ_t), c_x0, c_xt, σ_t }
+                            (a CyclicTableReader's; the loader computes the table)
           noise       [steps, ...] Fp32, the loop's noise; row k for step k
   Output: out0        [...] x_{t−1}
 
@@ -30,6 +34,8 @@ class DdpmStep : public vai::Node
     eva::DescriptorSet descSet;
 
 public:
+    static constexpr uint32_t scheduleWidth = 6;   // the schedule row
+
     struct PipeParams {
         vai::Dtype iDtype = vai::Dtype::None;
         vai::Dtype eDtype = vai::Dtype::None;
@@ -70,7 +76,7 @@ inline void DdpmStep::prepare()
     const vai::Tensor& sTen = (*this)["schedule"];
     const vai::Tensor& zTen = (*this)["noise"];
     VAI_ASSERT(xTen.validShape() && eTen.numElements() == xTen.numElements());
-    VAI_ASSERT(sTen.numElements() == DdpmSchedule::rowWidth && sTen.dtype() == vai::Dtype::Fp32);
+    VAI_ASSERT(sTen.numElements() == scheduleWidth && sTen.dtype() == vai::Dtype::Fp32);
     VAI_ASSERT(zTen.dtype() == vai::Dtype::Fp32 && zTen.numElements() % xTen.numElements() == 0u);
 
     const PipeParams p = { .iDtype = xTen.dtype(), .eDtype = eTen.dtype() };

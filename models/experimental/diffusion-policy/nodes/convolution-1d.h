@@ -11,14 +11,14 @@ namespace model::experimental::diffusion_policy::node {
   Input : in0  [..., Ci, Ti], optional residual [..., Co, To]
   Output: out0 [..., Co, To], To = (Ti - 1) / stride + 1
 
-  O[co, t] = epilogue(Σ_{ci, j} W[co, ci, j] · I[ci, t·stride + j − K/2] + bias[co]) + R[co, t]
+  O[co, t] = act(Σ_{ci, j} W[co, ci, j] · I[ci, t·stride + j − K/2] + bias[co]) + R[co, t]
 
   Same padding K/2 with an odd K: torch's Conv1d(k, stride, padding=k//2), which
   covers the diffusion UNet's k5 blocks, its k3 stride-2 downsample and its 1x1
   convs. Axes ahead of Ci are independent sequences, one dispatch z each.
   weight [Co, Ci, K] and bias [Co] are parameters; bias applies when the loader
   filled it. acceptResidual opens the "residual" input (in0's dtype), added
-  after the epilogue or, with ResidualOrder::BeforeEpilogue, before it.
+  after the activation or, with ResidualOrder::BeforeActivation, before it.
 
   Self-contained: it shares no code with vai::node::Convolution. One path so far,
   the cooperative-matrix one (conv1d-cm): fp16 weights on a device with a 16x16x16
@@ -61,8 +61,8 @@ public:
         uint32_t stride = 1;
 
         bool acceptResidual = false;   // input "residual"
-        vai::ResidualOrder residualOrder = vai::ResidualOrder::AfterEpilogue;
-        vai::Epilogue epilogue = vai::Epilogue::None;
+        vai::ResidualOrder residualOrder = vai::ResidualOrder::AfterActivation;
+        vai::ActType actType = vai::ActType::None;
     } config_;
 
     Convolution1d(Config config);
@@ -115,7 +115,7 @@ inline Convolution1d::Convolution1d(Config config)
     VAI_ASSERT(config_.inChannels != 0u && config_.outChannels != 0u);
     VAI_ASSERT(config_.kernelSize != 0u && config_.kernelSize % 2u != 0u);
     VAI_ASSERT(config_.stride != 0u);
-    VAI_ASSERT(config_.epilogue < vai::Epilogue::Max);
+    VAI_ASSERT(config_.actType < vai::ActType::Max);
     addSlot("out0", vai::NodeSlot::output);
     addSlot("in0", vai::NodeSlot::input);
     addSlot("weight", vai::NodeSlot::persistent);
@@ -178,7 +178,7 @@ inline void Convolution1d::prepare()
             eva::constant_id<SPEC_ID_TYPE_O>(oDtype),                        // typeO
             eva::constant_id<SPEC_ID_TYPE_I>(p.iDtype),                      // typeI
             eva::constant_id<SPEC_ID_TYPE_P>(p.pDtype),                      // typeP (bias)
-            eva::constant_id<SPEC_ID_EPILOGUE>((uint32_t) config_.epilogue), // epilogue
+            eva::constant_id<SPEC_ID_ACT_TYPE>((uint32_t) config_.actType), // actType
             eva::constant_id<SPEC_ID_HAS_BIAS>(p.hasBias ? 1u : 0u)          // hasBias
         }, { .requiredSubgroupSize = 32u });
         // clang-format on

@@ -3,8 +3,8 @@
   Task         Diffusion Policy (pushT) — turns two observation steps (camera image and
                agent position) into the next actions, profiles the encode and the
                denoise.
-  Assets       data/images/pusht.png, one 96x96 pushT frame
-                 from  huggingface.co/datasets/lerobot/pusht (observation.image)
+  Assets       data/images/cam_high.jpg, a stand-in for the pushT camera
+                 from  huggingface.co/datasets/suz22/RoboTwin_clean
 =============================================================================*/
 
 #include "net.h"
@@ -92,6 +92,15 @@ void setProfileTags(dp::Net& net)
             tagBlock(res.conv2, length);
             res.condEncoder.setProfileTag("UNet.CondEncoder.Linear.[" + std::to_string(condDim) + "x" +
                                           std::to_string(res.condEncoder.config_.outDim) + "]");
+            const std::string channels = "[" + std::to_string(res.conv2.conv.config_.outChannels) + "@" +
+                                         std::to_string(length) + "]";
+            res.film.affine.setProfileTag("UNet.Film." + channels);
+            if (res.film.scale)
+            {
+                res.film.scale->setProfileTag("UNet.Film.Slice");
+                res.film.shift->setProfileTag("UNet.Film.Slice");
+            }
+            res.residual.setProfileTag("UNet.Residual.Add." + channels);
             if (res.residualConv)
                 tagConv1d(*res.residualConv, length);
         };
@@ -138,7 +147,7 @@ void setProfileTags(dp::Net& net)
 int main()
 {
     // Construct model
-    const dp::ModelConfig modelCfg = dp::getConfigPushT();
+    const dp::ModelConfig modelCfg = dp::ModelConfig::_0_3B();
     printf("Loading diffusion-policy-%s model...\n", modelCfg.variant);
     // clang-format off
     dp::Net net({
@@ -158,7 +167,7 @@ int main()
 
     // One frame per observation step, oldest first. The demo has one frame, so both
     // steps see it; a robot loop passes its last numObsSteps frames.
-    const std::vector<std::string> imagePaths(modelCfg.numObsSteps, VAI_DATA_DIR "/images/pusht.png");
+    const std::vector<std::string> imagePaths(modelCfg.numObsSteps, VAI_DATA_DIR "/images/cam_high.jpg");
     const uint32_t B = modelCfg.numObsSteps * modelCfg.numCameras;
     const uint32_t S = modelCfg.imageSize;
 
@@ -171,7 +180,7 @@ int main()
         printf("Loading image %u: %s\n", k, imagePaths[k].c_str());
         // clang-format off
         std::vector<float> chw = utils::ImageProcessor(imagePaths[k])
-            .resize(S)                                      // pushT frames are S x S already
+            .resize(S)                                      // squashed to the policy's S x S
             .normalize(0.0f, 1.0f)
             .standardize(net.imageMean, net.imageStd)
             .chw();
@@ -186,13 +195,23 @@ int main()
     // Initialize the input tensors
     Tensor inImages = Tensor({ B, 3, S, S }).setFloats(std::move(pixels));
     Tensor inState = Tensor({ modelCfg.numObsSteps, modelCfg.stateDim }).setFloats(state);
+
+    // The diffusion noise, drawn here from a seed: the starting sample x_T and every
+    // denoising step's z. decode() overwrites the sample, so each run starts from a
+    // fresh copy of x_T.
+    const uint64_t seed = 0;
+    const uint32_t steps = net.runtimeCfg.denoiseSteps;
+    const std::vector<float> initNoise = dp::sampleNoise(size_t(modelCfg.horizon) * modelCfg.actionDim, seed);
+    Tensor stepNoise = Tensor({ steps, modelCfg.horizon, modelCfg.actionDim }, Dtype::Fp32);
+    stepNoise.setFloats(dp::sampleNoise(stepNoise.numElements(), seed + 1));
+    auto initSample = [&] { return Tensor({ modelCfg.horizon, modelCfg.actionDim }, Dtype::Fp32).setFloats(initNoise); };
     Tensor sample;
 
     // Warm-up.
     {
         net.encode(inImages, inState);
-        net.drawNoise(0, &sample);
-        net.decode(&sample);
+        sample = initSample();
+        net.decode(stepNoise, &sample);
     }
 
     net.resetProfileRecords();
@@ -215,10 +234,8 @@ int main()
     net.printProfile();
 
     // Denoise — DDPM from noise at the last timestep down to the action sample at 0.
-    net.drawNoise(0, &sample);
+    sample = initSample();
     {
-        const uint32_t steps = net.runtimeCfg.denoiseSteps;
-
         utils::TimeChecker totalTimer(
             "\n"
             "────────────────────────────────────────\n"
@@ -227,7 +244,7 @@ int main()
             steps,
             modelCfg.horizon);
 
-        net.decode(&sample);
+        net.decode(stepNoise, &sample);
 
         net.sync();   // this sync is not necessary, but it is here to measure the denoise time.
     }
