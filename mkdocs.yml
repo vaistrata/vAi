@@ -67,6 +67,7 @@ nav:
       - PaliGemma: en/04-models/paligemma.md
       - π0: en/04-models/pi0.md
       - ACT: en/04-models/act.md
+      - Whisper: en/04-models/whisper.md
   - Built-in nodes: en/06-nodes.md
   - Contributing:
       - en/contributing/README.md               # Contribution workflow and automated checks
