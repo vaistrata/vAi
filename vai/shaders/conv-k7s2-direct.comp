@@ -32,14 +32,14 @@ layout(constant_id = SPEC_ID_HAS_SCALE) const uint hasScale = 0u;
 layout(constant_id = SPEC_ID_HAS_BIAS) const uint hasBias = 1u;
 layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0u;   // O dtype: DTYPE_F32 or DTYPE_F16
 
-layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_F32 { float bufferO_f32[]; };
-layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_F16 { float16_t bufferO_f16[]; };
-layout(set = 0, binding = 1) restrict readonly buffer I_BUF { float bufferI[]; };
-layout(set = 0, binding = 2) restrict readonly buffer W_BUF { float bufferW[]; };
-layout(set = 0, binding = 3) restrict readonly buffer BIAS_BUF_F32 { float bufferBias_f32[]; };
-layout(set = 0, binding = 3) restrict readonly buffer BIAS_BUF_F16 { float16_t bufferBias_f16[]; };
-layout(set = 0, binding = 4) restrict readonly buffer SCALE_BUF_F32 { float bufferScale_f32[]; };
-layout(set = 0, binding = 4) restrict readonly buffer SCALE_BUF_F16 { float16_t bufferScale_f16[]; };
+layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_F32 { float bO_f32[]; };
+layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_F16 { float16_t bO_f16[]; };
+layout(set = 0, binding = 1) restrict readonly buffer I_BUF { float bI[]; };
+layout(set = 0, binding = 2) restrict readonly buffer W_BUF { float bW[]; };
+layout(set = 0, binding = 3) restrict readonly buffer BIAS_BUF_F32 { float bBias_f32[]; };
+layout(set = 0, binding = 3) restrict readonly buffer BIAS_BUF_F16 { float16_t bBias_f16[]; };
+layout(set = 0, binding = 4) restrict readonly buffer SCALE_BUF_F32 { float bScale_f32[]; };
+layout(set = 0, binding = 4) restrict readonly buffer SCALE_BUF_F16 { float16_t bScale_f16[]; };
 
 layout(push_constant) uniform PushConstants {
     uint hi;
@@ -69,19 +69,19 @@ uint patchIndex(uint c, uint row, uint parity, uint column)
 float readBias(uint co)
 {
     if (hasBias == 0u) return 0.0;
-    return typeP == DTYPE_F32 ? bufferBias_f32[co] : float(bufferBias_f16[co]);
+    return typeP == DTYPE_F32 ? bBias_f32[co] : float(bBias_f16[co]);
 }
 
 float readScale(uint co)
 {
     if (hasScale == 0u) return 1.0;
-    return typeP == DTYPE_F32 ? bufferScale_f32[co] : float(bufferScale_f16[co]);
+    return typeP == DTYPE_F32 ? bScale_f32[co] : float(bScale_f16[co]);
 }
 
 void writeO(uint index, float value)
 {
-    if (typeO == DTYPE_F32) bufferO_f32[index] = value;
-    else bufferO_f16[index] = float16_t(value);
+    if (typeO == DTYPE_F32) bO_f32[index] = value;
+    else bO_f16[index] = float16_t(value);
 }
 
 void main()
@@ -108,7 +108,7 @@ void main()
         const int ix = ix0 + int(col);
         float value = 0.0;
         if (iy >= 0 && ix >= 0 && iy < int(pc.hi) && ix < int(pc.wi))
-            value = bufferI[inputBase + (c * pc.hi + uint(iy)) * pc.wi + uint(ix)];
+            value = bI[inputBase + (c * pc.hi + uint(iy)) * pc.wi + uint(ix)];
         inputPatch[patchIndex(c, row, col & 1u, col >> 1u)] = value;
     }
     barrier();
@@ -132,7 +132,7 @@ void main()
                     const float value = inputPatch[patchIndex(c, row, s & 1u, tx + (s >> 1u))];
                     const uint weightBase = ((c * KS + r) * KS + s) * CO + coBase;
                     [[unroll]] for (uint k = 0u; k < CO_BLOCK; ++k)
-                        acc[k] = fma(value, bufferW[weightBase + k], acc[k]);
+                        acc[k] = fma(value, bW[weightBase + k], acc[k]);
                 }
             }
         }
