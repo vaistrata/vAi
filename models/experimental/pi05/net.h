@@ -74,6 +74,27 @@ struct PrefillNet : public vai::NeuralNet
         languageEncoder.setGateOpen(false);
         kvCacheCounter = vai::createKvCacheCounter(device());
         languageEncoder.setKvCacheCounter(kvCacheCounter);
+
+        if (device().vendorID() == eva::VENDOR_ID::NVIDIA)
+        {
+            const auto f16 = vai::Dtype::Fp16;
+            const auto key = dtypeKey();
+
+            patchEmbed.project.setAccDtype(f16, key);
+            for (auto& b : visionEncoder.blocks)
+            {
+                auto& a = b.mhAttn;
+                for (auto* l : { &a.projQ, &a.projK, &a.projV, &a.projOut, &b.ffn.fc1, &b.ffn.fc2 })
+                    l->setAccDtype(f16, key);
+            }
+            projector.setAccDtype(f16, key);
+            for (auto& b : languageEncoder.blocks)
+            {
+                auto& a = b.mhAttn;
+                for (auto* l : { &a.projQ, &a.projK, &a.projV, &a.projOut, &b.ffn.gateValue, &b.ffn.out })
+                    l->setAccDtype(f16, key);
+            }
+        }
     }
 
     uint32_t prefixLength_ = 0;
@@ -146,6 +167,21 @@ struct DecodeNet : public vai::NeuralNet
         }
 
         velocityHead.setODtype(vai::Dtype::Fp32, dtypeKey());
+
+        if (device().vendorID() == eva::VENDOR_ID::NVIDIA)
+        {
+            const auto f16 = vai::Dtype::Fp16;
+            const auto key = dtypeKey();
+
+            actionProj.setAccDtype(f16, key);
+            for (auto& b : actionDecoder.blocks)
+            {
+                auto& a = b.mhAttn;
+                for (auto* l : { &a.projQ, &a.projK, &a.projV, &a.projOut, &b.ffn.gateValue, &b.ffn.out })
+                    l->setAccDtype(f16, key);
+            }
+            velocityHead.setAccDtype(f16, key);
+        }
     }
 
     // Input: action [actionChunk, actionDim], initialized with noise.

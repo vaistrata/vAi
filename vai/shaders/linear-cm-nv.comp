@@ -13,8 +13,16 @@
     last block of a span: vectors at or past endK read zeros — a vector is
     fully in or fully out), scalar (odd K). So K need not be a multiple of
     wgK: the selector works on Kp (K rounded up to 64 when K % 32 != 0)
-    and the kernel masks the tail. The selector's split spans are
-    256-multiples, so a tail sits only in the last split.
+    and the kernel masks the tail.
+  - `rowMajor` is a flag: M-first order reads the M tile count from
+    gl_NumWorkGroups.y, so a prompt-dependent M does not compile a
+    pipeline per M tile count;
+  - `prefetch` selects a two-stage k loop: two shared stages; block k + 1's global loads go out
+    during block k's first tK slice, one group per A fragment, are held
+    in registers as raw 32-bit words (Piece) and land in the other stage
+    after block k's last coopmat MulAdd; the block's one barrier
+    publishes them. Nothing is carried across that barrier. prefetch == 0
+    keeps the single-stage loop and its typed loaders. prefetch == 2 also interleaves loader rows.
 
      O[m, n] = sum_k I[m, k] * W[n, k]
 
@@ -49,6 +57,13 @@
  compiles per-acc variants) and a dead shared array would still occupy its
  shared memory, so staging in the wider type serves both.
 
+ glu (Linear's GLU, no split, no bias): W's rows come in blocks of tN gate
+ rows then tN up rows (linear-glu-rows, G = tN; host: sgN % (2 tN) == 0), so
+ a subgroup's accumulator tiles a (even) and a + 1 hold one block's gate and
+ up. O is [M, N / 2]: activation(gate) * up, elementwise on the two tiles in
+ fp32 (same coopmat type, same element mapping), lands at column n / 2 and
+ takes the same three store ways with row stride N / 2.
+
  Split-K: workgroup z owns the K span [z * splitSize, min(K, (z + 1) *
  splitSize)) and writes its partials to P[z, M, N] on binding 0;
  linear-reduce.comp folds the partials and applies bias / activation.
@@ -64,6 +79,7 @@
 #extension GL_KHR_memory_scope_semantics : require
 #extension GL_KHR_shader_subgroup_basic : require
 #include "common/spec_constants.h"
+#include "common/activation.h"
 
 layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;   // = wgSize (same SpecId)
 
@@ -79,6 +95,11 @@ layout(constant_id = 8)  const uint tN       = 16;              // coopmat tile 
 layout(constant_id = 9)  const uint tK       = 16;              // coopmat tile along K (= device coopmat K)
 layout(constant_id = 11) const uint accType  = 0;               // accumulator dtype (0: fp32, 1: fp16)
 layout(constant_id = 12) const uint robustBufferAccess  = 0;    // robust buffer access (0: disabled, 1: enabled)
+layout(constant_id = 13) const uint glu      = 0;               // 1: O[m, n / 2] = activation(gate) * up (see the header)
+
+layout(constant_id = 14) const uint rowMajor = 0;               // 0: N-first tile order; else M-first over gl_NumWorkGroups.y M tiles
+layout(constant_id = 15) const uint prefetch = 0;               // 0: one stage, 1: two stages, 2: two stages with interleaved rows
+layout(constant_id = 16) const uint singleKBlock = 0;           // 1: one full k-block in each split
 
 layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0;  // O (output) dtype
 layout(constant_id = SPEC_ID_TYPE_I) const uint typeI = 0;  // I (input) dtype
@@ -88,6 +109,17 @@ layout(constant_id = SPEC_ID_ALIGNED) const uint aligned = 1;  // load width cod
 const uint LOAD_VEC       = (aligned == 1u) ? 8u : (aligned == 2u) ? 4u : (aligned == 3u) ? 2u : 1u;   // elements per load
 const uint LOAD_VEC_BATCH = (aligned != 0u) ? 1u : 2u;   // the scalar path loads 2 values per call
 const uint SHMEM_STRIDE = wgK / 2 + 4;    // f16vec2 slots per shmem row; +4 keeps coopMatLoad off bank conflicts
+
+// Two-stage loop only (prefetch != 0). A k-block's loads per thread: W loads first, then I, split into one
+// fetch group per A fragment of a tK slice (sgN / tN groups).
+const uint STAGES       = (prefetch != 0u) ? 2u : 1u;                    // shared k-block stages
+const uint LOAD_SLOTS   = LOAD_VEC * LOAD_VEC_BATCH / 2;                  // f16vec2 shmem slots one load fills
+const uint LOAD_ROWS    = wgSize * LOAD_VEC * LOAD_VEC_BATCH / wgK;       // rows one workgroup pass loads
+const uint W_LOADS      = wgN / LOAD_ROWS;                                // (host: wgN % LOAD_ROWS == 0)
+const uint I_LOADS      = wgM / LOAD_ROWS;                                // (host: wgM % LOAD_ROWS == 0)
+const uint LOADS        = W_LOADS + I_LOADS;
+const uint FETCH_GROUPS = sgN / tN;
+const uint GROUP_LOADS  = (LOADS + FETCH_GROUPS - 1u) / FETCH_GROUPS;
 
 const float16_t FP16_MAX = 65504.0hf;     // largest finite fp16 value
 
@@ -117,6 +149,16 @@ layout(set = 0, binding = 2) readonly buffer W_BUF_4F32 { vec4 bufferW_4f32[]; }
 layout(set = 0, binding = 2) readonly buffer W_BUF_4F16 { f16vec4 bufferW_4f16[]; };
 layout(set = 0, binding = 2) readonly buffer W_BUF_2F32 { vec2 bufferW_2f32[]; };
 layout(set = 0, binding = 2) readonly buffer W_BUF_2F16 { f16vec2 bufferW_2f16[]; };
+//////////////////////////////////////////////////////////////////////////////
+// The two-stage loop reads I and W as raw bits (see Piece), at the widths of the typed views above.
+layout(set = 0, binding = 1) readonly buffer I_BUF_U16  { uint16_t bufferI_u16[]; };
+layout(set = 0, binding = 1) readonly buffer I_BUF_U32  { uint bufferI_u32[]; };
+layout(set = 0, binding = 1) readonly buffer I_BUF_2U32 { uvec2 bufferI_2u32[]; };
+layout(set = 0, binding = 1) readonly buffer I_BUF_4U32 { uvec4 bufferI_4u32[]; };
+layout(set = 0, binding = 2) readonly buffer W_BUF_U16  { uint16_t bufferW_u16[]; };
+layout(set = 0, binding = 2) readonly buffer W_BUF_U32  { uint bufferW_u32[]; };
+layout(set = 0, binding = 2) readonly buffer W_BUF_2U32 { uvec2 bufferW_2u32[]; };
+layout(set = 0, binding = 2) readonly buffer W_BUF_4U32 { uvec4 bufferW_4u32[]; };
 
 layout(push_constant) uniform PushConstants {
     uint M;
@@ -135,9 +177,10 @@ float16_t readI(uint i)   { return (typeI == DTYPE_F32) ? float16_t(bufferI_f32[
 float16_t readW(uint i)   { return (typeW == DTYPE_F32) ? float16_t(bufferW_f32[i]) : bufferW_f16[i]; }
 void writeO(uint i, float v) { if (typeO == DTYPE_F32) bufferO_f32[i] = v; else bufferO_f16[i] = float16_t(v); }
 
-// One k-block of W (tileA) and I (tileB) rows, staged as f16vec2 slots.
-shared f16vec2 tileA[wgN * SHMEM_STRIDE];
-shared f16vec2 tileB[wgM * SHMEM_STRIDE];
+// One k-block of W (tileA) and I (tileB) rows per stage, staged as f16vec2 slots; stage s starts at slot
+// s * wgN * SHMEM_STRIDE of tileA and s * wgM * SHMEM_STRIDE of tileB.
+shared f16vec2 tileA[STAGES * wgN * SHMEM_STRIDE];
+shared f16vec2 tileB[STAGES * wgM * SHMEM_STRIDE];
 
 // Per-subgroup fp32 scratch for the staged store paths.
 shared float cmStage[(wgSize / sgSize) * tN * tM];
@@ -237,10 +280,199 @@ void I_to_tileB_scalar(const uint pos_b, const uint row, const uint col, const u
         tileB[buf_idx] = f16vec2(0.0hf);
 }
 
+// Two-stage loop: the same loaders split into a load to registers and a shared store.
+//
+// One load of a k-block, held in registers as raw 32-bit words until its shared store: a select or a phi
+// on fp16 lanes makes the compiler repack halves right after the loads, waiting on them before the MMA.
+// Words are grouped per f16vec2 shmem slot: an fp16 vector piece fills .x with the packed pair, an fp32
+// piece .xy with the two values, the scalar fp16 path .xy with the two halves zero-extended. An fp32
+// source converts to fp16 at the store.
+struct Piece { uvec2 slot[4]; };
+
+const Piece PIECE_ZERO = Piece(uvec2[4](uvec2(0u), uvec2(0u), uvec2(0u), uvec2(0u)));
+
+// Vector piece of LOAD_VEC values at piece index idx; `ok` = row guard (folded under robustness), plus
+// the K mask in the tail block.
+Piece W_load(const uint idx, const bool ok)
+{
+    Piece p = PIECE_ZERO;
+    if (typeW == DTYPE_F32 && LOAD_VEC >= 4u)
+    {
+        [[unroll]] for (uint h = 0; h < LOAD_VEC / 4u; h++)
+        {
+            const uvec4 v = ok ? bufferW_4u32[idx * (LOAD_VEC / 4u) + h] : uvec4(0u);
+            p.slot[2 * h] = v.xy;
+            p.slot[2 * h + 1] = v.zw;
+        }
+    }
+    else if (typeW == DTYPE_F32)
+        p.slot[0] = ok ? bufferW_2u32[idx] : uvec2(0u);
+    else if (LOAD_VEC >= 4u)
+    {
+        [[unroll]] for (uint h = 0; h < LOAD_VEC / 4u; h++)
+        {
+            const uvec2 v = ok ? bufferW_2u32[idx * (LOAD_VEC / 4u) + h] : uvec2(0u);
+            p.slot[2 * h].x = v.x;
+            p.slot[2 * h + 1].x = v.y;
+        }
+    }
+    else
+        p.slot[0].x = ok ? bufferW_u32[idx] : 0u;
+    return p;
+}
+Piece I_load(const uint idx, const bool ok)
+{
+    Piece p = PIECE_ZERO;
+    if (typeI == DTYPE_F32 && LOAD_VEC >= 4u)
+    {
+        [[unroll]] for (uint h = 0; h < LOAD_VEC / 4u; h++)
+        {
+            const uvec4 v = ok ? bufferI_4u32[idx * (LOAD_VEC / 4u) + h] : uvec4(0u);
+            p.slot[2 * h] = v.xy;
+            p.slot[2 * h + 1] = v.zw;
+        }
+    }
+    else if (typeI == DTYPE_F32)
+        p.slot[0] = ok ? bufferI_2u32[idx] : uvec2(0u);
+    else if (LOAD_VEC >= 4u)
+    {
+        [[unroll]] for (uint h = 0; h < LOAD_VEC / 4u; h++)
+        {
+            const uvec2 v = ok ? bufferI_2u32[idx * (LOAD_VEC / 4u) + h] : uvec2(0u);
+            p.slot[2 * h].x = v.x;
+            p.slot[2 * h + 1].x = v.y;
+        }
+    }
+    else
+        p.slot[0].x = ok ? bufferI_u32[idx] : 0u;
+    return p;
+}
+
+// Full, tail and scalar loads: the conditions of W_to_tileA_* / I_to_tileB_* above.
+Piece W_load_full(const uint pos_a, const uint row, const uint col, const uint idx_n)
+{
+    return W_load(pos_a + col * (K / LOAD_VEC) + row, robustBufferAccess != 0 || idx_n < N);
+}
+Piece I_load_full(const uint pos_b, const uint row, const uint col, const uint idx_m)
+{
+    return I_load(pos_b + col * (K / LOAD_VEC) + row, robustBufferAccess != 0 || idx_m < M);
+}
+Piece W_load_tail(const uint pos_a, const uint row, const uint col, const uint idx_n,
+                  const uint block, const uint endK)
+{
+    return W_load(pos_a + col * (K / LOAD_VEC) + row,
+                  (robustBufferAccess != 0 || idx_n < N) && block + row * LOAD_VEC < endK);
+}
+Piece I_load_tail(const uint pos_b, const uint row, const uint col, const uint idx_m,
+                  const uint block, const uint endK)
+{
+    return I_load(pos_b + col * (K / LOAD_VEC) + row,
+                  (robustBufferAccess != 0 || idx_m < M) && block + row * LOAD_VEC < endK);
+}
+uint W_word(const uint i) { return (typeW == DTYPE_F32) ? bufferW_u32[i] : uint(bufferW_u16[i]); }
+uint I_word(const uint i) { return (typeI == DTYPE_F32) ? bufferI_u32[i] : uint(bufferI_u16[i]); }
+Piece W_load_scalar(const uint pos_a, const uint row, const uint col, const uint idx_n,
+                    const uint block, const uint endK)
+{
+    const uint idx = pos_a + col * K + row * 2;
+    const bool ok  = robustBufferAccess != 0 || idx_n < N;
+    Piece p = PIECE_ZERO;
+    p.slot[0] = uvec2(ok && block + row * 2 < endK ? W_word(idx) : 0u,
+                      ok && block + row * 2 + 1 < endK ? W_word(idx + 1) : 0u);
+    return p;
+}
+Piece I_load_scalar(const uint pos_b, const uint row, const uint col, const uint idx_m,
+                    const uint block, const uint endK)
+{
+    const uint idx = pos_b + col * K + row * 2;
+    const bool ok  = robustBufferAccess != 0 || idx_m < M;
+    Piece p = PIECE_ZERO;
+    p.slot[0] = uvec2(ok && block + row * 2 < endK ? I_word(idx) : 0u,
+                      ok && block + row * 2 + 1 < endK ? I_word(idx + 1) : 0u);
+    return p;
+}
+
+// One piece into its LOAD_SLOTS f16vec2 slots of tileA / tileB.
+f16vec2 slotValue(const uvec2 s, const uint dtype)
+{
+    if (dtype == DTYPE_F32)
+        return f16vec2(uintBitsToFloat(s));
+    return unpackFloat2x16(aligned == 0u ? s.x | (s.y << 16) : s.x);
+}
+void W_storePiece(const uint buf_idx, const Piece p)
+{
+    [[unroll]] for (uint s = 0; s < LOAD_SLOTS; s++)
+        tileA[buf_idx + s] = slotValue(p.slot[s], typeW);
+}
+void I_storePiece(const uint buf_idx, const Piece p)
+{
+    [[unroll]] for (uint s = 0; s < LOAD_SLOTS; s++)
+        tileB[buf_idx + s] = slotValue(p.slot[s], typeI);
+}
+
+// Fetch group g of k-block `block`: loads [g * GROUP_LOADS, (g + 1) * GROUP_LOADS) of the block, by the
+// loader the block needs (uniform branch). Past endK the tail and scalar loaders mask every load off, so
+// the fetch after a span's last block reads nothing.
+// (row, col) = this thread's first load; idx_n / idx_m = that row's global W / I row.
+void fetchGroup(const uint g, const uint block, const uint endK, const uint pos_a, const uint pos_b, const uint row,
+                const uint col, const uint idx_n, const uint idx_m, inout Piece w[W_LOADS], inout Piece x[I_LOADS])
+{
+    const uint first = g * GROUP_LOADS;
+    const uint last  = min(first + GROUP_LOADS, LOADS);
+    if (aligned == 0u)
+    {
+        [[unroll]] for (uint l = first; l < last; l++)
+        {
+            const uint j = l < W_LOADS ? l : l - W_LOADS;
+            if (l < W_LOADS)
+                w[j] = W_load_scalar(pos_a, row, col + j * LOAD_ROWS, idx_n + j * LOAD_ROWS, block, endK);
+            else
+                x[j] = I_load_scalar(pos_b, row, col + j * LOAD_ROWS, idx_m + j * LOAD_ROWS, block, endK);
+        }
+    }
+    else if (block + wgK <= endK)
+    {
+        [[unroll]] for (uint l = first; l < last; l++)
+        {
+            const uint j = l < W_LOADS ? l : l - W_LOADS;
+            if (l < W_LOADS)
+                w[j] = W_load_full(pos_a, row, col + j * LOAD_ROWS, idx_n + j * LOAD_ROWS);
+            else
+                x[j] = I_load_full(pos_b, row, col + j * LOAD_ROWS, idx_m + j * LOAD_ROWS);
+        }
+    }
+    else
+    {
+        [[unroll]] for (uint l = first; l < last; l++)
+        {
+            const uint j = l < W_LOADS ? l : l - W_LOADS;
+            if (l < W_LOADS)
+                w[j] = W_load_tail(pos_a, row, col + j * LOAD_ROWS, idx_n + j * LOAD_ROWS, block, endK);
+            else
+                x[j] = I_load_tail(pos_b, row, col + j * LOAD_ROWS, idx_m + j * LOAD_ROWS, block, endK);
+        }
+    }
+}
+
+// A fetched k-block into stage `stage` of tileA / tileB.
+void storePieces(const uint stage, const uint row, const uint col, const Piece w[W_LOADS], const Piece x[I_LOADS])
+{
+    [[unroll]] for (uint j = 0; j < W_LOADS; j++)
+        W_storePiece(stage * wgN * SHMEM_STRIDE + (col + j * LOAD_ROWS) * SHMEM_STRIDE + row * LOAD_SLOTS, w[j]);
+    [[unroll]] for (uint j = 0; j < I_LOADS; j++)
+        I_storePiece(stage * wgM * SHMEM_STRIDE + (col + j * LOAD_ROWS) * SHMEM_STRIDE + row * LOAD_SLOTS, x[j]);
+}
+
 void main()
 {
-    const uint nTile = gl_WorkGroupID.x;   // which wgN-wide slice of N this workgroup owns
-    const uint mTile = gl_WorkGroupID.y;   // which wgM-wide slice of M this workgroup owns
+    uint nTile = gl_WorkGroupID.x;   // which wgN-wide slice of N this workgroup owns
+    uint mTile = gl_WorkGroupID.y;   // which wgM-wide slice of M this workgroup owns
+    if (rowMajor != 0u)              // M-first: walk the M tiles of one N tile, so they share its W tile
+    {
+        const uint id = mTile * gl_NumWorkGroups.x + nTile;
+        mTile = id % gl_NumWorkGroups.y;
+        nTile = id / gl_NumWorkGroups.y;
+    }
 
     // Split-K: this workgroup's K span.
     const uint startK = gl_WorkGroupID.z * splitSize;
@@ -248,7 +480,9 @@ void main()
 
     // Cooperative loading (as linear-tile.comp).
     const uint loadr      = gl_LocalInvocationID.x % (wgK / LOAD_VEC / LOAD_VEC_BATCH);
-    const uint loadc      = gl_LocalInvocationID.x / (wgK / LOAD_VEC / LOAD_VEC_BATCH);
+    const uint loadcBase  = gl_LocalInvocationID.x / (wgK / LOAD_VEC / LOAD_VEC_BATCH);
+    // Pair rows four apart to use disjoint banks in each eight-lane store wavefront.
+    const uint loadc      = prefetch == 2u ? (loadcBase & ~7u) | ((loadcBase & 1u) << 2u) | ((loadcBase & 6u) >> 1u) : loadcBase;
     const uint loadstride = wgSize * LOAD_VEC * LOAD_VEC_BATCH / wgK;
 
     uint pos_a = nTile * wgN * (K / LOAD_VEC) + startK / LOAD_VEC;   // read cursor into W (LOAD_VEC units)
@@ -272,58 +506,125 @@ void main()
         else               sums_f16[i] = accT16(0.0hf);
     }
 
-    // Per k-block: stage W and I, accumulate.
-    for (uint block = startK; block < endK; block += wgK)
+    if (prefetch == 0u)
     {
-        if (aligned == 0u)
+        // Per k-block: stage W and I, accumulate.
+        for (uint block = startK; singleKBlock != 0u || block < endK; block += wgK)
         {
-            [[unroll]] for (uint l = 0; l < wgN; l += loadstride)
-                W_to_tileA_scalar(pos_a, loadr, loadc + l, nTile * wgN + loadc + l, block, endK);
-            [[unroll]] for (uint l = 0; l < wgM; l += loadstride)
-                I_to_tileB_scalar(pos_b, loadr, loadc + l, mTile * wgM + loadc + l, block, endK);
-        }
-        else if (block + wgK <= endK)   // uniform: a full k-block keeps the plain vector loads
-        {
-            [[unroll]] for (uint l = 0; l < wgN; l += loadstride)
-                W_to_tileA_full(pos_a, loadr, loadc + l, nTile * wgN + loadc + l);
-            [[unroll]] for (uint l = 0; l < wgM; l += loadstride)
-                I_to_tileB_full(pos_b, loadr, loadc + l, mTile * wgM + loadc + l);
-        }
-        else                            // the tail k-block: vectors past endK read zeros
-        {
-            [[unroll]] for (uint l = 0; l < wgN; l += loadstride)
-                W_to_tileA_tail(pos_a, loadr, loadc + l, nTile * wgN + loadc + l, block, endK);
-            [[unroll]] for (uint l = 0; l < wgM; l += loadstride)
-                I_to_tileB_tail(pos_b, loadr, loadc + l, mTile * wgM + loadc + l, block, endK);
-        }
+            if (aligned == 0u)
+            {
+                [[unroll]] for (uint l = 0; l < wgN; l += loadstride)
+                    W_to_tileA_scalar(pos_a, loadr, loadc + l, nTile * wgN + loadc + l, block, endK);
+                [[unroll]] for (uint l = 0; l < wgM; l += loadstride)
+                    I_to_tileB_scalar(pos_b, loadr, loadc + l, mTile * wgM + loadc + l, block, endK);
+            }
+            else if (singleKBlock != 0u || block + wgK <= endK)   // uniform: a full k-block keeps the plain vector loads
+            {
+                [[unroll]] for (uint l = 0; l < wgN; l += loadstride)
+                    W_to_tileA_full(pos_a, loadr, loadc + l, nTile * wgN + loadc + l);
+                [[unroll]] for (uint l = 0; l < wgM; l += loadstride)
+                    I_to_tileB_full(pos_b, loadr, loadc + l, mTile * wgM + loadc + l);
+            }
+            else                            // the tail k-block: vectors past endK read zeros
+            {
+                [[unroll]] for (uint l = 0; l < wgN; l += loadstride)
+                    W_to_tileA_tail(pos_a, loadr, loadc + l, nTile * wgN + loadc + l, block, endK);
+                [[unroll]] for (uint l = 0; l < wgM; l += loadstride)
+                    I_to_tileB_tail(pos_b, loadr, loadc + l, mTile * wgM + loadc + l, block, endK);
+            }
 
+            barrier();
+
+            pos_a += wgK / LOAD_VEC;
+            pos_b += wgK / LOAD_VEC;
+
+            // tK-deep slices; staged offsets are f16vec2 slots (i / 2, tK even).
+            [[unroll]] for (uint i = 0; i < wgK; i += tK)
+            {
+                [[unroll]] for (uint a = 0; a < cmsN; a++)
+                {
+                    matA ca;
+                    coopMatLoad(ca, tileA, (sg_n * sgN + a * tN) * SHMEM_STRIDE + i / 2,
+                                SHMEM_STRIDE, gl_CooperativeMatrixLayoutRowMajor);
+
+                    [[unroll]] for (uint b = 0; b < cmsM; b++)
+                    {
+                        matB cb;
+                        coopMatLoad(cb, tileB, (sg_m * sgM + b * tM) * SHMEM_STRIDE + i / 2,
+                                    SHMEM_STRIDE, gl_CooperativeMatrixLayoutColumnMajor);
+
+                        if (accType == DTYPE_F32) sums_f32[b * cmsN + a] = coopMatMulAdd(ca, cb, sums_f32[b * cmsN + a]);
+                        else               sums_f16[b * cmsN + a] = coopMatMulAdd(ca, cb, sums_f16[b * cmsN + a]);
+                    }
+                }
+            }
+
+            if (singleKBlock != 0u)
+                break;
+            barrier();
+        }
+    }
+    else
+    {
+        // Two stages. Step k reads stage k & 1 and stores block k + 1 into the other stage; its one barrier
+        // ends both. The prologue stages the first block.
+        const uint idx_n = nTile * wgN + loadc;   // this thread's first W row
+        const uint idx_m = mTile * wgM + loadc;   // this thread's first I row
+        {
+            Piece w[W_LOADS], x[I_LOADS];
+            [[unroll]] for (uint g = 0; g < FETCH_GROUPS; g++)
+                fetchGroup(g, startK, endK, pos_a, pos_b, loadr, loadc, idx_n, idx_m, w, x);
+            storePieces(0u, loadr, loadc, w, x);
+        }
         barrier();
-
         pos_a += wgK / LOAD_VEC;
         pos_b += wgK / LOAD_VEC;
 
-        // tK-deep slices; staged offsets are f16vec2 slots (i / 2, tK even).
-        [[unroll]] for (uint i = 0; i < wgK; i += tK)
+        uint stage = 0u;
+        for (uint block = startK; block < endK; block += wgK)
         {
-            [[unroll]] for (uint a = 0; a < cmsN; a++)
+            // Block + wgK, fetched during this block's first tK slice: one group per A fragment, after that
+            // fragment's load. Issued straight after the barrier, loads delayed the block's first coopmat
+            // loads (h1). Stored after the block's last MulAdd, where a load still in flight holds up only
+            // the barrier, not the MMA (issue is in order).
+            Piece w[W_LOADS], x[I_LOADS];
+            [[unroll]] for (uint i = 0; i < wgK; i += tK)
             {
-                matA ca;
-                coopMatLoad(ca, tileA, (sg_n * sgN + a * tN) * SHMEM_STRIDE + i / 2,
-                            SHMEM_STRIDE, gl_CooperativeMatrixLayoutRowMajor);
-
-                [[unroll]] for (uint b = 0; b < cmsM; b++)
+                [[unroll]] for (uint a = 0; a < cmsN; a++)
                 {
-                    matB cb;
-                    coopMatLoad(cb, tileB, (sg_m * sgM + b * tM) * SHMEM_STRIDE + i / 2,
-                                SHMEM_STRIDE, gl_CooperativeMatrixLayoutColumnMajor);
+                    matA ca;
+                    coopMatLoad(ca, tileA, (stage * wgN + sg_n * sgN + a * tN) * SHMEM_STRIDE + i / 2,
+                                SHMEM_STRIDE, gl_CooperativeMatrixLayoutRowMajor);
 
-                    if (accType == DTYPE_F32) sums_f32[b * cmsN + a] = coopMatMulAdd(ca, cb, sums_f32[b * cmsN + a]);
-                    else               sums_f16[b * cmsN + a] = coopMatMulAdd(ca, cb, sums_f16[b * cmsN + a]);
+                    if (i == 0u)
+                        fetchGroup(a, block + wgK, endK, pos_a, pos_b, loadr, loadc, idx_n, idx_m, w, x);
+
+                    [[unroll]] for (uint b = 0; b < cmsM; b++)
+                    {
+                        matB cb;
+                        coopMatLoad(cb, tileB, (stage * wgM + sg_m * sgM + b * tM) * SHMEM_STRIDE + i / 2,
+                                    SHMEM_STRIDE, gl_CooperativeMatrixLayoutColumnMajor);
+
+                        if (accType == DTYPE_F32) sums_f32[b * cmsN + a] = coopMatMulAdd(ca, cb, sums_f32[b * cmsN + a]);
+                        else               sums_f16[b * cmsN + a] = coopMatMulAdd(ca, cb, sums_f16[b * cmsN + a]);
+                    }
                 }
             }
-        }
 
-        barrier();
+            // Without this subgroup barrier the compiler raises the stores into the last slice, where the
+            // first one waits on the loads with MulAdds still behind it (measured slower on fp16 I/O). An
+            // fp32 source takes that wait at its conversion, which the compiler raises past the barrier
+            // anyway, so there the barrier would only delay the stores (measured slower on 128 x 128).
+            if (typeI != DTYPE_F32 && typeW != DTYPE_F32)
+                controlBarrier(gl_ScopeSubgroup, gl_ScopeSubgroup, gl_StorageSemanticsShared,
+                               gl_SemanticsAcquireRelease);
+            storePieces(stage ^ 1u, loadr, loadc, w, x);
+            barrier();
+
+            stage ^= 1u;
+            pos_a += wgK / LOAD_VEC;
+            pos_b += wgK / LOAD_VEC;
+        }
     }
 
     // Clamp fp16 accumulators so inf never reaches the output.
@@ -348,6 +649,57 @@ void main()
     const uint storeR = gl_SubgroupInvocationID % tN;  // this lane's n offset within a tile
     const uint storeC = gl_SubgroupInvocationID / tN;  // this lane's m offset within a pass
     const uint stageBase = warpIdx * tN * tM;          // this subgroup's cmStage slice
+
+    if (glu != 0u)
+    {
+        // Tiles a and a + 1: one block's gate and up rows (see the header). No split, so no zOff.
+        const uint H = N / 2u;   // O's row length
+        const bool hAligned = (typeO == DTYPE_F32) ? (H % 4u == 0u) : (H % 8u == 0u);
+        [[unroll]] for (uint a = 0; a < cmsN; a += 2u)
+        {
+            [[unroll]] for (uint b = 0; b < cmsM; b++)
+            {
+                const uint n = n0 + a * tN;   // the block's first gate row (N is a multiple of 2 tN)
+                const uint c = n / 2u;        // its first output column
+                const uint m = m0 + b * tM;
+                if (n >= N || m >= M)
+                    continue;
+
+                accT32 v, up;
+                if (accType == DTYPE_F32)
+                {
+                    v  = sums_f32[b * cmsN + a];
+                    up = sums_f32[b * cmsN + a + 1u];
+                }
+                else
+                {
+                    v  = accT32(sums_f16[b * cmsN + a]);
+                    up = accT32(sums_f16[b * cmsN + a + 1u]);
+                }
+                [[unroll]] for (uint e = 0; e < v.length(); e++)
+                    v[e] = applyActivation(v[e]) * up[e];
+
+                if (hAligned && m + tM <= M)
+                {
+                    if (typeO == DTYPE_F32)
+                        coopMatStore(v, bufferO_f32, m * H + c, H, gl_CooperativeMatrixLayoutColumnMajor);
+                    else
+                        coopMatStore(accT16(v), bufferO_f16, m * H + c, H, gl_CooperativeMatrixLayoutColumnMajor);
+                }
+                else
+                {
+                    // Staged and masked at the M edge (the columns are whole: c + tN <= H).
+                    coopMatStore(v, cmStage, stageBase, tN, gl_CooperativeMatrixLayoutColumnMajor);
+                    controlBarrier(gl_ScopeSubgroup, gl_ScopeSubgroup, gl_StorageSemanticsShared, gl_SemanticsAcquireRelease);
+                    [[unroll]] for (uint r = 0; r < tM; r += storeStride)
+                        if (m + r + storeC < M)
+                            writeO((m + r + storeC) * H + c + storeR, cmStage[stageBase + (r + storeC) * tN + storeR]);
+                    controlBarrier(gl_ScopeSubgroup, gl_ScopeSubgroup, gl_StorageSemanticsShared, gl_SemanticsAcquireRelease);
+                }
+            }
+        }
+        return;
+    }
 
     [[unroll]] for (uint a = 0; a < cmsN; a++)
     {
