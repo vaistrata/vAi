@@ -22,6 +22,29 @@ using production::pi05::VisionEncoder;
 namespace group = production::pi05::group;
 
 
+// Calls fn on each Linear of a transformer block: its attention projections and its FFN.
+template <typename Block, typename Fn>
+void forEachBlockLinear(Block& block, Fn&& fn)
+{
+    fn(block.mhAttn.projQ);
+    fn(block.mhAttn.projK);
+    fn(block.mhAttn.projV);
+    fn(block.mhAttn.projOut);
+
+    auto& ffn = block.ffn;
+    if constexpr (requires { ffn.fc1; })
+    {
+        fn(ffn.fc1);
+        fn(ffn.fc2);
+    }
+    else
+    {
+        fn(ffn.gateValue);
+        fn(ffn.out);
+    }
+}
+
+
 /////////////////////////////////////////////////////////////////////////////////////////
 // PrefillNet - the cameras and the prompt into the KV cache
 /////////////////////////////////////////////////////////////////////////////////////////
@@ -74,6 +97,19 @@ struct PrefillNet : public vai::NeuralNet
         languageEncoder.setGateOpen(false);
         kvCacheCounter = vai::createKvCacheCounter(device());
         languageEncoder.setKvCacheCounter(kvCacheCounter);
+
+        // On NVIDIA every Linear accumulates in FP16, as TensorRT Edge-LLM and vla.cpp do.
+        if (device().vendorID() == eva::VENDOR_ID::NVIDIA)
+        {
+            const auto key = dtypeKey();
+            const auto setAcc = [&](vai::node::Linear& linear) { linear.setAccDtype(vai::Dtype::Fp16, key); };
+            setAcc(patchEmbed.project);
+            for (auto& block : visionEncoder.blocks)
+                forEachBlockLinear(block, setAcc);
+            setAcc(projector);
+            for (auto& block : languageEncoder.blocks)
+                forEachBlockLinear(block, setAcc);
+        }
     }
 
     uint32_t prefixLength_ = 0;
@@ -146,6 +182,17 @@ struct DecodeNet : public vai::NeuralNet
         }
 
         velocityHead.setODtype(vai::Dtype::Fp32, dtypeKey());
+
+        // On NVIDIA every Linear accumulates in FP16, as TensorRT Edge-LLM and vla.cpp do.
+        if (device().vendorID() == eva::VENDOR_ID::NVIDIA)
+        {
+            const auto key = dtypeKey();
+            const auto setAcc = [&](vai::node::Linear& linear) { linear.setAccDtype(vai::Dtype::Fp16, key); };
+            setAcc(actionProj);
+            for (auto& block : actionDecoder.blocks)
+                forEachBlockLinear(block, setAcc);
+            setAcc(velocityHead);
+        }
     }
 
     // Input: action [actionChunk, actionDim], initialized with noise.
