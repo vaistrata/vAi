@@ -22,27 +22,27 @@ layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0;  // O dtype
 layout(constant_id = SPEC_ID_TYPE_I) const uint typeI = 0;  // TABLE dtype
 layout(constant_id = SPEC_ID_ALIGNED) const uint aligned = 0;  // 1: vec4 loads and stores
 
-layout(set = 0, binding = 0) writeonly buffer O_BUF_F32     { float bufferO_f32[]; };
-layout(set = 0, binding = 0) writeonly buffer O_BUF_F16     { float16_t bufferO_f16[]; };
-layout(set = 0, binding = 0) writeonly buffer O_BUF_4F32    { vec4 bufferO_4f32[]; };
-layout(set = 0, binding = 0) writeonly buffer O_BUF_4F16    { f16vec4 bufferO_4f16[]; };
+layout(set = 0, binding = 0) writeonly buffer O_BUF_F32     { float bO_f32[]; };
+layout(set = 0, binding = 0) writeonly buffer O_BUF_F16     { float16_t bO_f16[]; };
+layout(set = 0, binding = 0) writeonly buffer O_BUF_4F32    { vec4 bO_4f32[]; };
+layout(set = 0, binding = 0) writeonly buffer O_BUF_4F16    { f16vec4 bO_4f16[]; };
 //////////////////////////////////////////////////////////////////////////////
-layout(set = 0, binding = 1) readonly  buffer TABLE_BUF_F32 { float bufferTable_f32[]; };
-layout(set = 0, binding = 1) readonly  buffer TABLE_BUF_F16 { float16_t bufferTable_f16[]; };
-layout(set = 0, binding = 1) readonly  buffer TABLE_BUF_4F32 { vec4 bufferTable_4f32[]; };
-layout(set = 0, binding = 1) readonly  buffer TABLE_BUF_4F16 { f16vec4 bufferTable_4f16[]; };
+layout(set = 0, binding = 1) readonly  buffer TABLE_BUF_F32 { float bTable_f32[]; };
+layout(set = 0, binding = 1) readonly  buffer TABLE_BUF_F16 { float16_t bTable_f16[]; };
+layout(set = 0, binding = 1) readonly  buffer TABLE_BUF_4F32 { vec4 bTable_4f32[]; };
+layout(set = 0, binding = 1) readonly  buffer TABLE_BUF_4F16 { f16vec4 bTable_4f16[]; };
 //////////////////////////////////////////////////////////////////////////////
-layout(set = 0, binding = 2)           buffer WG_COUNT_BUF  { uint bufferWgCount[]; };
+layout(set = 0, binding = 2)           buffer WG_COUNT_BUF  { uint bWgCount[]; };
 
 layout(push_constant) uniform PushConstants {
     uint elemsPerRow;   // one row of the table, in elements
     uint numRows;       // number of rows in the table
 };
 
-float readTable(uint i) { return (typeI == DTYPE_F32) ? bufferTable_f32[i] : float(bufferTable_f16[i]); }
-void writeO(uint i, float v) { if (typeO == DTYPE_F32) bufferO_f32[i] = v; else bufferO_f16[i] = float16_t(v); }
-vec4 readTable4(uint i4) { return (typeI == DTYPE_F32) ? bufferTable_4f32[i4] : vec4(bufferTable_4f16[i4]); }
-void writeO4(uint i4, vec4 v) { if (typeO == DTYPE_F32) bufferO_4f32[i4] = v; else bufferO_4f16[i4] = f16vec4(v); }
+float readTable(uint i) { return (typeI == DTYPE_F32) ? bTable_f32[i] : float(bTable_f16[i]); }
+void writeO(uint i, float v) { if (typeO == DTYPE_F32) bO_f32[i] = v; else bO_f16[i] = float16_t(v); }
+vec4 readTable4(uint i4) { return (typeI == DTYPE_F32) ? bTable_4f32[i4] : vec4(bTable_4f16[i4]); }
+void writeO4(uint i4, vec4 v) { if (typeO == DTYPE_F32) bO_4f32[i4] = v; else bO_4f16[i4] = f16vec4(v); }
 
 shared uint rowIndex;
 
@@ -51,7 +51,7 @@ void main()
     if (gl_LocalInvocationIndex == 0)
     {
         uint workgroupsPerDispatch = gl_NumWorkGroups.x * gl_NumWorkGroups.y;
-        uint workgroupOrdinal = atomicAdd(bufferWgCount[0], 1u);
+        uint workgroupOrdinal = atomicAdd(bWgCount[0], 1u);
         uint dispatchIndex = workgroupOrdinal / workgroupsPerDispatch;
         rowIndex = dispatchIndex % numRows;
     }

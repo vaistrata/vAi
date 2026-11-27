@@ -19,23 +19,23 @@ layout(constant_id = 1) const uint numClasses = 0u;
 layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0u;
 layout(constant_id = SPEC_ID_TYPE_I) const uint typeI = 0u;
 
-layout(set = 0, binding = 0) readonly buffer P3_REGOBJ_BUF_F32 { float bufferP3RegObj_f32[]; };
-layout(set = 0, binding = 0) readonly buffer P3_REGOBJ_BUF_F16 { float16_t bufferP3RegObj_f16[]; };
-layout(set = 0, binding = 1) readonly buffer P3_CLS_BUF_F32 { float bufferP3Cls_f32[]; };
-layout(set = 0, binding = 1) readonly buffer P3_CLS_BUF_F16 { float16_t bufferP3Cls_f16[]; };
+layout(set = 0, binding = 0) readonly buffer P3_REGOBJ_BUF_F32 { float bP3RegObj_f32[]; };
+layout(set = 0, binding = 0) readonly buffer P3_REGOBJ_BUF_F16 { float16_t bP3RegObj_f16[]; };
+layout(set = 0, binding = 1) readonly buffer P3_CLS_BUF_F32 { float bP3Cls_f32[]; };
+layout(set = 0, binding = 1) readonly buffer P3_CLS_BUF_F16 { float16_t bP3Cls_f16[]; };
 
-layout(set = 0, binding = 2) readonly buffer P4_REGOBJ_BUF_F32 { float bufferP4RegObj_f32[]; };
-layout(set = 0, binding = 2) readonly buffer P4_REGOBJ_BUF_F16 { float16_t bufferP4RegObj_f16[]; };
-layout(set = 0, binding = 3) readonly buffer P4_CLS_BUF_F32 { float bufferP4Cls_f32[]; };
-layout(set = 0, binding = 3) readonly buffer P4_CLS_BUF_F16 { float16_t bufferP4Cls_f16[]; };
+layout(set = 0, binding = 2) readonly buffer P4_REGOBJ_BUF_F32 { float bP4RegObj_f32[]; };
+layout(set = 0, binding = 2) readonly buffer P4_REGOBJ_BUF_F16 { float16_t bP4RegObj_f16[]; };
+layout(set = 0, binding = 3) readonly buffer P4_CLS_BUF_F32 { float bP4Cls_f32[]; };
+layout(set = 0, binding = 3) readonly buffer P4_CLS_BUF_F16 { float16_t bP4Cls_f16[]; };
 
-layout(set = 0, binding = 4) readonly buffer P5_REGOBJ_BUF_F32 { float bufferP5RegObj_f32[]; };
-layout(set = 0, binding = 4) readonly buffer P5_REGOBJ_BUF_F16 { float16_t bufferP5RegObj_f16[]; };
-layout(set = 0, binding = 5) readonly buffer P5_CLS_BUF_F32 { float bufferP5Cls_f32[]; };
-layout(set = 0, binding = 5) readonly buffer P5_CLS_BUF_F16 { float16_t bufferP5Cls_f16[]; };
+layout(set = 0, binding = 4) readonly buffer P5_REGOBJ_BUF_F32 { float bP5RegObj_f32[]; };
+layout(set = 0, binding = 4) readonly buffer P5_REGOBJ_BUF_F16 { float16_t bP5RegObj_f16[]; };
+layout(set = 0, binding = 5) readonly buffer P5_CLS_BUF_F32 { float bP5Cls_f32[]; };
+layout(set = 0, binding = 5) readonly buffer P5_CLS_BUF_F16 { float16_t bP5Cls_f16[]; };
 
-layout(set = 0, binding = 6) writeonly buffer O_BUF_F32 { float bufferO_f32[]; };
-layout(set = 0, binding = 6) writeonly buffer O_BUF_F16 { float16_t bufferO_f16[]; };
+layout(set = 0, binding = 6) writeonly buffer O_BUF_F32 { float bO_f32[]; };
+layout(set = 0, binding = 6) writeonly buffer O_BUF_F16 { float16_t bO_f16[]; };
 
 const uint p3Size = imageSize / 8u;
 const uint p4Size = imageSize / 16u;
@@ -56,32 +56,32 @@ float readRegObj(uint scale, uint idx)
 {
     if (typeI == 0u)
     {
-        if (scale == 0u) return bufferP3RegObj_f32[idx];
-        if (scale == 1u) return bufferP4RegObj_f32[idx];
-        return bufferP5RegObj_f32[idx];
+        if (scale == 0u) return bP3RegObj_f32[idx];
+        if (scale == 1u) return bP4RegObj_f32[idx];
+        return bP5RegObj_f32[idx];
     }
-    if (scale == 0u) return float(bufferP3RegObj_f16[idx]);
-    if (scale == 1u) return float(bufferP4RegObj_f16[idx]);
-    return float(bufferP5RegObj_f16[idx]);
+    if (scale == 0u) return float(bP3RegObj_f16[idx]);
+    if (scale == 1u) return float(bP4RegObj_f16[idx]);
+    return float(bP5RegObj_f16[idx]);
 }
 
 float readCls(uint scale, uint idx)
 {
     if (typeI == 0u)
     {
-        if (scale == 0u) return bufferP3Cls_f32[idx];
-        if (scale == 1u) return bufferP4Cls_f32[idx];
-        return bufferP5Cls_f32[idx];
+        if (scale == 0u) return bP3Cls_f32[idx];
+        if (scale == 1u) return bP4Cls_f32[idx];
+        return bP5Cls_f32[idx];
     }
-    if (scale == 0u) return float(bufferP3Cls_f16[idx]);
-    if (scale == 1u) return float(bufferP4Cls_f16[idx]);
-    return float(bufferP5Cls_f16[idx]);
+    if (scale == 0u) return float(bP3Cls_f16[idx]);
+    if (scale == 1u) return float(bP4Cls_f16[idx]);
+    return float(bP5Cls_f16[idx]);
 }
 
 void writeO(uint idx, float value)
 {
-    if (typeO == 0u) bufferO_f32[idx] = value;
-    else bufferO_f16[idx] = float16_t(value);
+    if (typeO == 0u) bO_f32[idx] = value;
+    else bO_f16[idx] = float16_t(value);
 }
 
 void main()

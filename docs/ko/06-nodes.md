@@ -1,6 +1,6 @@
 # 제공 노드들
 
-빌트인 노드 28종. 개념은 [노드(Node)](03-usage/node.md)를, 새 노드를 만드는 법은 [커스텀 노드와 커널](contributing/nodes.md)을 참조하세요.
+빌트인 노드 29종. 개념은 [노드(Node)](03-usage/node.md)를, 새 노드를 만드는 법은 [커스텀 노드와 커널](contributing/nodes.md)을 참조하세요.
 
 ## 목록
 
@@ -34,6 +34,7 @@
 | [TokenEmbedding](#tokenembedding) | token embedding, optionally fused with positional embedding | `token-embedding.comp` |
 | [TopKSampling](#topksampling) | row-wise top-k sampling, one kernel run as two passes | `topk-sampling.comp` |
 | [TypeCast](#typecast) | Casts each tensor element to another dtype. | `cast.comp` |
+| [Unflatten](#unflatten) | Split one axis into several, as torch.unflatten | — |
 
 ---
 
@@ -670,6 +671,7 @@ write source slices at listed indices, as torch.index_copy
 | 필드 | 타입 | 기본값 | 설명 |
 |---|---|---|---|
 | `axis` | `uint32_t` | `0` |  |
+| `accumulate` | `bool` | `false` | out0[.., index[n], ..] += in1[.., n, ..], as torch.index_put_(accumulate=True) |
 
 **동작 및 제약**
 
@@ -679,8 +681,10 @@ no re-recording. An index past d(axis) leaves its slice unwritten.
 
 out0 aliases in0 and only the N slices are written (= index_copy_), so no
 other node may read in0 after this one. in1 may be left out of a recording,
-and out0 then aliases in0 with nothing recorded. Bytes move as they are, so
-in0 and in1 share a dtype.
+and out0 then aliases in0 with nothing recorded. in1 is converted to in0's
+dtype when the two differ.
+
+With accumulate, in1 is added instead, and the indices must be distinct.
 
 **커널**
 
@@ -912,8 +916,8 @@ Permutes the axes of a tensor of any rank.
 
 **시그니처**
 
-- 입력: in0 [D0, .., Dr-1], r = perms.size()
-- 출력: axes reordered by perms; reshape-only fast path when layout is unchanged
+- 입력: in0 [..., D0, .., Dk-1], k = perms.size()
+- 출력: [..., the last k axes reordered by perms]; reshape-only fast path when layout is unchanged
 
 **슬롯**
 
@@ -924,10 +928,12 @@ Permutes the axes of a tensor of any rank.
 
 **동작 및 제약**
 
-Output dimension i is input dimension perms[i], and perms must be a permutation of
-{0, .., r-1} with r at most PERMUTE_MAX_RANK. When the permutation preserves memory
-order and the dtype is unchanged, the output aliases the input; otherwise it uses new
-contiguous storage.
+perms reorders the last k axes of in0 and the axes ahead of them pass through, so a
+leading batch axis may be there or not. Among the last k, output dimension i is input
+dimension perms[i], and perms must be a permutation of {0, .., k-1}. The leading axes
+fold into one, so k (plus one when there are leading axes) is at most
+PERMUTE_MAX_RANK. When the permutation preserves memory order and the dtype is
+unchanged, the output aliases the input; otherwise it uses new contiguous storage.
 
 The rank is a specialization constant, so the pool holds one pipeline per rank.
 
@@ -986,7 +992,7 @@ Reshape tensor to specified dimensions
 **시그니처**
 
 - 입력: in0 [any shape]
-- 출력: out0 [dims] (shares buffer with input)
+- 출력: out0 [leading.., dims] (shares buffer with input)
 
 **슬롯**
 
@@ -997,10 +1003,11 @@ Reshape tensor to specified dimensions
 
 **동작 및 제약**
 
-A dim is a size, 0 for the input's dimension at that same position, or -1 for
-whatever the element count leaves over, at most once (= ONNX). 0 carries a size only
-the caller's data knows without the graph naming it. The resolved dims must multiply
-to the input's element count. The output aliases the input buffer.
+The last trailingAxes axes of in0 become dims and the axes ahead of them pass
+through, so a leading batch axis may be there or not (= torch.unflatten /
+flatten). trailingAxes 0 means every axis. A dim is a size, or -1 for whatever
+the replaced axes leave over, at most once. The resolved dims must multiply to
+the replaced axes' element count. The output aliases the input buffer.
 
 ---
 
@@ -1058,9 +1065,9 @@ rotary position embedding (half-split rotation)
 
 **시그니처**
 
-- 입력: in0 [.., H, Tq, Dh] (Q or K, Dh even)
-- 파라미터: freqs [Dh/2] per-dimension angular frequency, built by the constructor
-- 출력: out0 [.., H, Tq, Dh]
+- 입력: in0 [..., H, Tq, Dh] (Q or K, Dh even)
+- 파라미터: freqs [Dh/2] per-pair angular frequency, built by the constructor
+- 출력: out0 [..., H, Tq, Dh]
 
 **슬롯**
 
@@ -1082,12 +1089,17 @@ rotary position embedding (half-split rotation)
 The rotation depends on the token position alone, so anything ahead of the head
 axis is one more sweep and folds into the head count.
 
-Positions continue from setKvCacheCounter()'s buffer, so a KV-cache decode
-step rotates by the absolute position rather than by its offset in this forward.
+The values in cfg pick how the frequencies are scaled: factor 1 leaves them
+alone, any other divides every one, and a nonzero originalMaxPos makes it
+Llama3's, dividing only the long wavelengths and interpolating the band between
+the two frequency bounds.
 
-cfg.type picks how the frequencies are scaled: Default divides every one by
-factor (1 leaves them alone), and Llama3 divides only the long wavelengths,
-interpolating the band between the two frequency bounds.
+cfg.posType fixes where positions come from. setPosParam() binds one uint, read
+at dispatch time, whose meaning the type gives:
+Sequential  token tq at posParam + tq, posParam the first token's position
+Grid2D      tokens are a raster grid posParam wide, row and column from tq
+MRoPE       each token's (t, h, w) from the buffer setPositions() binds;
+rope.comp picks the pair's axis from the sections
 
 **커널**
 
@@ -1150,13 +1162,13 @@ Take a run of consecutive indices along one axis
 
 | 필드 | 타입 | 기본값 | 설명 |
 |---|---|---|---|
-| `axis` | `uint32_t` | `0` | the axis to cut; 0 takes a contiguous block |
+| `axis` | `int` | `0` | the axis to cut; negative counts from the end |
 | `start` | `int64_t` | — | first index on the axis; negative counts from the end |
 | `count` | `uint32_t` | `1` | how many consecutive indices to take |
 
 **동작 및 제약**
 
-A negative start counts from the end, with -1 selecting the last index.
+A negative axis or start counts from the end, with -1 selecting the last.
 
 What the axes ahead of the cut multiply to decides the cost, not the axis number.
 At 1 the run is one contiguous block, so out0 aliases it when the offset satisfies
@@ -1227,7 +1239,7 @@ row-wise top-k sampling, one kernel run as two passes
 
 **시그니처**
 
-- 입력: logits [.., N]
+- 입력: logits [..., N]
 - 출력: out0 [..] (one raw uint32 sampled index per row, in 4-byte slots)
 
 **슬롯**
@@ -1303,5 +1315,37 @@ dispatch.
 **커널**
 
 - `vai/shaders/cast.comp`
+
+---
+
+## Unflatten
+
+Split one axis into several, as torch.unflatten
+
+소스: [`vai/nodes/unflatten.h`](../../vai/nodes/unflatten.h)
+
+**시그니처**
+
+- 입력: in0 [d0, .., d(r-1)]
+- 출력: out0 in0's shape with d(axis) replaced by sizes (shares buffer with input)
+
+**슬롯**
+
+| 슬롯 | 종류 | 비고 |
+|---|---|---|
+| `in0` | input |  |
+| `out0` | output |  |
+
+**Config**
+
+| 필드 | 타입 | 기본값 | 설명 |
+|---|---|---|---|
+| `axis` | `int` | — | the axis to split; negative counts from the end |
+| `sizes` | `std::vector<int64_t>` | — | what it splits into; one may be -1 |
+
+**동작 및 제약**
+
+A negative axis counts from the end. Each size is positive, or -1 for whatever
+d(axis) leaves over, at most once. The sizes must multiply to d(axis).
 
 ---

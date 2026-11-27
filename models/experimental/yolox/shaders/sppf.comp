@@ -16,10 +16,10 @@ layout(local_size_x = 256) in;
 layout(constant_id = 100) const uint typeO = 0u;
 layout(constant_id = 101) const uint typeI = 0u;
 
-layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_F32 { float bufferO_f32[]; };
-layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_F16 { float16_t bufferO_f16[]; };
-layout(set = 0, binding = 1) restrict readonly buffer I_BUF_F32 { float bufferI_f32[]; };
-layout(set = 0, binding = 1) restrict readonly buffer I_BUF_F16 { float16_t bufferI_f16[]; };
+layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_F32 { float bO_f32[]; };
+layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_F16 { float16_t bO_f16[]; };
+layout(set = 0, binding = 1) restrict readonly buffer I_BUF_F32 { float bI_f32[]; };
+layout(set = 0, binding = 1) restrict readonly buffer I_BUF_F16 { float16_t bI_f16[]; };
 
 layout(push_constant) uniform PushConstants {
     uint C;
@@ -33,11 +33,11 @@ shared float s0[MAX_HW];
 shared float s1[MAX_HW];
 shared float s2[MAX_HW];
 
-float readI(uint i) { return typeI == 0u ? bufferI_f32[i] : float(bufferI_f16[i]); }
+float readI(uint i) { return typeI == 0u ? bI_f32[i] : float(bI_f16[i]); }
 void writeO(uint i, float value)
 {
-    if (typeO == 0u) bufferO_f32[i] = value;
-    else bufferO_f16[i] = float16_t(value);
+    if (typeO == 0u) bO_f32[i] = value;
+    else bO_f16[i] = float16_t(value);
 }
 
 float loadShared0(int h, int w)

@@ -106,11 +106,11 @@ layout(constant_id = 15) const uint glu    = 0;     // 1: O = activation(gate) *
 layout(constant_id = 16) const uint accF16 = 0;     // 1: accumulate in fp16 (Xe2 and later DPAS take an hf accumulator)
 layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0;  // O (output) dtype
 
-layout(set = 0, binding = 0) writeonly buffer O_BUF_F32 { float bufferO_f32[]; };
-layout(set = 0, binding = 0) writeonly buffer O_BUF_F16 { float16_t bufferO_f16[]; };
-layout(set = 0, binding = 1) readonly buffer I_BUF { float16_t bufferI[]; };
-layout(set = 0, binding = 2) readonly buffer W_BUF { float16_t bufferW[]; };
-layout(set = 0, binding = 3) readonly buffer L_BUF { float bufferL[]; };   // oScale only (else any buffer)
+layout(set = 0, binding = 0) writeonly buffer O_BUF_F32 { float bO_f32[]; };
+layout(set = 0, binding = 0) writeonly buffer O_BUF_F16 { float16_t bO_f16[]; };
+layout(set = 0, binding = 1) readonly buffer I_BUF { float16_t bI[]; };
+layout(set = 0, binding = 2) readonly buffer W_BUF { float16_t bW[]; };
+layout(set = 0, binding = 3) readonly buffer L_BUF { float bL[]; };   // oScale only (else any buffer)
 
 layout(push_constant) uniform PushConstants {
     uint M;
@@ -130,7 +130,7 @@ layout(push_constant) uniform PushConstants {
     uint wBatch;
 };
 
-void writeO(uint i, float v) { if (typeO == DTYPE_F32) bufferO_f32[i] = v; else bufferO_f16[i] = float16_t(v); }
+void writeO(uint i, float v) { if (typeO == DTYPE_F32) bO_f32[i] = v; else bO_f16[i] = float16_t(v); }
 
 // The epilogue (bias / activation / scale / residual, the GLU) when K is not split.
 #define LINEAR_STORE_BIAS_BINDING 4
@@ -180,12 +180,12 @@ void main()
         MAT_B b[uN];                                                                                \
         [[unroll]] for (uint j = 0; j < uN; j++)                                                    \
             if (wNk == 0u)                                                                          \
-                coopMatLoad(b[j], bufferW, (wRow0 + (kb)) * ldnW + (n0 + j * TN), ldnW, gl_CooperativeMatrixLayoutRowMajor); \
+                coopMatLoad(b[j], bW, (wRow0 + (kb)) * ldnW + (n0 + j * TN), ldnW, gl_CooperativeMatrixLayoutRowMajor); \
             else                                                                                    \
-                coopMatLoad(b[j], bufferW, (wRow0 + n0 + j * TN) * ldnW + (kb), ldnW, gl_CooperativeMatrixLayoutColumnMajor); \
+                coopMatLoad(b[j], bW, (wRow0 + n0 + j * TN) * ldnW + (kb), ldnW, gl_CooperativeMatrixLayoutColumnMajor); \
         MAT_A a[uM];                                                                                \
         [[unroll]] for (uint i = 0; i < uM; i++)                                                    \
-            coopMatLoad(a[i], bufferI, (iRow0 + m0 + i * TM) * ldkI + (kb), ldkI, gl_CooperativeMatrixLayoutRowMajor); \
+            coopMatLoad(a[i], bI, (iRow0 + m0 + i * TM) * ldkI + (kb), ldkI, gl_CooperativeMatrixLayoutRowMajor); \
         [[unroll]] for (uint j = 0; j < uN; j++)                                                    \
             [[unroll]] for (uint i = 0; i < uM; i++)                                                \
                 if (accF16 == 0u) acc[i * uN + j] = coopMatMulAdd(a[i], b[j], acc[i * uN + j]);     \
@@ -220,22 +220,22 @@ void main()
                 const uint r = sg + q * NSG;
                 MAT_A pfm;
                 if (r < PF_A && skew == 0u)
-                    coopMatLoad(pfm, bufferI, (iRow0 + wgM0 + (r / PF_K) * 32u) * ldkI + kBegin + t + pf * CHUNK + (r % PF_K) * 32u,
+                    coopMatLoad(pfm, bI, (iRow0 + wgM0 + (r / PF_K) * 32u) * ldkI + kBegin + t + pf * CHUNK + (r % PF_K) * 32u,
                                 ldkI | PF_STRIDE, gl_CooperativeMatrixLayoutRowMajor);
                 else if (r < PF_A)
                 {
                     const uint g = r / (PF_RM * PF_K), rr = r % (PF_RM * PF_K);
                     const uint row = (rr / PF_K) * 32u;
-                    coopMatLoad(pfm, bufferI, (iRow0 + wgM0 + g * SG_TILE_M + row) * ldkI
+                    coopMatLoad(pfm, bI, (iRow0 + wgM0 + g * SG_TILE_M + row) * ldkI
                                 + K_AT(t + pf * CHUNK, g) + (rr % PF_K) * 32u,
                                 ldkI | PF_STRIDE, gl_CooperativeMatrixLayoutRowMajor);
                 }
                 else if (r < PF_A + PF_B && wNk == 0u)
-                    coopMatLoad(pfm, bufferW, (wRow0 + K_AT(t + pf * CHUNK, gLead) + ((r - PF_A) % PF_K) * 32u) * ldnW
+                    coopMatLoad(pfm, bW, (wRow0 + K_AT(t + pf * CHUNK, gLead) + ((r - PF_A) % PF_K) * 32u) * ldnW
                                 + wgN0 + ((r - PF_A) / PF_K) * 32u,
                                 ldnW | PF_STRIDE, gl_CooperativeMatrixLayoutRowMajor);
                 else if (r < PF_A + PF_B)
-                    coopMatLoad(pfm, bufferW, (wRow0 + wgN0 + ((r - PF_A) / PF_K) * 32u) * ldnW
+                    coopMatLoad(pfm, bW, (wRow0 + wgN0 + ((r - PF_A) / PF_K) * 32u) * ldnW
                                 + K_AT(t + pf * CHUNK, gLead) + ((r - PF_A) % PF_K) * 32u,
                                 ldnW | PF_STRIDE, gl_CooperativeMatrixLayoutRowMajor);
                 if (M == 0xFFFFFFFFu)   // never: keeps the request alive
@@ -284,7 +284,7 @@ void main()
                     writeO((oPerm == 0u) ? zOff + m * N + n
                                          : (((oG / oHkv) * oTq + m % oTq) * oHq + (oG % oHkv) * (oHq / oHkv) + oH0 + m / oTq) * N + n,
                            (oScale == 0u) ? linearStore(m * N + n, ACC(i * uN + j, r))   // the identity unless Linear's epilogue is on
-                                          : ACC(i * uN + j, r) * bufferL[gl_WorkGroupID.z * M + m]);
+                                          : ACC(i * uN + j, r) * bL[gl_WorkGroupID.z * M + m]);
             }
         }
 }

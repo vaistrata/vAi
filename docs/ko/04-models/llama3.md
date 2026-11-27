@@ -93,7 +93,7 @@ input - projV - splitV         - perV         - "V"/attn - mergeOut - projOut;
 
 `projOut`이 `acceptResidual = true`라 블록의 잔차를 `residual`로 받아 투영 결과에 더합니다.
 
-`Rope`는 KV 캐시 토큰 카운터를 공유해서, decode 스텝에서도 이번 forward 안의 오프셋이 아니라 누적 절대 위치로 회전합니다.
+모델은 이번 입력의 첫 토큰 위치를 `Rope::setStartPos()`로 연결합니다. RoPE는 이 시작 위치에 입력 안의 토큰 인덱스를 더해 회전 위치를 구합니다.
 
 #### GatedFeedForward
 

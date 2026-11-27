@@ -19,6 +19,10 @@ using namespace vai;
 namespace llama3 = model::production::llama3;
 
 
+/////////////////////////////////////////////////////////////////////////////////////////
+// Tag nodes for profiling — group by kernel shape, so identical-shape ops across
+// a tower collapse to one row per distinct kernel.
+/////////////////////////////////////////////////////////////////////////////////////////
 void setProfileTags(llama3::Net& net)
 {
     const auto& trf = net.modelCfg.trf;

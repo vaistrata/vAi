@@ -23,15 +23,15 @@ layout(local_size_x = 16, local_size_y = 1, local_size_z = 1) in;
 layout(constant_id = 0) const uint kvCaching = 1;   // 0: the cache and counter bindings are null
 layout(constant_id = 1) const uint padQ = 0;        // 1: Q and K are copied into Qp and Kp
 
-layout(set = 0, binding = 0) writeonly buffer KP_BUF { f16vec4 bufferKp[]; };
-layout(set = 0, binding = 1) writeonly buffer VP_BUF { f16vec4 bufferVp[]; };
-layout(set = 0, binding = 2) readonly buffer K_BUF { f16vec4 bufferK[]; };
-layout(set = 0, binding = 3) readonly buffer V_BUF { f16vec4 bufferV[]; };
-layout(set = 0, binding = 4) buffer KCACHE_BUF { f16vec4 bufferKCache[]; };
-layout(set = 0, binding = 5) buffer VCACHE_BUF { f16vec4 bufferVCache[]; };
+layout(set = 0, binding = 0) writeonly buffer KP_BUF { f16vec4 bKp[]; };
+layout(set = 0, binding = 1) writeonly buffer VP_BUF { f16vec4 bVp[]; };
+layout(set = 0, binding = 2) readonly buffer K_BUF { f16vec4 bK[]; };
+layout(set = 0, binding = 3) readonly buffer V_BUF { f16vec4 bV[]; };
+layout(set = 0, binding = 4) buffer KCACHE_BUF { f16vec4 bKCache[]; };
+layout(set = 0, binding = 5) buffer VCACHE_BUF { f16vec4 bVCache[]; };
 layout(set = 0, binding = 6) uniform UB { uint kvCacheCount; };
-layout(set = 0, binding = 7) writeonly buffer QP_BUF { f16vec4 bufferQp[]; };
-layout(set = 0, binding = 8) readonly buffer Q_BUF { f16vec4 bufferQ[]; };
+layout(set = 0, binding = 7) writeonly buffer QP_BUF { f16vec4 bQp[]; };
+layout(set = 0, binding = 8) readonly buffer Q_BUF { f16vec4 bQ[]; };
 
 // Every count is in quads (4 elements).
 layout(push_constant) uniform PushConstants {
@@ -50,7 +50,7 @@ void main()
     if (d >= Dh16q) return;
 
     if (padQ != 0u && r < R)
-        bufferQp[(g * R + r) * Dh16q + d] = (d < Dh4) ? bufferQ[(g * R + r) * Dh4 + d] : f16vec4(0.0);
+        bQp[(g * R + r) * Dh16q + d] = (d < Dh4) ? bQ[(g * R + r) * Dh4 + d] : f16vec4(0.0);
     if (r >= rows) return;
 
     const uint cached = (kvCaching != 0u) ? kvCacheCount : 0u;
@@ -58,20 +58,20 @@ void main()
     if (d < Dh4 && r < cached)
     {
         if (padQ != 0u)
-            k = bufferKCache[(g * Tmax + r) * Dh4 + d];
-        v = bufferVCache[(g * Tmax + r) * Dh4 + d];
+            k = bKCache[(g * Tmax + r) * Dh4 + d];
+        v = bVCache[(g * Tmax + r) * Dh4 + d];
     }
     else if (d < Dh4 && r < cached + Tkv)
     {
-        k = bufferK[(g * Tkv + r - cached) * Dh4 + d];
-        v = bufferV[(g * Tkv + r - cached) * Dh4 + d];
+        k = bK[(g * Tkv + r - cached) * Dh4 + d];
+        v = bV[(g * Tkv + r - cached) * Dh4 + d];
         if (kvCaching != 0u)
         {
-            bufferKCache[(g * Tmax + r) * Dh4 + d] = k;
-            bufferVCache[(g * Tmax + r) * Dh4 + d] = v;
+            bKCache[(g * Tmax + r) * Dh4 + d] = k;
+            bVCache[(g * Tmax + r) * Dh4 + d] = v;
         }
     }
     if (padQ != 0u)
-        bufferKp[(g * rows + r) * Dh16q + d] = k;
-    bufferVp[(g * rows + r) * ldv4 + d] = v;
+        bKp[(g * rows + r) * Dh16q + d] = k;
+    bVp[(g * rows + r) * ldv4 + d] = v;
 }

@@ -18,6 +18,10 @@ using namespace vai;
 namespace gpt2 = model::production::gpt2;
 
 
+/////////////////////////////////////////////////////////////////////////////////////////
+// Tag nodes for profiling — group by kernel shape, so identical-shape ops across
+// a tower collapse to one row per distinct kernel.
+/////////////////////////////////////////////////////////////////////////////////////////
 void setProfileTags(gpt2::Net& net)
 {
     const uint32_t D = net.modelCfg.trf.embedDim;

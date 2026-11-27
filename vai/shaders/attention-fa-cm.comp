@@ -97,29 +97,29 @@ layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0;  // O (output) dtype
 // All indices below are in vec4 units (Dh % 4 == 0 is host-guaranteed).
 // Memory qualifiers: same split as the scalar kernel (readonly sweep aliases,
 // writeonly append aliases) — see the note there.
-layout(set = 0, binding = 0) writeonly buffer O_BUF_F32 { vec4 bufferO_f32[]; };   // attention O [B, Tq, Hq, Dh]
-layout(set = 0, binding = 0) writeonly buffer O_BUF_F16 { f16vec4 bufferO_f16[]; };
+layout(set = 0, binding = 0) writeonly buffer O_BUF_F32 { vec4 bO_f32[]; };   // attention O [B, Tq, Hq, Dh]
+layout(set = 0, binding = 0) writeonly buffer O_BUF_F16 { f16vec4 bO_f16[]; };
 //////////////////////////////////////////////////////////////////////////////
-layout(set = 0, binding = 1) readonly buffer Q_BUF_F32 { vec4 bufferQ_f32[]; };   // query Q [B, Hq, Tq, Dh]
-layout(set = 0, binding = 1) readonly buffer Q_BUF_F16 { f16vec4 bufferQ_f16[]; };
-layout(set = 0, binding = 2) readonly buffer K_BUF_F32 { vec4 bufferK_f32[]; };   // key   K [B, Hkv, Tkv, Dh] (new tokens)
-layout(set = 0, binding = 2) readonly buffer K_BUF_F16 { f16vec4 bufferK_f16[]; };
-layout(set = 0, binding = 3) readonly buffer V_BUF_F32 { vec4 bufferV_f32[]; };   // value V [B, Hkv, Tkv, Dh] (new tokens)
-layout(set = 0, binding = 3) readonly buffer V_BUF_F16 { f16vec4 bufferV_f16[]; };
+layout(set = 0, binding = 1) readonly buffer Q_BUF_F32 { vec4 bQ_f32[]; };   // query Q [B, Hq, Tq, Dh]
+layout(set = 0, binding = 1) readonly buffer Q_BUF_F16 { f16vec4 bQ_f16[]; };
+layout(set = 0, binding = 2) readonly buffer K_BUF_F32 { vec4 bK_f32[]; };   // key   K [B, Hkv, Tkv, Dh] (new tokens)
+layout(set = 0, binding = 2) readonly buffer K_BUF_F16 { f16vec4 bK_f16[]; };
+layout(set = 0, binding = 3) readonly buffer V_BUF_F32 { vec4 bV_f32[]; };   // value V [B, Hkv, Tkv, Dh] (new tokens)
+layout(set = 0, binding = 3) readonly buffer V_BUF_F16 { f16vec4 bV_f16[]; };
 //////////////////////////////////////////////////////////////////////////////
-layout(set = 0, binding = 4) readonly buffer KCACHE_BUF_F32 { vec4 bufferKCache_f32[]; };   // K cache [B, Hkv, Tmax, Dh]
-layout(set = 0, binding = 4) readonly buffer KCACHE_BUF_F16 { f16vec4 bufferKCache_f16[]; };
-layout(set = 0, binding = 4) writeonly buffer KCACHE_W_F32  { vec4 bufferKCacheW_f32[]; };
-layout(set = 0, binding = 4) writeonly buffer KCACHE_W_F16  { f16vec4 bufferKCacheW_f16[]; };
-layout(set = 0, binding = 5) readonly buffer VCACHE_BUF_F32 { vec4 bufferVCache_f32[]; };   // V cache [B, Hkv, Tmax, Dh]
-layout(set = 0, binding = 5) readonly buffer VCACHE_BUF_F16 { f16vec4 bufferVCache_f16[]; };
-layout(set = 0, binding = 5) writeonly buffer VCACHE_W_F32  { vec4 bufferVCacheW_f32[]; };
-layout(set = 0, binding = 5) writeonly buffer VCACHE_W_F16  { f16vec4 bufferVCacheW_f16[]; };
+layout(set = 0, binding = 4) readonly buffer KCACHE_BUF_F32 { vec4 bKCache_f32[]; };   // K cache [B, Hkv, Tmax, Dh]
+layout(set = 0, binding = 4) readonly buffer KCACHE_BUF_F16 { f16vec4 bKCache_f16[]; };
+layout(set = 0, binding = 4) writeonly buffer KCACHE_W_F32  { vec4 bKCacheW_f32[]; };
+layout(set = 0, binding = 4) writeonly buffer KCACHE_W_F16  { f16vec4 bKCacheW_f16[]; };
+layout(set = 0, binding = 5) readonly buffer VCACHE_BUF_F32 { vec4 bVCache_f32[]; };   // V cache [B, Hkv, Tmax, Dh]
+layout(set = 0, binding = 5) readonly buffer VCACHE_BUF_F16 { f16vec4 bVCache_f16[]; };
+layout(set = 0, binding = 5) writeonly buffer VCACHE_W_F32  { vec4 bVCacheW_f32[]; };
+layout(set = 0, binding = 5) writeonly buffer VCACHE_W_F16  { f16vec4 bVCacheW_f16[]; };
 // 16-byte views of the f16 K/V sources (kvWideLoads).
-layout(set = 0, binding = 2) readonly buffer K_BUF_U4      { uvec4 bufferK_u4[]; };
-layout(set = 0, binding = 3) readonly buffer V_BUF_U4      { uvec4 bufferV_u4[]; };
-layout(set = 0, binding = 4) readonly buffer KCACHE_BUF_U4 { uvec4 bufferKCache_u4[]; };
-layout(set = 0, binding = 5) readonly buffer VCACHE_BUF_U4 { uvec4 bufferVCache_u4[]; };
+layout(set = 0, binding = 2) readonly buffer K_BUF_U4      { uvec4 bK_u4[]; };
+layout(set = 0, binding = 3) readonly buffer V_BUF_U4      { uvec4 bV_u4[]; };
+layout(set = 0, binding = 4) readonly buffer KCACHE_BUF_U4 { uvec4 bKCache_u4[]; };
+layout(set = 0, binding = 5) readonly buffer VCACHE_BUF_U4 { uvec4 bVCache_u4[]; };
 //////////////////////////////////////////////////////////////////////////////
 layout(set = 0, binding = 6) uniform UB { uint kvCacheCount; };
 //////////////////////////////////////////////////////////////////////////////
@@ -171,17 +171,17 @@ uint spanOrigin(uint t)
     return keyStart(keyPos(t)) & ~(wgKv - 1u);
 }
 
-vec4 readQ4(uint i) { return (typeI == DTYPE_F32) ? bufferQ_f32[i] : vec4(bufferQ_f16[i]); }
+vec4 readQ4(uint i) { return (typeI == DTYPE_F32) ? bQ_f32[i] : vec4(bQ_f16[i]); }
 // Direct-to-f16 staging readers: f16 sources copy without a f32 roundtrip.
-f16vec4 readK4h(uint i) { return (typeKV == DTYPE_F32) ? f16vec4(bufferK_f32[i]) : bufferK_f16[i]; }
-f16vec4 readV4h(uint i) { return (typeKV == DTYPE_F32) ? f16vec4(bufferV_f32[i]) : bufferV_f16[i]; }
-f16vec4 readKCache4h(uint i) { return (typeCache == DTYPE_F32) ? f16vec4(bufferKCache_f32[i]) : bufferKCache_f16[i]; }
-f16vec4 readVCache4h(uint i) { return (typeCache == DTYPE_F32) ? f16vec4(bufferVCache_f32[i]) : bufferVCache_f16[i]; }
-vec4 readK4(uint i) { return (typeKV == DTYPE_F32) ? bufferK_f32[i] : vec4(bufferK_f16[i]); }
-vec4 readV4(uint i) { return (typeKV == DTYPE_F32) ? bufferV_f32[i] : vec4(bufferV_f16[i]); }
-void writeO4(uint i, vec4 v) { if (typeO == DTYPE_F32) bufferO_f32[i] = v; else bufferO_f16[i] = f16vec4(v); }
-void writeKCache4(uint i, vec4 v) { if (typeCache == DTYPE_F32) bufferKCacheW_f32[i] = v; else bufferKCacheW_f16[i] = f16vec4(v); }
-void writeVCache4(uint i, vec4 v) { if (typeCache == DTYPE_F32) bufferVCacheW_f32[i] = v; else bufferVCacheW_f16[i] = f16vec4(v); }
+f16vec4 readK4h(uint i) { return (typeKV == DTYPE_F32) ? f16vec4(bK_f32[i]) : bK_f16[i]; }
+f16vec4 readV4h(uint i) { return (typeKV == DTYPE_F32) ? f16vec4(bV_f32[i]) : bV_f16[i]; }
+f16vec4 readKCache4h(uint i) { return (typeCache == DTYPE_F32) ? f16vec4(bKCache_f32[i]) : bKCache_f16[i]; }
+f16vec4 readVCache4h(uint i) { return (typeCache == DTYPE_F32) ? f16vec4(bVCache_f32[i]) : bVCache_f16[i]; }
+vec4 readK4(uint i) { return (typeKV == DTYPE_F32) ? bK_f32[i] : vec4(bK_f16[i]); }
+vec4 readV4(uint i) { return (typeKV == DTYPE_F32) ? bV_f32[i] : vec4(bV_f16[i]); }
+void writeO4(uint i, vec4 v) { if (typeO == DTYPE_F32) bO_f32[i] = v; else bO_f16[i] = f16vec4(v); }
+void writeKCache4(uint i, vec4 v) { if (typeCache == DTYPE_F32) bKCacheW_f32[i] = v; else bKCacheW_f16[i] = f16vec4(v); }
+void writeVCache4(uint i, vec4 v) { if (typeCache == DTYPE_F32) bVCacheW_f32[i] = v; else bVCacheW_f16[i] = f16vec4(v); }
 
 const uint MAT           = 16u;                               // cooperative-matrix dimension (16x16x16)
 const uint NUM_SG        = wgSize / sgSize;                   // = rowGroups = 4
@@ -258,16 +258,16 @@ shared f16vec4 s_p[wgKv * P_STRIDE];        // P^T = exp2(S * log2(e) - m) excha
 coopmat<float16_t, gl_ScopeSubgroup, MAT, MAT, gl_MatrixUseA> loadKDirect(bool fromCache, uint off)
 {
     coopmat<float16_t, gl_ScopeSubgroup, MAT, MAT, gl_MatrixUseA> A;
-    if (fromCache) coopMatLoad(A, bufferKCache_f16, off, DH4, gl_CooperativeMatrixLayoutRowMajor);
-    else           coopMatLoad(A, bufferK_f16,      off, DH4, gl_CooperativeMatrixLayoutRowMajor);
+    if (fromCache) coopMatLoad(A, bKCache_f16, off, DH4, gl_CooperativeMatrixLayoutRowMajor);
+    else           coopMatLoad(A, bK_f16,      off, DH4, gl_CooperativeMatrixLayoutRowMajor);
     return A;
 }
 
 coopmat<float16_t, gl_ScopeSubgroup, MAT, MAT, gl_MatrixUseB> loadVDirect(bool fromCache, uint off)
 {
     coopmat<float16_t, gl_ScopeSubgroup, MAT, MAT, gl_MatrixUseB> B;
-    if (fromCache) coopMatLoad(B, bufferVCache_f16, off, DH4, gl_CooperativeMatrixLayoutRowMajor);
-    else           coopMatLoad(B, bufferV_f16,      off, DH4, gl_CooperativeMatrixLayoutRowMajor);
+    if (fromCache) coopMatLoad(B, bVCache_f16, off, DH4, gl_CooperativeMatrixLayoutRowMajor);
+    else           coopMatLoad(B, bV_f16,      off, DH4, gl_CooperativeMatrixLayoutRowMajor);
     return B;
 }
 
@@ -366,7 +366,7 @@ void loadWide(uint which, uint base, uint tid, uint rows, out uvec4 r[WIDE_PER_T
         {
             uint c = idx / (DH4_PART / 2u), dp = 2u * (idx % (DH4_PART / 2u));
             uint i = (base + min(c, rows - 1u) * DH4 + dp) / 2u;
-            r[n] = (which == 2u) ? bufferVCache_u4[i] : bufferV_u4[i];
+            r[n] = (which == 2u) ? bVCache_u4[i] : bV_u4[i];
         }
     }
 }
@@ -393,8 +393,8 @@ void stageWide(uint which, uint base, uint p, uint tid, uint rows)
         {
             uint c = idx / (DH4_PART / 2u), dp = 2u * (idx % (DH4_PART / 2u)), d = p * DH4_PART + dp;
             uint i = (base + min(c, rows - 1u) * DH4 + d) / 2u;
-            uvec4 u = (which == 0u) ? bufferKCache_u4[i] : (which == 1u) ? bufferK_u4[i]
-                    : (which == 2u) ? bufferVCache_u4[i] : bufferV_u4[i];
+            uvec4 u = (which == 0u) ? bKCache_u4[i] : (which == 1u) ? bK_u4[i]
+                    : (which == 2u) ? bVCache_u4[i] : bV_u4[i];
             s_kv[c * KV_STRIDE + dp]      = halfLo(u);
             s_kv[c * KV_STRIDE + dp + 1u] = halfHi(u);
         }

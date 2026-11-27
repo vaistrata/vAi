@@ -9,12 +9,12 @@
 #version 450
 layout(local_size_x = 64) in;
 
-layout(set = 0, binding = 0) writeonly buffer LOC_BUF_F32 { vec2 bufferLoc_f32[]; };
-layout(set = 0, binding = 1) writeonly buffer PROB_BUF_F32 { float bufferProb_f32[]; };
-layout(set = 0, binding = 2) readonly buffer REF_BUF_F32 { float bufferRef_f32[]; };
-layout(set = 0, binding = 3) readonly buffer OFF_BUF_F32 { vec2 bufferOff_f32[]; };
-layout(set = 0, binding = 4) readonly buffer LOGIT_BUF_F32 { float bufferLogit_f32[]; };
-layout(set = 0, binding = 5) readonly buffer META_BUF_U32 { uint bufferMeta_u32[]; };
+layout(set = 0, binding = 0) writeonly buffer LOC_BUF_F32 { vec2 bLoc_f32[]; };
+layout(set = 0, binding = 1) writeonly buffer PROB_BUF_F32 { float bProb_f32[]; };
+layout(set = 0, binding = 2) readonly buffer REF_BUF_F32 { float bRef_f32[]; };
+layout(set = 0, binding = 3) readonly buffer OFF_BUF_F32 { vec2 bOff_f32[]; };
+layout(set = 0, binding = 4) readonly buffer LOGIT_BUF_F32 { float bLogit_f32[]; };
+layout(set = 0, binding = 5) readonly buffer META_BUF_U32 { uint bMeta_u32[]; };
 
 layout(push_constant) uniform PushConstants {
     uint rows;
@@ -34,26 +34,26 @@ void main()
     if (row >= rows) return;
     uint start = row * points;
     float maxLogit = -3.402823466e38;
-    for (uint p = 0; p < points; ++p) maxLogit = max(maxLogit, bufferLogit_f32[start + p]);
+    for (uint p = 0; p < points; ++p) maxLogit = max(maxLogit, bLogit_f32[start + p]);
     float denominator = 0.0;
-    for (uint p = 0; p < points; ++p) denominator += exp(bufferLogit_f32[start + p] - maxLogit);
+    for (uint p = 0; p < points; ++p) denominator += exp(bLogit_f32[start + p] - maxLogit);
 
     uint pointStart = 0;
     for (uint l = 0; l < levels; ++l) {
-        uint count = bufferMeta_u32[l * 3 + 2];
+        uint count = bMeta_u32[l * 3 + 2];
         uint ref = ((row / heads) * refLevels + (refLevels == 1 ? 0 : l)) * refDims;
-        vec2 center = vec2(bufferRef_f32[ref], bufferRef_f32[ref + 1]);
+        vec2 center = vec2(bRef_f32[ref], bRef_f32[ref + 1]);
         for (uint p = 0; p < count; ++p) {
             uint index = start + pointStart + p;
             if (refDims == 2) {
-                vec2 wh = vec2(bufferMeta_u32[l * 3 + 1], bufferMeta_u32[l * 3]);
-                bufferLoc_f32[index] = center + bufferOff_f32[index] / wh;
+                vec2 wh = vec2(bMeta_u32[l * 3 + 1], bMeta_u32[l * 3]);
+                bLoc_f32[index] = center + bOff_f32[index] / wh;
             } else {
-                vec2 wh = vec2(bufferRef_f32[ref + 2], bufferRef_f32[ref + 3]);
+                vec2 wh = vec2(bRef_f32[ref + 2], bRef_f32[ref + 3]);
                 // Preserve RT-DETRv2's FP32 arithmetic order for box references.
-                bufferLoc_f32[index] = center + bufferOff_f32[index] * (1.0 / float(count)) * wh * scale;
+                bLoc_f32[index] = center + bOff_f32[index] * (1.0 / float(count)) * wh * scale;
             }
-            bufferProb_f32[index] = exp(bufferLogit_f32[index] - maxLogit) / denominator;
+            bProb_f32[index] = exp(bLogit_f32[index] - maxLogit) / denominator;
         }
         pointStart += count;
     }

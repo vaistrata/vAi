@@ -261,10 +261,6 @@ public:
     // when unpacked (the Intel kernel packs on its own and ignores it).
     static uint32_t gqaRatioOf(const PipeParamsFA& t) { return !t.intel && t.tileHeads > 1u ? t.tileHeads : 0u; }
 
-    // Whether K / V may come in a dtype of their own (kvDtype); Intel's kernels, kept as verified there, read
-    // them in Q's dtype.
-    static bool allowsDifferentKvDtype(eva::Device device) { return device.vendorID() != eva::VENDOR_ID::INTEL; }
-
     // Test / bench only: which path prepare() selected.
     bool usingFa() const { return useFa; }
     bool usingCm() const { return useFa && pipeParamsFA.coopmat; }
@@ -1049,9 +1045,9 @@ inline void Attention::prepare()
     const Dtype iDtype = Q.dtype();
     // Intel keeps the tuning it was verified with, and its coopmat tiles the kernel too (attention-fa-cm-intel).
     const bool intelKernels = device().vendorID() == eva::VENDOR_ID::INTEL;
-    // K / V take their own dtype where supported (a net feeds them in the cache's), else Q's; without them
-    // the cache's only keys the pipeline.
-    const Dtype kvDtype = !allowsDifferentKvDtype(device()) ? iDtype : hasKv ? K.dtype() : config_.kvCacheDtype;
+    // K / V keep their own dtype, but Intel's kernels read them in Q's; without them the cache's only keys
+    // the pipeline.
+    const Dtype kvDtype = intelKernels ? iDtype : hasKv ? K.dtype() : config_.kvCacheDtype;
     VAI_ASSERT(!hasKv || (K.dtype() == kvDtype && V.dtype() == kvDtype));
 
     B = batchSize(Q, config_.numQHeads);

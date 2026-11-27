@@ -10,7 +10,7 @@ namespace vai::node {
   Input:  in0  [d0, .., d(r-1)]   (rank >= 2)
   Output: out0 the same shape with d(axis) replaced by count
 
-  A negative start counts from the end, with -1 selecting the last index.
+  A negative axis or start counts from the end, with -1 selecting the last.
 
   What the axes ahead of the cut multiply to decides the cost, not the axis number.
   At 1 the run is one contiguous block, so out0 aliases it when the offset satisfies
@@ -21,8 +21,9 @@ namespace vai::node {
 =============================================================================*/
 class Slice : public Node
 {
-    eva::ComputePipeline pipe;      // strided path only (axis > 0, outer > 1)
+    eva::ComputePipeline pipe;   // strided path only (outer > 1)
     eva::DescriptorSet descSet;
+    uint32_t axisIdx = 0;   // resolved (non-negative) axis, set in prepare()
     uint32_t startIdx = 0;  // resolved (non-negative) start, set in prepare()
     uint32_t outer = 0;     // elements ahead of the sliced axis, flattened
     uint32_t inner = 0;     // elements behind it, flattened
@@ -37,7 +38,7 @@ public:
     };
 
     struct Config {
-        uint32_t axis = 0;      // the axis to cut; 0 takes a contiguous block
+        int axis = 0;           // the axis to cut; negative counts from the end
         int64_t  start;         // first index on the axis; negative counts from the end
         uint32_t count = 1;     // how many consecutive indices to take
     } config_;
@@ -68,8 +69,13 @@ inline void Slice::prepare()
     const Dtype iDtype = inTen.dtype();
 
     const std::vector<uint32_t>& shape = inTen.shape();
-    VAI_ASSERT(shape.size() >= 2 && config_.axis < shape.size());
-    axisSize = shape[config_.axis];
+    VAI_ASSERT(shape.size() >= 2);
+    int axis = config_.axis;
+    if (axis < 0)
+        axis += int(shape.size());
+    VAI_ASSERT(axis >= 0 && axis < int(shape.size()));
+    axisIdx = uint32_t(axis);
+    axisSize = shape[axisIdx];
 
     int64_t start = config_.start;
     if (start < 0)
@@ -86,11 +92,11 @@ inline void Slice::prepare()
     }
 
     std::vector<uint32_t> outShape = shape;
-    outShape[config_.axis] = config_.count;
+    outShape[axisIdx] = config_.count;
 
-    outer = outerSize(shape, shape.size() - config_.axis);
+    outer = outerSize(shape, shape.size() - axisIdx);
     inner = 1;
-    for (size_t i = size_t(config_.axis) + 1; i < shape.size(); ++i)
+    for (size_t i = size_t(axisIdx) + 1; i < shape.size(); ++i)
         inner *= shape[i];
 
     // Only a run with whole blocks ahead of it is strided; outer == 1 leaves the

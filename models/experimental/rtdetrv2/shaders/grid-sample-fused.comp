@@ -14,12 +14,12 @@
 layout(local_size_x = 64) in;
 layout(constant_id = SPEC_ID_TYPE_I) const uint typeI = 0;
 
-layout(set = 0, binding = 0) writeonly buffer O_BUF_F32 { float bufferO_f32[]; };
-layout(set = 0, binding = 1) readonly buffer V_BUF_F32 { float bufferV_f32[]; };
-layout(set = 0, binding = 1) readonly buffer V_BUF_F16 { float16_t bufferV_f16[]; };
-layout(set = 0, binding = 2) readonly buffer LOC_BUF_F32 { vec2 bufferLoc_f32[]; };
-layout(set = 0, binding = 3) readonly buffer PROB_BUF_F32 { float bufferProb_f32[]; };
-layout(set = 0, binding = 4) readonly buffer LEVEL_BUF_U32 { uint bufferLevel_u32[]; };
+layout(set = 0, binding = 0) writeonly buffer O_BUF_F32 { float bO_f32[]; };
+layout(set = 0, binding = 1) readonly buffer V_BUF_F32 { float bV_f32[]; };
+layout(set = 0, binding = 1) readonly buffer V_BUF_F16 { float16_t bV_f16[]; };
+layout(set = 0, binding = 2) readonly buffer LOC_BUF_F32 { vec2 bLoc_f32[]; };
+layout(set = 0, binding = 3) readonly buffer PROB_BUF_F32 { float bProb_f32[]; };
+layout(set = 0, binding = 4) readonly buffer LEVEL_BUF_U32 { uint bLevel_u32[]; };
 
 layout(push_constant) uniform PushConstants {
     uint count;
@@ -35,7 +35,7 @@ float sampleAt(int x, int y, uint height, uint width, uint base, uint channel)
 {
     if (x < 0 || y < 0 || x >= int(width) || y >= int(height)) return 0.0;
     uint address = (base + uint(y) * width + uint(x)) * (M * D) + channel;
-    return typeI == 0 ? bufferV_f32[address] : float(bufferV_f16[address]);
+    return typeI == 0 ? bV_f32[address] : float(bV_f16[address]);
 }
 
 void main()
@@ -56,15 +56,15 @@ void main()
 
     for (uint l = 0; l < L; ++l)
     {
-        uint height = bufferLevel_u32[l * 5];
-        uint width = bufferLevel_u32[l * 5 + 1];
-        uint base = batch * S + bufferLevel_u32[l * 5 + 2];
-        uint pointStart = bufferLevel_u32[l * 5 + 3];
-        uint pointCount = bufferLevel_u32[l * 5 + 4];
+        uint height = bLevel_u32[l * 5];
+        uint width = bLevel_u32[l * 5 + 1];
+        uint base = batch * S + bLevel_u32[l * 5 + 2];
+        uint pointStart = bLevel_u32[l * 5 + 3];
+        uint pointCount = bLevel_u32[l * 5 + 4];
         for (uint p = 0; p < pointCount; ++p)
         {
             uint sampleIndex = sampleStart + pointStart + p;
-            vec2 xy = bufferLoc_f32[sampleIndex] * vec2(width, height) - 0.5;
+            vec2 xy = bLoc_f32[sampleIndex] * vec2(width, height) - 0.5;
             // A sample just outside an edge can still have an in-bounds neighbor.
             // Reject only when all neighbors are outside; this also prevents
             // float-to-int overflow for very large finite input coordinates.
@@ -79,8 +79,8 @@ void main()
             accumulator += ((1.0 - fraction.x) * (1.0 - fraction.y) * topLeft
                           + fraction.x * (1.0 - fraction.y) * topRight
                           + (1.0 - fraction.x) * fraction.y * bottomLeft
-                          + fraction.x * fraction.y * bottomRight) * bufferProb_f32[sampleIndex];
+                          + fraction.x * fraction.y * bottomRight) * bProb_f32[sampleIndex];
         }
     }
-    bufferO_f32[index] = accumulator;
+    bO_f32[index] = accumulator;
 }

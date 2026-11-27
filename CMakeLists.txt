@@ -76,6 +76,7 @@ add_library(vAi STATIC
     vai/engine/weights.h
     vai/utils/image-processor.h
     vai/utils/tokenizer.h
+    vai/utils/unicode-nfc.h
 
     vai/engine/neural-net.cpp
     vai/engine/safetensors-parser.cpp

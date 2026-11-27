@@ -26,8 +26,8 @@ layout(local_size_x = 256) in;
 layout(constant_id = SPEC_ID_TYPE_I) const uint typeI = 0;  // I (logits) dtype
 
 // Input logits (typeI, same-binding aliases); output holds one raw uint32 index per row.
-layout(set = 0, binding = 0) buffer I_BUF_F32 { float bufferI_f32[]; };
-layout(set = 0, binding = 0) buffer I_BUF_F16 { float16_t bufferI_f16[]; };
+layout(set = 0, binding = 0) buffer I_BUF_F32 { float bI_f32[]; };
+layout(set = 0, binding = 0) buffer I_BUF_F16 { float16_t bI_f16[]; };
 layout(set = 0, binding = 1) buffer OUT_IDX   { uint  outIdx[];  };
 
 layout(push_constant) uniform PushConstants {
@@ -35,7 +35,7 @@ layout(push_constant) uniform PushConstants {
     uint N;
 };
 
-float readI(uint i) { return (typeI == DTYPE_F32) ? bufferI_f32[i] : float(bufferI_f16[i]); }
+float readI(uint i) { return (typeI == DTYPE_F32) ? bI_f32[i] : float(bI_f16[i]); }
 
 shared float sMax[LOCAL];
 shared uint  sIdx[LOCAL];

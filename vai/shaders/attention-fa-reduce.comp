@@ -35,8 +35,8 @@ layout(constant_id = 0) const uint threadsPerRow = 256;     // threads of the on
 layout(constant_id = 2) const uint skipEmptySplits = 0;     // 1: marked idle splits (l < 0) wrote no acc (the FA kernels' skipEmptySplits)
 layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0;  // O (output) dtype
 
-layout(set = 0, binding = 0) buffer O_BUF_F32  { vec4 bufferO_f32[]; };      // attention O [B, Tq, Hq, Dh], vec4 units
-layout(set = 0, binding = 0) buffer O_BUF_F16  { f16vec4 bufferO_f16[]; };
+layout(set = 0, binding = 0) buffer O_BUF_F32  { vec4 bO_f32[]; };      // attention O [B, Tq, Hq, Dh], vec4 units
+layout(set = 0, binding = 0) buffer O_BUF_F16  { f16vec4 bO_f16[]; };
 layout(set = 0, binding = 1) buffer PO_BUF     { vec4 partialO[];  };        // [B*Tq*Hq, kCount, Dh / 4]
 layout(set = 0, binding = 2) buffer PML_BUF    { float partialML[]; };       // [B*Tq*Hq, kCount, (m, l)]
 
@@ -45,7 +45,7 @@ layout(push_constant) uniform PushConstants {
     uint kCount;
 };
 
-void writeO4(uint i, vec4 v) { if (typeO == DTYPE_F32) bufferO_f32[i] = v; else bufferO_f16[i] = f16vec4(v); }
+void writeO4(uint i, vec4 v) { if (typeO == DTYPE_F32) bO_f32[i] = v; else bO_f16[i] = f16vec4(v); }
 
 #define NEG_INF  uintBitsToFloat(0xFF800000u)
 #define FLT_MAX  uintBitsToFloat(0x7F7FFFFFu)

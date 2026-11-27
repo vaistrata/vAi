@@ -55,7 +55,7 @@ struct TransformerBlock;
 /////////////////////////////////////////////////////////////////////////////////////////
 // TransformerBlock<Classic>, TransformerBlock<Default> - pre-norm block, both
 // residuals folded into projections
-// Input: in0 [Tq, embedDim], or [B, Tq, embedDim] with allowBatch
+// Input: in0 [..., Tq, embedDim]
 // Output: out0 the shape of in0, its Tq 1 under sliceLastRow
 //
 // out0 = ffn(norm2(h)) + h,  h = mhAttn(norm1(in0)) + in0
@@ -88,7 +88,6 @@ struct TransformerBlock : public vai::NodeGroup
     struct Config
     {
         TransformerConfig base;
-        bool allowBatch = false;    // a leading batch axis, kept the whole way
         uint32_t kvCacheSize = 0;   // 0 = no cache
         vai::Dtype kvCacheDtype = vai::Dtype::None;
         bool sliceLastRow = false;    // carry only the last row past the attention
@@ -135,17 +134,13 @@ struct TransformerBlock : public vai::NodeGroup
           .kvCacheDtype = config.kvCacheDtype,
           .qkNormEps = config.base.withQkNorm ? config.base.normEps : 0.0f,
           .ropeCfg = config.base.ropeCfg,
-          .allowBatch = config.allowBatch,
           .acceptResidual = true,
       })
     , norm2({ .eps = config.base.normEps })
     , ffn(ffnConfig(config.base))
     {
         if (config.sliceLastRow)
-            lastRow.emplace(vai::node::Slice::Config{
-                .axis = config.allowBatch ? 1u : 0u,
-                .start = -1,
-            });
+            lastRow.emplace(vai::node::Slice::Config{ .axis = -2, .start = -1 });
         if (config.gatingLastOut)
             gate.emplace();
 
@@ -170,7 +165,7 @@ template <> struct FinalNorm<TransformerType::Default> { using Type = vai::node:
 
 /////////////////////////////////////////////////////////////////////////////////////////
 // Transformer - a stack of blocks and the norm that closes it
-// Input:  in0 [T, embedDim], or [B, T, embedDim] with allowBatch
+// Input:  in0 [..., T, embedDim]
 // Output: out0 the shape of in0, its T 1 under sliceLastRow
 /////////////////////////////////////////////////////////////////////////////////////////
 template<
@@ -188,7 +183,6 @@ struct Transformer : public vai::NodeGroup
     struct Config
     {
         TransformerConfig base;
-        bool allowBatch = false;
         uint32_t kvCacheSize = 0;
         vai::Dtype kvCacheDtype = vai::Dtype::None;
         bool sliceLastRow = false;
@@ -207,7 +201,6 @@ struct Transformer : public vai::NodeGroup
             const bool last = i == L - 1;
             blocks.emplace_back(typename Block::Config{
                 .base = config.base,
-                .allowBatch = config.allowBatch,
                 .kvCacheSize = config.kvCacheSize,
                 .kvCacheDtype = config.kvCacheDtype,
                 .sliceLastRow = config.sliceLastRow && last,

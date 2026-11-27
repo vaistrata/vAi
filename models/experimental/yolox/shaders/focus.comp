@@ -34,16 +34,16 @@ layout(constant_id = SPEC_ID_TYPE_P) const uint typeP = DTYPE_F32;
 layout(constant_id = SPEC_ID_HAS_SCALE) const uint hasScale = 1u;
 layout(constant_id = SPEC_ID_HAS_BIAS) const uint hasBias = 1u;
 
-layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_F32 { float bufferO_f32[]; };
-layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_F16 { float16_t bufferO_f16[]; };
-layout(set = 0, binding = 1) restrict readonly buffer I_BUF_F32 { float bufferI_f32[]; };
-layout(set = 0, binding = 1) restrict readonly buffer I_BUF_F16 { float16_t bufferI_f16[]; };
-layout(set = 0, binding = 2) restrict readonly buffer W_BUF_F32 { float bufferW_f32[]; };
-layout(set = 0, binding = 2) restrict readonly buffer W_BUF_F16 { float16_t bufferW_f16[]; };
-layout(set = 0, binding = 3) restrict readonly buffer BIAS_BUF_F32 { float bufferBias_f32[]; };
-layout(set = 0, binding = 3) restrict readonly buffer BIAS_BUF_F16 { float16_t bufferBias_f16[]; };
-layout(set = 0, binding = 4) restrict readonly buffer SCALE_BUF_F32 { float bufferScale_f32[]; };
-layout(set = 0, binding = 4) restrict readonly buffer SCALE_BUF_F16 { float16_t bufferScale_f16[]; };
+layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_F32 { float bO_f32[]; };
+layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_F16 { float16_t bO_f16[]; };
+layout(set = 0, binding = 1) restrict readonly buffer I_BUF_F32 { float bI_f32[]; };
+layout(set = 0, binding = 1) restrict readonly buffer I_BUF_F16 { float16_t bI_f16[]; };
+layout(set = 0, binding = 2) restrict readonly buffer W_BUF_F32 { float bW_f32[]; };
+layout(set = 0, binding = 2) restrict readonly buffer W_BUF_F16 { float16_t bW_f16[]; };
+layout(set = 0, binding = 3) restrict readonly buffer BIAS_BUF_F32 { float bBias_f32[]; };
+layout(set = 0, binding = 3) restrict readonly buffer BIAS_BUF_F16 { float16_t bBias_f16[]; };
+layout(set = 0, binding = 4) restrict readonly buffer SCALE_BUF_F32 { float bScale_f32[]; };
+layout(set = 0, binding = 4) restrict readonly buffer SCALE_BUF_F16 { float16_t bScale_f16[]; };
 
 layout(push_constant) uniform PushConstants {
     uint hi; uint wi; uint ho; uint wo; uint ci; uint co;
@@ -68,21 +68,21 @@ uint outputBase() { return batched ? gl_WorkGroupID.z * pc.co * pc.ho * pc.wo : 
 float readI(uint index)
 {
     index += inputBase();
-    return typeI == DTYPE_F32 ? bufferI_f32[index] : float(bufferI_f16[index]);
+    return typeI == DTYPE_F32 ? bI_f32[index] : float(bI_f16[index]);
 }
-float readW(uint index) { return typeW == DTYPE_F32 ? bufferW_f32[index] : float(bufferW_f16[index]); }
+float readW(uint index) { return typeW == DTYPE_F32 ? bW_f32[index] : float(bW_f16[index]); }
 float readBias(uint channel)
 {
     if (hasBias == 0u) return 0.0;
-    return typeP == DTYPE_F32 ? bufferBias_f32[channel] : float(bufferBias_f16[channel]);
+    return typeP == DTYPE_F32 ? bBias_f32[channel] : float(bBias_f16[channel]);
 }
-float readScale(uint channel) { return typeP == DTYPE_F32 ? bufferScale_f32[channel] : float(bufferScale_f16[channel]); }
+float readScale(uint channel) { return typeP == DTYPE_F32 ? bScale_f32[channel] : float(bScale_f16[channel]); }
 
 void writeO(uint index, float value)
 {
     index += outputBase();
-    if (typeO == DTYPE_F32) bufferO_f32[index] = value;
-    else bufferO_f16[index] = float16_t(value);
+    if (typeO == DTYPE_F32) bO_f32[index] = value;
+    else bO_f16[index] = float16_t(value);
 }
 
 void writeA(uint index, float value)

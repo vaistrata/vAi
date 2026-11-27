@@ -14,10 +14,10 @@
 
 layout(local_size_x = 16, local_size_y = 1, local_size_z = 1) in;
 
-layout(set = 0, binding = 0) readonly buffer K_BUF { f16vec4 bufferK[]; };
-layout(set = 0, binding = 1) readonly buffer V_BUF { f16vec4 bufferV[]; };
-layout(set = 0, binding = 2) writeonly buffer KCACHE_BUF { f16vec4 bufferKCache[]; };
-layout(set = 0, binding = 3) writeonly buffer VCACHE_BUF { f16vec4 bufferVCache[]; };
+layout(set = 0, binding = 0) readonly buffer K_BUF { f16vec4 bK[]; };
+layout(set = 0, binding = 1) readonly buffer V_BUF { f16vec4 bV[]; };
+layout(set = 0, binding = 2) writeonly buffer KCACHE_BUF { f16vec4 bKCache[]; };
+layout(set = 0, binding = 3) writeonly buffer VCACHE_BUF { f16vec4 bVCache[]; };
 layout(set = 0, binding = 4) uniform UB { uint kvCacheCount; };
 
 layout(push_constant) uniform PushConstants {
@@ -34,9 +34,9 @@ void main()
     if (d >= Dh4 || row >= Tmax) return;
     if (r < Tkv)
     {
-        bufferKCache[row * Dh4 + d] = bufferK[r * Dh4 + d];
-        bufferVCache[row * Dh4 + d] = bufferV[r * Dh4 + d];
+        bKCache[row * Dh4 + d] = bK[r * Dh4 + d];
+        bVCache[row * Dh4 + d] = bV[r * Dh4 + d];
     }
     else if (r < Tkv + zeroRows)
-        bufferVCache[row * Dh4 + d] = f16vec4(0.0);
+        bVCache[row * Dh4 + d] = f16vec4(0.0);
 }

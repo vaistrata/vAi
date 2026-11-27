@@ -1,36 +1,50 @@
 /*=============================================================================
  index-copy.comp:
-     O[o, index[n], i] = S[o, n, i]   (slices scattered along one axis, in place)
+     O[o, index[n], i]  = S[o, n, i]   (accumulate == false: slices scattered along one axis)
+     O[o, index[n], i] += S[o, n, i]   (accumulate == true)
 
  The axis splits both tensors into outer (the axes ahead of it), the axis, and
  inner (the axes behind it). Only the source rows move; the rest of O stays.
 
- - Scatter (not gather): each thread owns one source word, so only the N slices
+ - Scatter (not gather): each thread owns vecElems source elements, so only the N slices
    are touched, and an index past axisSize skips its row.
- - Bytes move as they are, vecWords 4-byte words per thread (uvec4, uvec2 or
-   uint aliases of one binding), the widest that divides a row.
- - Dispatch (host): dispatch2(rowWords, rows), x across a row, y one source row.
+ - vecElems elements per thread (vec4, vec2 or scalar aliases of each dtype),
+   the widest that divides a row, converted when typeO != typeI.
+ - Accumulating runs in O's dtype. Its indices must be distinct: two threads adding
+   to one element would race.
+ - Dispatch (host): dispatch2(rowUnits, rows), x across a row, y one source row.
 =============================================================================*/
 #version 450
 #extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 #include "common/spec_constants.h"
 
 layout(local_size_x = 64) in;
 
-layout(constant_id = 0) const uint vecWords = 4;            // 4-byte words per thread
+layout(constant_id = 0) const uint vecElems = 4;            // elements per thread
+layout(constant_id = 1) const bool accumulate = false;      // add S into O instead of writing it
+layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0;  // O (in place) dtype
+layout(constant_id = SPEC_ID_TYPE_I) const uint typeI = 0;  // S (source) dtype
 
-layout(set = 0, binding = 0) buffer O_BUF_V4 { uvec4 bufferO_v4[]; };   // O [outer, axisSize, inner]
-layout(set = 0, binding = 0) buffer O_BUF_V2 { uvec2 bufferO_v2[]; };
-layout(set = 0, binding = 0) buffer O_BUF_V1 { uint  bufferO_v1[]; };
+layout(set = 0, binding = 0) buffer O_BUF_F32_V4 { vec4  bO_f32_v4[]; };   // O [outer, axisSize, inner]
+layout(set = 0, binding = 0) buffer O_BUF_F32_V2 { vec2  bO_f32_v2[]; };
+layout(set = 0, binding = 0) buffer O_BUF_F32_V1 { float bO_f32_v1[]; };
+layout(set = 0, binding = 0) buffer O_BUF_F16_V4 { f16vec4   bO_f16_v4[]; };
+layout(set = 0, binding = 0) buffer O_BUF_F16_V2 { f16vec2   bO_f16_v2[]; };
+layout(set = 0, binding = 0) buffer O_BUF_F16_V1 { float16_t bO_f16_v1[]; };
 //////////////////////////////////////////////////////////////////////////////
-layout(set = 0, binding = 1) readonly buffer S_BUF_V4 { uvec4 bufferS_v4[]; };   // source S [outer, count, inner]
-layout(set = 0, binding = 1) readonly buffer S_BUF_V2 { uvec2 bufferS_v2[]; };
-layout(set = 0, binding = 1) readonly buffer S_BUF_V1 { uint  bufferS_v1[]; };
+layout(set = 0, binding = 1) readonly buffer S_BUF_F32_V4 { vec4  bS_f32_v4[]; };   // source S [outer, count, inner]
+layout(set = 0, binding = 1) readonly buffer S_BUF_F32_V2 { vec2  bS_f32_v2[]; };
+layout(set = 0, binding = 1) readonly buffer S_BUF_F32_V1 { float bS_f32_v1[]; };
+layout(set = 0, binding = 1) readonly buffer S_BUF_F16_V4 { f16vec4   bS_f16_v4[]; };
+layout(set = 0, binding = 1) readonly buffer S_BUF_F16_V2 { f16vec2   bS_f16_v2[]; };
+layout(set = 0, binding = 1) readonly buffer S_BUF_F16_V1 { float16_t bS_f16_v1[]; };
 //////////////////////////////////////////////////////////////////////////////
 layout(set = 0, binding = 2) readonly buffer INDEX_BUF { uint index[]; };       // [count]
 
 layout(push_constant) uniform PushConstants {
-    uint rowWords;   // a row (inner) in vecWords units
+    uint rowUnits;   // a row (inner) in vecElems units
     uint count;      // source indices along the axis
     uint axisSize;   // the axis as O has it
     uint rows;       // source rows: outer * count
@@ -38,19 +52,41 @@ layout(push_constant) uniform PushConstants {
 
 void main()
 {
-    uint w   = gl_GlobalInvocationID.x;     // word within the row
+    uint w   = gl_GlobalInvocationID.x;     // unit within the row
     uint row = gl_GlobalInvocationID.y;     // source row
-    if (w >= rowWords || row >= rows) return;
+    if (w >= rowUnits || row >= rows) return;
 
     uint n = row % count;
     uint o = row / count;
     uint target = index[n];
     if (target >= axisSize) return;
 
-    uint s = row * rowWords + w;
-    uint d = (o * axisSize + target) * rowWords + w;
+    uint s = row * rowUnits + w;
+    uint d = (o * axisSize + target) * rowUnits + w;
 
-    if (vecWords == 4)      bufferO_v4[d] = bufferS_v4[s];
-    else if (vecWords == 2) bufferO_v2[d] = bufferS_v2[s];
-    else                    bufferO_v1[d] = bufferS_v1[s];
+    bool sF32 = typeI == DTYPE_F32;
+    if (typeO == DTYPE_F32 && accumulate)
+    {
+        if (vecElems == 4)      bO_f32_v4[d] += sF32 ? bS_f32_v4[s] : vec4(bS_f16_v4[s]);
+        else if (vecElems == 2) bO_f32_v2[d] += sF32 ? bS_f32_v2[s] : vec2(bS_f16_v2[s]);
+        else                    bO_f32_v1[d] += sF32 ? bS_f32_v1[s] : float(bS_f16_v1[s]);
+    }
+    else if (typeO == DTYPE_F32)
+    {
+        if (vecElems == 4)      bO_f32_v4[d] = sF32 ? bS_f32_v4[s] : vec4(bS_f16_v4[s]);
+        else if (vecElems == 2) bO_f32_v2[d] = sF32 ? bS_f32_v2[s] : vec2(bS_f16_v2[s]);
+        else                    bO_f32_v1[d] = sF32 ? bS_f32_v1[s] : float(bS_f16_v1[s]);
+    }
+    else if (accumulate)
+    {
+        if (vecElems == 4)      bO_f16_v4[d] += sF32 ? f16vec4(bS_f32_v4[s]) : bS_f16_v4[s];
+        else if (vecElems == 2) bO_f16_v2[d] += sF32 ? f16vec2(bS_f32_v2[s]) : bS_f16_v2[s];
+        else                    bO_f16_v1[d] += sF32 ? float16_t(bS_f32_v1[s]) : bS_f16_v1[s];
+    }
+    else
+    {
+        if (vecElems == 4)      bO_f16_v4[d] = sF32 ? f16vec4(bS_f32_v4[s]) : bS_f16_v4[s];
+        else if (vecElems == 2) bO_f16_v2[d] = sF32 ? f16vec2(bS_f32_v2[s]) : bS_f16_v2[s];
+        else                    bO_f16_v1[d] = sF32 ? float16_t(bS_f32_v1[s]) : bS_f16_v1[s];
+    }
 }
