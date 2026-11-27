@@ -26,7 +26,16 @@
   <a href="https://docs.vaistrata.com/04-models/">Models</a> |
   <a href="python/README.md">Python</a> |
   <a href="benchmarks/README.md">Benchmarks</a> |
-  <a href="https://vaistrata.com">Website</a>
+  <a href="https://vaistrata.com">Website</a> |
+  <a href="https://discord.gg/yB7wE69Uw5">Discord</a>
+</p>
+
+<p align="center">
+  <a href="https://discord.gg/yB7wE69Uw5">
+    <img src="https://img.shields.io/badge/Join_our_server!-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Join our Discord server!" height="40">
+  </a>
+  <br>
+  <sub>Questions, feedback, or just want to talk Vulkan inference? Come say hi.</sub>
 </p>
 
 # vAi
