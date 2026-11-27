@@ -11,9 +11,8 @@
 # Pin the digest for a tagged release: ubuntu:24.04@sha256:...
 ARG BASE_IMAGE=ubuntu:24.04
 
-# LunarG publishes one apt repo per SDK release — this ARG is the SDK pin.
-ARG VULKAN_SDK_VERSION=1.4.313
-ARG UBUNTU_CODENAME=noble
+# The LunarG SDK release.
+ARG VULKAN_SDK_VERSION=1.4.357.0
 ARG UV_VERSION=0.12.7
 
 
@@ -22,27 +21,55 @@ FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
 
 
 ################################################################################
+# sdk — the LunarG tarball, cut down to what the image uses
+################################################################################
+FROM ${BASE_IMAGE} AS sdk
+ARG VULKAN_SDK_VERSION
+ARG DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        binutils ca-certificates curl xz-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+# The whole SDK is 1.8 GB unpacked. runtime/ goes to `base`, dev/ to `dev`.
+WORKDIR /sdk
+RUN file="vulkansdk-linux-x86_64-${VULKAN_SDK_VERSION}.tar.xz" \
+    && url="https://sdk.lunarg.com/sdk" \
+    && root="${VULKAN_SDK_VERSION}/x86_64" \
+    && curl -fsSL --retry 3 "$url/download/${VULKAN_SDK_VERSION}/linux/$file" -o "$file" \
+    && curl -fsSL --retry 3 "$url/sha/${VULKAN_SDK_VERSION}/linux/$file.txt" | sha256sum -c - \
+    && mkdir runtime dev \
+    && tar -xJf "$file" -C runtime --strip-components=2 --wildcards \
+        "$root/lib/VulkanLoader/lib/libvulkan.so*" \
+        "$root/bin/vulkaninfo" \
+    && tar -xJf "$file" -C dev --strip-components=2 --wildcards \
+        "$root/include" \
+        "$root/bin/glslc" "$root/bin/glslang*" "$root/bin/spirv-*" \
+        "$root/lib/libVkLayer_khronos_validation.so" \
+        "$root/share/vulkan/explicit_layer.d/VkLayer_khronos_validation.json" \
+    && strip --strip-debug dev/lib/libVkLayer_khronos_validation.so \
+    && rm "$file"
+
+
+################################################################################
 # base — Vulkan runtime: loader + in-image ICD
 ################################################################################
 FROM ${BASE_IMAGE} AS base
-ARG VULKAN_SDK_VERSION
-ARG UBUNTU_CODENAME
 ARG DEBIAN_FRONTEND=noninteractive
 
 # Mesa is the AMD/Intel ICD (NVIDIA's is injected at run time). The x11/egl
 # libs are what NVIDIA's ICD needs headless — missing, it silently falls
 # back to llvmpipe.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl \
-    && curl -fsSL https://packages.lunarg.com/lunarg-signing-key-pub.asc \
-        -o /etc/apt/trusted.gpg.d/lunarg.asc \
-    && curl -fsSL "https://packages.lunarg.com/vulkan/${VULKAN_SDK_VERSION}/lunarg-vulkan-${VULKAN_SDK_VERSION}-${UBUNTU_CODENAME}.list" \
-        -o /etc/apt/sources.list.d/lunarg-vulkan.list \
-    && apt-get update && apt-get install -y --no-install-recommends \
-        libvulkan1 vulkan-tools mesa-vulkan-drivers \
+        mesa-vulkan-drivers \
         libx11-6 libxext6 libegl1 \
-    && apt-get purge -y curl && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
+
+# Mesa pulls in Ubuntu's libvulkan1; LD_LIBRARY_PATH puts the SDK loader first.
+COPY --from=sdk /sdk/runtime/ /opt/vulkan-sdk/
+
+ENV PATH=/opt/vulkan-sdk/bin:$PATH \
+    LD_LIBRARY_PATH=/opt/vulkan-sdk/lib/VulkanLoader/lib
 
 # `graphics` is required, or the toolkit skips the Vulkan ICD.
 ENV NVIDIA_VISIBLE_DEVICES=all \
@@ -55,18 +82,22 @@ ENV NVIDIA_VISIBLE_DEVICES=all \
 FROM base AS dev
 ARG DEBIAN_FRONTEND=noninteractive
 
-# Toolchain + full SDK (glslc); the LunarG repo list is inherited from base.
-# The core uses C++23 the distro's default g++ 13 does not have, so GCC 14 it
-# is, for cmake and for the pip build alike.
+# GCC 14 is the compiler CI builds with; the distro's default, 13, is too old.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates git \
         build-essential gcc-14 g++-14 cmake ninja-build \
         python3 python3-dev \
-    && apt-get install -y vulkan-sdk \
     && rm -rf /var/lib/apt/lists/*
 
 ENV CC=gcc-14 \
     CXX=g++-14
+
+# CMAKE_PREFIX_PATH is how FindVulkan finds the SDK's loader to link.
+COPY --from=sdk /sdk/dev/ /opt/vulkan-sdk/
+
+ENV VULKAN_SDK=/opt/vulkan-sdk \
+    VK_ADD_LAYER_PATH=/opt/vulkan-sdk/share/vulkan/explicit_layer.d \
+    CMAKE_PREFIX_PATH=/opt/vulkan-sdk:/opt/vulkan-sdk/lib/VulkanLoader
 
 COPY --from=uv /uv /uvx /bin/
 

@@ -43,10 +43,18 @@ loadWeights<"openai">(net);
 |---|---|
 | [YOLOX](yolox.md) | SMALL(s), MEDIUM(m), LARGE(l), XLARGE(x) |
 
-### LLM
+### LLM / VLM
 
 | 모델 | 지원 모델 크기 |
 |---|---|
 | [GPT-2](gpt2.md) | 124M, 355M, 774M, 1.5B |
 | [Llama 3](llama3.md) | 3.2-1B, 3.2-3B |
 | [Gemma 3](gemma3.md) | 270M, 1B, 4B, 12B (4B, 12B는 이미지 입력 가능) |
+| [PaliGemma](paligemma.md) | 3B-224, 3B-448 (이미지 입력) |
+
+### VLA
+
+| 모델 | 지원 모델 크기 |
+|---|---|
+| [π0](pi0.md) | 3B |
+| [ACT](act.md) | 단일 구성 (LeRobot 기본값) |
