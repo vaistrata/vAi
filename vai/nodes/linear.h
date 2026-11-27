@@ -198,9 +198,10 @@ public:
         std::optional<LaneTile> lane;     // linear-cm-amd, lane schedule (AMD RADV)
         std::optional<StrixTile> strix;   // linear-cm-amd, cooperative schedule (Strix Point / Halo)
         uint32_t laneM = 0;               // lane: M, which that pipeline bakes in
-        bool prefetch = false;            // linear-cm: the prefetch loop (Strix Point)
-        uint32_t rowMajor = 0;            // 0: N-first tile order; else M tile count for M-first order
+        uint32_t prefetch = 0;            // linear-cm: Strix prefetch; linear-cm-nv: 1 two stages, 2 + interleaved rows
+        uint32_t rowMajor = 0;            // 0: N-first tile order; M-first: linear-cm M tile count, linear-cm-nv 1
         bool kTailMasked = false;   // coopmat: linear-cm-nv (K tail masked per k-block)
+        bool singleKBlock = false;   // linear-cm-nv: one full block per split
         vai::Dtype iDtype = vai::Dtype::None;
         bool store = false;   // linear-tile / linear-cm: the epilogue in the store (storeInKernel_)
 
@@ -241,6 +242,7 @@ public:
 
     struct PipeParamsSlab {
         uint32_t M = 0;
+        uint32_t wgSize = 0;
         uint32_t biasRepeat = 0;
         uint32_t residualRepeat = 0;
         vai::Dtype iDtype = vai::Dtype::None;
@@ -252,6 +254,7 @@ public:
         uint32_t biasRepeat = 0;
         uint32_t residualRepeat = 0;
         uint32_t gluBlock = 0;   // > 0: the GLU here (gluBlock_)
+        uint32_t wgM = 256;
 
         bool operator==(const PipeParamsReduce&) const = default;
     };
@@ -408,10 +411,15 @@ private:
     // GLU (config_.glu): permuteGluRows() reorders the weight rows once, before
     // any packing, into blocks of gluBlock_ gate rows then gluBlock_ up rows, so
     // a gate and its up land in one thread of the kernel's store: 16 on Intel
-    // (a lane's columns l and l + 16), 1 elsewhere (adjacent columns). The
-    // store does the GLU with the epilogue; with a split the reduce pass
-    // does, from the same layout.
-    uint32_t gluBlockFor() const { return ((xe3_ || intel_) && (config_.outDim / 2u) % 16u == 0u) ? 16u : 1u; }
+    // (a lane's columns l and l + 16) and NVIDIA (linear-cm-nv's accumulator
+    // tiles a and a + 1, tN = 16), 1 elsewhere (adjacent columns). The store
+    // does the GLU with the epilogue; with a split the reduce pass does, from
+    // the same layout.
+    uint32_t gluBlockFor() const
+    {
+        const bool block16 = xe3_ || intel_ || device().vendorID() == eva::VENDOR_ID::NVIDIA;
+        return (block16 && (config_.outDim / 2u) % 16u == 0u) ? 16u : 1u;
+    }
     void permuteGluRows();
     // linear-cm-xe3 can do the GLU in its store (rows interleaved by 16): with
     // one split and an even uN.
@@ -465,9 +473,11 @@ private:
 
 // Shared memory of a coopmat tile: tileA/tileB + the fp32 store stage. NOTE (vs llama.cpp): ggml
 // divides the stage term by warps — the shader declares cmStage[warps * tN * tM], so vai multiplies.
+// linear-cm-nv's two-stage loop (kTailMasked && prefetch) holds its k-block twice.
 inline uint32_t coopmatTileShmem(const Linear::PipeParamsTile& t)
 {
-    return (t.wgN + t.wgM) * (t.wgK / 2 + 4) * 4 + (t.wgSize / t.sgSize) * t.tN * t.tM * 4;
+    const uint32_t stages = (t.kTailMasked && t.prefetch) ? 2u : 1u;
+    return stages * (t.wgN + t.wgM) * (t.wgK / 2 + 4) * 4 + (t.wgSize / t.sgSize) * t.tN * t.tM * 4;
 }
 
 // Whether a coopmat tile candidate works on this device. A failure means
@@ -778,6 +788,9 @@ inline uint32_t ggmlSlabWgSize(uint32_t K, uint32_t N, uint32_t sgSize, eva::Dev
 // NVIDIA
 /////////////////////////////////////////////////////////////////////////////////////////
 
+inline constexpr uint32_t nvRtx4090DeviceId = 0x2684u;
+inline constexpr uint32_t nvRtx5090DeviceId = 0x2b85u;
+
 // The Fill selector: a coopmat tile and split count from M, N, Kp, the core count and the
 // shared-memory budget — no vendor tables, no per-GPU constants. Its tiles run linear-cm-nv.comp
 // (kTailMasked).
@@ -849,6 +862,22 @@ inline uint32_t fillSplitFor(uint32_t Kp, uint32_t tiles, uint32_t cores, uint32
     return settle ? last : 1u;
 }
 
+// The smallest S (2..8) of >= minSpan-deep splits that fills this grid, the last split non-empty; 1 if
+// none. fillSplitFor's search without its K gate and without `settle`, for the M ladder.
+inline uint32_t fillSplitToFill(uint32_t Kp, uint32_t tiles, uint32_t cores, uint32_t minSpan)
+{
+    for (uint32_t s = 2; s <= 8u; ++s)
+    {
+        if (Kp / s < minSpan)
+            break;
+        if (ggmlSplitSize(Kp, s) * (s - 1u) >= Kp)
+            continue;
+        if (fillFilled(tiles * s, cores))
+            return s;
+    }
+    return 1u;
+}
+
 // Half-height tile for a 128x128 grid below half a wave: S = cores / tiles (<= 8, >= 256 deep),
 // then 64x128 or 64x64 if that grid x S reaches one WG per core.
 inline bool fillHalfTile(uint32_t M, uint32_t N, uint32_t Kp, uint32_t cores, const Linear::PipeParamsTile& base,
@@ -872,18 +901,25 @@ inline bool fillHalfTile(uint32_t M, uint32_t N, uint32_t Kp, uint32_t cores, co
     return false;
 }
 
+// Workgroups of tile t the device keeps resident, from shared memory alone: the per-workgroup shared
+// limit is taken as half of a core's.
+inline uint64_t fillResidentSlots(const Linear::PipeParamsTile& t, eva::Device device)
+{
+    const uint32_t perCore = std::max(1u, 2u * device.maxComputeSharedMemorySize() / coopmatTileShmem(t));
+    return uint64_t(std::max(device.computeBlockCount(), 1u)) * perCore;
+}
+
 // Resident-round split: the S (1..8, splits >= 512 deep) that minimizes rounds of resident workgroups
 // x k-blocks per round plus the partials' traffic; only raises Fill's S, compute-bound GEMMs only.
-inline uint32_t fillSplitRounds(uint32_t M, uint32_t N, uint32_t tiles, uint32_t Kp, uint64_t wBytes, uint32_t cores,
-                                const Linear::PipeParamsTile& t, eva::Device device)
+inline uint32_t fillSplitRounds(
+    uint32_t M, uint32_t N, uint32_t tiles, uint32_t Kp, uint64_t wBytes, const Linear::PipeParamsTile& t,
+    eva::Device device)
 {
     if (Kp < 2048u)
         return 1u;
     if (2.0 * double(M) * double(N) * double(Kp) < double(wBytes) * 100.0)
         return 1u;   // W-bandwidth-bound regime
-    // Resident workgroups per core: the per-workgroup shared limit is taken as half of a core's.
-    const uint32_t r = std::max(1u, 2u * device.maxComputeSharedMemorySize() / coopmatTileShmem(t));
-    const uint64_t slots = uint64_t(cores) * r;
+    const uint64_t slots = fillResidentSlots(t, device);
     const double roundWork = double(slots) * 2.0 * t.wgM * t.wgN * t.wgK;
     const double partialFlopPerSplit = 8.0 * double(M) * double(N) * 100.0;
     const double weightStream = double(wBytes) * 100.0;
@@ -959,13 +995,26 @@ inline Linear::PipeParamsTile fillTileParams(uint32_t M, uint32_t N, uint32_t Kp
             fillHalfTile(M, N, Kp, cores, base, device, t, splitCount);
         if (splitCount == 1u)
         {
+            // M ladder. Where the next rung would not fill the grid either, and neither would a usable 64-row
+            // rung, the smallest split of >= 512-deep spans that fills this rung ends it: the taller tile moves
+            // fewer bytes. Where the 64-row rung fills, the ladder goes on: a 64-row tile already reads its
+            // inputs efficiently, so a split there only adds the reduce.
+            const Linear::PipeParamsTile r64 = fillCandidate(base, 64u, t.wgN);
+            const bool r64Short = coopmatTileUsable(r64, device) && !fillFilled(fillTiles(M, N, r64), cores);
             while (!fillFilled(fillTiles(M, N, t), cores) && t.wgM > 32u)
             {
                 const Linear::PipeParamsTile d = fillCandidate(base, fillNextM(t.wgM), t.wgN);
                 if (!coopmatTileUsable(d, device))
                     break;
+                if (r64Short && !fillFilled(fillTiles(M, N, d), cores))
+                    splitCount = fillSplitToFill(Kp, fillTiles(M, N, t), cores, 512u);
+                if (splitCount > 1u)
+                    break;
                 t = d;
             }
+        }
+        if (splitCount == 1u)   // N ladder and late split, unless the M ladder took a split
+        {
             while (!fillFilled(fillTiles(M, N, t), cores) && t.wgN > 64u)
             {
                 const Linear::PipeParamsTile d = fillCandidate(base, t.wgM, t.wgN == 128u ? 96u : 64u);
@@ -1005,17 +1054,96 @@ inline Linear::PipeParamsTile fillTileParams(uint32_t M, uint32_t N, uint32_t Kp
 
     // Only ever raises Fill's S.
     const uint64_t wBytes = uint64_t(Kp) * N * (wDtype == Dtype::Fp16 ? 2u : 4u);
-    splitCount = std::max(splitCount, fillSplitRounds(M, N, fillTiles(M, N, t), Kp, wBytes, cores, t, device));
+    splitCount = std::max(splitCount, fillSplitRounds(M, N, fillTiles(M, N, t), Kp, wBytes, t, device));
 
     t.iDtype = iDtype;
     t.kTailMasked = true;   // linear-cm-nv
     return t;
 }
 
+// M-first runs the M tiles that share each W tile consecutively.
+// Use it for split K, N grids wider than the resident slots, or wide FP16 weights on a 128x128 tile.
+// The kernel reads the M tile count from gl_NumWorkGroups.y, so the specialization only needs a flag.
+inline uint32_t nvWeightMajor(
+    uint32_t M, uint32_t N, uint32_t K, uint32_t splits, const Linear::PipeParamsTile& t, eva::Device device)
+{
+    // 64 Mi FP16 elements occupy 128 MiB.
+    const bool wideW = M < N && t.wgM == 128u && t.wgN == 128u && uint64_t(N) * K >= (64u << 20);
+    return CEIL_DIV(M, t.wgM) > 1u && (splits > 1u || CEIL_DIV(N, t.wgN) > fillResidentSlots(t, device) || wideW)
+               ? 1u
+               : 0u;
+}
+
+// Which Fill tiles run linear-cm-nv's two-stage k loop (PipeParamsTile::prefetch, spec constant 15).
+// The first row whose minSliceMma the tile reaches decides; nvStageTile() is the only reader. The large
+// tiles fit two stages only at half their k-block. There, shapes with fewer than six M tiles per W tile
+// measured slower than in Fill's single stage, and the halved k-block was slower even in one stage. So
+// the smaller tiles take two stages only at Fill's own k-block.
+struct NvStageRule
+{
+    uint32_t minSliceMma;    // coopmat MulAdds a subgroup issues per tK slice: (sgM / tM) * (sgN / tN)
+    uint32_t minMTiles;      // M tiles that must share each W tile
+    bool halveK;             // where wgK's doubled footprint does not fit, two stages at wgK / 2
+    bool mustStayResident;   // only when the launch still fits the resident slots of the two-stage tile
+    uint32_t minBlocks;      // two-stage k-blocks a split span must hold
+};
+inline constexpr NvStageRule nvStageRules[] = {
+    { 12u, 6u, true, false, 4u },   // 128x128 and 96x128 (64x64 and 48x64 subgroups)
+    { 1u, 1u, false, true, 4u },    // smaller tiles
+};
+
+// The two-stage form of Fill's pick where a rule takes it, else the pick itself: two stages at the
+// deepest k-block the rule allows whose doubled footprint fits, so wgK stays the K per stage. Never
+// next to fp32 accumulators that alone take 128 registers per lane: the held loads spilled there.
+// Never on fp32 sources either: their conversions wait on the loads dozens of MMAs before the k-block
+// ends, not in the stores after its last one. Only where every k-block of every split is whole: with a
+// K tail, several shapes measured slower with two stages than with Fill's single one. Otherwise Fill's
+// pick stays whole, k-block too.
+// `splitSize` = the split size the shader gets; `workgroups` = the launch's tiles x splits.
+inline Linear::PipeParamsTile nvStageTile(
+    const Linear::PipeParamsTile& t, uint32_t M, uint32_t K, uint32_t splitSize, uint32_t workgroups, Dtype iDtype,
+    Dtype wDtype, bool accF32, eva::Device device)
+{
+    if (accF32 && t.sgM * t.sgN / t.sgSize >= 128u)
+        return t;
+    if (iDtype != Dtype::Fp16 || wDtype != Dtype::Fp16)
+        return t;
+    const uint32_t sliceMma = (t.sgM / t.tM) * (t.sgN / t.tN);
+    for (const NvStageRule& rule : nvStageRules)
+    {
+        if (sliceMma < rule.minSliceMma)
+            continue;
+        if (CEIL_DIV(M, t.wgM) < rule.minMTiles)
+            return t;
+        for (const uint32_t wgK : { t.wgK, t.wgK / 2u })
+        {
+            if (wgK != t.wgK && !rule.halveK)
+                break;
+            Linear::PipeParamsTile s = t;
+            s.wgK = wgK;
+            s.prefetch = 1u;
+            // Load code 1 needs the most rows per loader pass, so it covers every code prepare() may pick.
+            if (!coopmatTileUsable(s, device) || !tileLoadersFit(s, 1u))
+                continue;
+            if (K % wgK != 0u || splitSize % wgK != 0u || std::min(K, splitSize) / wgK < rule.minBlocks)
+                return t;
+            if (rule.mustStayResident && workgroups > fillResidentSlots(s, device))
+                return t;
+            return s;
+        }
+        return t;
+    }
+    return t;
+}
+
 // The tile and split count: the Fill selector on Kp, ggml's pick and split guess where no fill tile
-// fits the device (no coopmat GEMM, or none within the shared-memory budget).
-inline Linear::PipeParamsTile nvLinearTile(uint32_t M, uint32_t N, uint32_t K, Dtype iDtype, Dtype wDtype,
-                                           eva::Device device, uint32_t& splitCount)
+// fits the device (no coopmat GEMM, or none within the shared-memory budget). A Fill tile also takes
+// its stage count, then its visit order from the staged tile, both for the split prepare() hands the
+// shader: `splitSize` (Config::splitSize) where set, else the one prepare() derives from that split count.
+// The RTX 4090 down cases with 785 or 922 rows can change the automatic split count after stage selection.
+inline Linear::PipeParamsTile nvLinearTile(
+    uint32_t M, uint32_t N, uint32_t K, Dtype iDtype, Dtype wDtype, Dtype oDtype, Dtype accDtype, uint32_t splitSize,
+    eva::Device device, uint32_t& splitCount, bool fusedGlu = false)
 {
     const uint32_t Kp = (K % 32u != 0u) ? ROUNDUP_POW2(K, 64u) : K;
     Linear::PipeParamsTile t = fillTileParams(M, N, Kp, iDtype, wDtype, device, splitCount);
@@ -1023,6 +1151,99 @@ inline Linear::PipeParamsTile nvLinearTile(uint32_t M, uint32_t N, uint32_t K, D
     {
         t = ggmlMulmmTileParams(M, N, iDtype, wDtype, device);
         splitCount = ggmlGuessSplitCount(M, N, K, t, device);
+    }
+    else
+    {
+        const auto base = t;
+        const uint32_t tiles = fillTiles(M, N, base);
+        uint32_t splits = splitSize ? CEIL_DIV(K, splitSize) : splitCount;
+        const uint32_t span = splitSize ? splitSize : splits > 1u ? ggmlSplitSize(K, splits) : K;
+        t = nvStageTile(base, M, K, span, tiles * splits, iDtype, wDtype, accDtype == Dtype::Fp32, device);
+        // Use S11 for M785 and S8 for M922, both with interleaved loader rows.
+        if (splitSize == 0u && splitCount == 2u && (M == 785u || M == 922u) && N == 2048u && K == 16384u &&
+            device.deviceID() == nvRtx4090DeviceId && device.driverID() == eva::DRIVER_ID::NVIDIA_PROPRIETARY &&
+            iDtype == Dtype::Fp16 && wDtype == Dtype::Fp16 && oDtype == Dtype::Fp16 && accDtype == Dtype::Fp16 &&
+            t.prefetch == 1u && t.wgSize == 128u && t.sgSize == 32u && t.wgM == 128u && t.wgN == 128u && t.wgK == 32u &&
+            t.sgM == 64u && t.sgN == 64u && t.tM == 16u && t.tN == 16u && t.tK == 16u)
+        {
+            const uint32_t candidateSplits = M == 785u ? 11u : 8u;
+            const auto staged = nvStageTile(
+                base, M, K, ggmlSplitSize(K, candidateSplits), tiles * candidateSplits, iDtype, wDtype, false, device);
+            if (staged == t)
+            {
+                splitCount = splits = candidateSplits;
+                t.prefetch = 2u;
+            }
+        }
+        t.rowMajor = nvWeightMajor(M, N, K, splits, t, device);
+        // Keep the gate+up weights local across M when the N tile count fits the resident slots.
+        if (((M == 260u && N == 32768u && K == 2048u &&
+              (device.deviceID() == nvRtx4090DeviceId || device.deviceID() == nvRtx5090DeviceId)) ||
+             (M == 268u && N == 20480u && K == 2560u && device.deviceID() == nvRtx4090DeviceId && splitSize == 0u)) &&
+            splits == 1u && span == K && device.driverID() == eva::DRIVER_ID::NVIDIA_PROPRIETARY &&
+            (iDtype == Dtype::Fp32 || iDtype == Dtype::Fp16) && iDtype == oDtype && wDtype == Dtype::Fp16 &&
+            accDtype == Dtype::Fp16 && t.prefetch == 0u && t.wgSize == 128u && t.sgSize == 32u && t.wgM == 96u &&
+            t.wgN == 128u && t.wgK == 64u && t.sgM == 48u && t.sgN == 64u && t.tM == 16u && t.tN == 16u && t.tK == 16u)
+            t.rowMajor = 1u;
+
+        // FP16 schedules for the RTX 4090 and RTX 5090.
+        const bool rtx4090 = device.deviceID() == nvRtx4090DeviceId;
+        if ((rtx4090 || device.deviceID() == nvRtx5090DeviceId) &&
+            device.driverID() == eva::DRIVER_ID::NVIDIA_PROPRIETARY && splitSize == 0u && iDtype == Dtype::Fp16 &&
+            wDtype == Dtype::Fp16 && oDtype == Dtype::Fp16 && accDtype == Dtype::Fp16 && t.wgSize == 128u &&
+            t.sgSize == 32u && t.tM == 16u && t.tN == 16u && t.tK == 16u &&
+            device.maxComputeSharedMemorySize() >= 48u * 1024u)
+        {
+            const uint32_t mTiles = CEIL_DIV(M, 128u);
+            // Read 64 K values per stage and keep the existing split boundaries.
+            if (rtx4090 && N >= 1536u && N <= 2048u && N % 128u == 0u && K == 8u * N && mTiles == 6u && t.wgM == 128u &&
+                t.wgN == 128u && t.wgK == 32u && t.prefetch == 1u && splits > 1u)
+            {
+                t.wgK = 64u;
+                t.prefetch = 0u;
+            }
+            // Other weight pitches can run slower with two stages.
+            const bool wideGlu =
+                !rtx4090 && fusedGlu && splits == 1u && t.wgM == 128u && t.wgN == 128u && t.rowMajor == 1u &&
+                (K == 2048u || K == 2304u) && N == K * 16u;
+            if (rtx4090 && fusedGlu && mTiles == 5u && N == 32768u && K == 2048u && splits == 1u && t.wgM == 128u &&
+                t.wgN == 128u && t.wgK == 64u && t.prefetch == 0u)
+            {
+                auto tall = fillCandidate(base, 160u, 128u);
+                tall.wgK = 64u;
+                tall.rowMajor = 1u;
+                if (coopmatTileUsable(tall, device) && tileLoadersFit(tall, 1u))
+                    t = tall;
+            }
+            else if (wideGlu && mTiles == 5u && t.wgK == 64u && t.prefetch == 0u)
+            {
+                t.wgK = 32u;
+                t.prefetch = 2u;
+            }
+            else if ((M == 666u && N == 32768u && K == 2048u && splits == 1u) ||
+                     (wideGlu && mTiles == 6u && CEIL_DIV(M, 96u) * 96u < mTiles * 128u))
+            {
+                t = fillCandidate(base, rtx4090 ? 128u : 96u, 128u);
+                t.wgK = rtx4090 ? 32u : 64u;
+                t.prefetch = rtx4090 ? 2u : 0u;
+                t.rowMajor = 1u;
+            }
+            else if (M == 666u && N == 2048u && K == 16384u)
+            {
+                t = fillCandidate(base, 128u, 128u);
+                t.wgK = rtx4090 ? 64u : 32u;
+                t.prefetch = rtx4090 ? 0u : 2u;
+                t.rowMajor = 1u;
+                splitCount = rtx4090 ? 8u : 11u;
+            }
+            else if (!rtx4090 && M == 50u && N == 8192u && K == 1024u && splits == 1u && t.wgM == 32u && t.wgN == 64u &&
+                     t.wgK == 64u && t.sgM == 16u && t.sgN == 32u && t.prefetch == 1u)
+            {
+                t.wgM = 64u;
+                t.wgSize = 256u;   // Four rows of two subgroups share the weights.
+                t.rowMajor = 0u;
+            }
+        }
     }
     return t;
 }
@@ -2499,16 +2720,19 @@ inline uint32_t otherLinearSlabWgSize(uint32_t K, uint32_t N, uint32_t sgSize, e
 // The tile kernel's params for one shape and their split count (Intel's own
 // kernel is prepare()'s branch, see useIntelTile). NVIDIA's Fill selector picks
 // the two together; AMD and the others split the picked tile by their rule.
-// The output and accumulator dtypes are read by AMD's Strix tables only.
+// AMD Strix and the RTX 4090 down rule read the output and accumulator dtypes.
+// NVIDIA's stage rule also reads the accumulator dtype.
+// `splitSize` is Config::splitSize (0: the vendor's count), read by NVIDIA only, which
+// sizes its visit order and stages for it; prepare() resolves the split itself for every vendor.
 inline Linear::PipeParamsTile selectLinearTile(
     uint32_t M, uint32_t N, uint32_t K, Dtype iDtype, Dtype wDtype, Dtype oDtype, Dtype accDtype, eva::Device device,
-    uint32_t& splitCount)
+    uint32_t& splitCount, uint32_t splitSize = 0, bool fusedGlu = false)
 {
     Linear::PipeParamsTile t;
     switch (device.vendorID())
     {
     case eva::VENDOR_ID::NVIDIA:
-        return nvLinearTile(M, N, K, iDtype, wDtype, device, splitCount);
+        return nvLinearTile(M, N, K, iDtype, wDtype, oDtype, accDtype, splitSize, device, splitCount, fusedGlu);
     case eva::VENDOR_ID::AMD:
         t = amdLinearTile(M, N, K, iDtype, wDtype, oDtype, accDtype == Dtype::Fp16, device);
         splitCount = amdLinearSplitCount(M, N, K, t, device);
@@ -2834,7 +3058,7 @@ inline void Linear::prepare()
     intel_ = !xe3_ && useIntelTile(device());
     if (config_.glu && gluBlock_ == 0u)
         permuteGluRows();   // before any packing: every layout below starts from these rows
-    gluSlabOk_ = wDtype == Dtype::Fp16 && plainOutput();
+    gluSlabOk_ = wDtype == Dtype::Fp16 && plainOutput() && gluBlock_ == 1u;   // the slab pairs adjacent rows
     storeInKernel_ = false;
     if (xe3_)
         repackWeightXe3(WeightLayout::KnPitch32);
@@ -2873,12 +3097,22 @@ inline void Linear::prepare()
         // Slab policy (device / option-derived) — recomputed per prepare like
         // the tile params below; run() only re-derives wgN.
         const uint32_t sgSize = ggmlSlabSgSize(device());
-        const uint32_t wgSize = selectLinearSlabWgSize(K, N, sgSize, device());
+        uint32_t wgSize = selectLinearSlabWgSize(K, N, sgSize, device());
+        constexpr uint32_t candidateWgSize = 128u;
+        if (wgSize == 32u && sgSize == 32u && M == 1u && N == 18944u && K == 3584u && config_.splitSize == 0u &&
+            !config_.glu && plainOutput() && device().vendorID() == eva::VENDOR_ID::NVIDIA &&
+            device().deviceID() == nvRtx5090DeviceId && device().driverID() == eva::DRIVER_ID::NVIDIA_PROPRIETARY &&
+            iDtype == Dtype::Fp16 && wDtype == Dtype::Fp16 && oDtype == Dtype::Fp16 && accDtype == Dtype::Fp16 &&
+            candidateWgSize <= device().maxComputeWorkGroupSize()[0] &&
+            candidateWgSize <= device().maxComputeWorkGroupInvocations())
+            wgSize = candidateWgSize;
         const uint32_t wgN = (wDtype == Dtype::Fp16) ? 2u : 1u;   // fp16 W pairs N positions
         const bool     aligned = (K % 4 == 0);   // K_PER_ITER = 4 wide loads
 
         storeInKernel_ = true;   // the slab kernel does the whole epilogue (and only a GLU it can take reaches it)
-        const PipeParamsSlab p = { .M = M, .biasRepeat = biasElems, .residualRepeat = residualElems, .iDtype = iDtype };
+        const PipeParamsSlab p = {
+            .M = M, .wgSize = wgSize, .biasRepeat = biasElems, .residualRepeat = residualElems, .iDtype = iDtype
+        };
         if (!pipeSlab || p != pipeParamsSlab)
         {
             pipeParamsSlab = p;
@@ -2912,6 +3146,9 @@ inline void Linear::prepare()
     }
     else
     {
+        PipeParamsReduce r = {
+            .biasRepeat = biasElems, .residualRepeat = residualElems, .gluBlock = config_.glu ? gluBlock_ : 0u
+        };
         if (xe3_)
         {
             // The matrix engine takes fp16: an fp32 I is cast once per run, ahead of the product.
@@ -3028,7 +3265,9 @@ inline void Linear::prepare()
             uint32_t pickedSplits = 1;
             const Dtype cmAccDtype =
                 accDtype == Dtype::Fp16 && !ggmlCoopmatShape(device()).accF16 ? Dtype::Fp32 : accDtype;
-            PipeParamsTile t = selectLinearTile(M, N, K, iDtype, wDtype, oDtype, cmAccDtype, device(), pickedSplits);
+            const bool fuseGlu = config_.glu && plainOutput() && storeAllowed_;
+            PipeParamsTile t = selectLinearTile(
+                M, N, K, iDtype, wDtype, oDtype, cmAccDtype, device(), pickedSplits, config_.splitSize, fuseGlu);
 
             // Resolve split-K for this shape: explicit splitSize, or the
             // vendor's count when 0.
@@ -3103,11 +3342,49 @@ inline void Linear::prepare()
             else
                 t = amdNavi48CmTile(M, N, K, splitSize, t, device());
 
-            // With one split the store of linear-tile and linear-cm does the epilogue (the GLU:
-            // a thread's adjacent columns); linear-cm-nv and linear-cm-amd leave it to the reduce pass.
+            const bool rtx4090 = device().deviceID() == nvRtx4090DeviceId;
+            const bool rtx5090 = device().deviceID() == nvRtx5090DeviceId;
+            const bool nvShortSplit =
+                config_.splitSize == 0u && K == 1024u && device().vendorID() == eva::VENDOR_ID::NVIDIA &&
+                (rtx4090 || rtx5090) && device().driverID() == eva::DRIVER_ID::NVIDIA_PROPRIETARY && fp16Io &&
+                accDtype == Dtype::Fp16 && acc == Dtype::Fp16 && !config_.glu && plainOutput() && t.kTailMasked &&
+                t.prefetch == 0u && t.wgSize == 128u && t.sgSize == 32u && t.wgM == 32u && t.wgN == 64u &&
+                t.wgK == 128u && t.sgM == 16u && t.sgN == 32u && t.tM == 16u && t.tN == 16u && t.tK == 16u &&
+                splitCount == 4u && splitSize == 256u && device().supportsPipelineRobustness();
+            // Narrow the N tile to launch more workgroups with the same K splits.
+            if (nvShortSplit && M <= (rtx5090 ? 2u : 1u) * t.wgM && N >= 256u && N <= 512u && N % 32u == 0u)
+            {
+                t = fillCandidate(t, 32u, 32u);
+                t.rowMajor = 0u;
+            }
+            t.singleKBlock = nvShortSplit && rtx4090 && M == 50u && N == 256u && t.rowMajor == 1u;
+            if (t.singleKBlock)
+            {
+                splitSize = t.wgK;
+                splitCount = K / splitSize;
+                r.wgM = 64u;
+            }
+
+            // Balance the K64 blocks across the seven Pali down splits.
+            if (config_.splitSize == 0u && M == 260u && N == 2048u && K == 16384u && splitCount == 7u &&
+                splitSize == 2560u && device().vendorID() == eva::VENDOR_ID::NVIDIA &&
+                device().deviceID() == nvRtx5090DeviceId && device().driverID() == eva::DRIVER_ID::NVIDIA_PROPRIETARY &&
+                fp16Io && acc == Dtype::Fp16 && !config_.glu && plainOutput() && t.kTailMasked && t.prefetch == 0u &&
+                t.rowMajor == 1u && t.wgSize == 128u && t.sgSize == 32u && t.wgM == 96u && t.wgN == 128u &&
+                t.wgK == 64u && t.sgM == 48u && t.sgN == 64u && t.tM == 16u && t.tN == 16u && t.tK == 16u)
+                splitSize = 2368u;
+
+            // With one split the store does the epilogue. linear-tile and linear-cm: all of it (the
+            // GLU: a thread's adjacent columns, G = 1). linear-cm-nv: only a plain GLU, from a
+            // subgroup's gate and up accumulator tiles (G = tN); its other epilogues and
+            // linear-cm-amd's go to the reduce pass.
+            const bool nvGlu = fuseGlu && t.kTailMasked && gluBlock_ == t.tN && t.sgN % (2u * t.tN) == 0u;
             t.store =
-                storeAllowed_ && splitCount == 1u && !t.lane && !t.strix && !t.kTailMasked &&
-                (config_.glu || !plainOutput());
+                storeAllowed_ && splitCount == 1u && !t.lane && !t.strix &&
+                (t.kTailMasked ? nvGlu
+                 : config_.glu
+                     ? gluBlock_ == 1u
+                     : !plainOutput());
             storeInKernel_ = t.store;
 
             if (!pipeTile || t != pipeParamsTile)
@@ -3218,15 +3495,17 @@ inline void Linear::prepare()
                         eva::constant_id<9>(t.tK),                           // tK
                         eva::constant_id<11>(acc),                           // accType
                         eva::constant_id<12>(robust ? 1u : 0u),              // robustBufferAccess
-                        eva::constant_id<13>(t.store && config_.glu ? 1u : 0u),   // glu (linear-cm)
-                        eva::constant_id<14>(t.rowMajor),                    // rowMajor (M-first: M tile count)
-                        eva::constant_id<15>(uint32_t(t.prefetch)),          // prefetch
+                        eva::constant_id<13>(t.store && config_.glu ? 1u : 0u),   // glu (linear-cm, linear-cm-nv)
+                        eva::constant_id<14>(t.rowMajor),                    // rowMajor (M-first order)
+                        eva::constant_id<15>(t.prefetch),                    // prefetch
                         eva::constant_id<SPEC_ID_TYPE_O>(oDtype),    // typeO
                         eva::constant_id<SPEC_ID_TYPE_I>(iDtype),            // typeI
                         eva::constant_id<SPEC_ID_TYPE_W>(wDtype),    // typeW
                         eva::constant_id<SPEC_ID_ALIGNED>(loadCode)          // aligned (linear-cm-nv: load-width code)
                     };
                     // clang-format on
+                    if (t.kTailMasked)
+                        spec.addConstant(eva::constant_id<16>(uint32_t(t.singleKBlock)));
                     addStoreConstants(spec, bDtype, biasElems, residualElems);
                     pipeTile = pipelinePool().request(
                         t.kTailMasked ? "linear-cm-nv" : "linear-cm",
@@ -3281,21 +3560,19 @@ inline void Linear::prepare()
             }
         }
 
-        const PipeParamsReduce r = {
-            .biasRepeat = biasElems, .residualRepeat = residualElems, .gluBlock = config_.glu ? gluBlock_ : 0u
-        };
         if (needReducePass() && (!pipeReduce || r != pipeParamsReduce))
         {
             pipeParamsReduce = r;
             // clang-format off
             pipeReduce = pipelinePool().request("linear-reduce", {
-                eva::constant_id<0>(hasBias() ? 1u : 0u),                // hasBias
-                eva::constant_id<1>(biasElems),                          // bias repeat (0: covers O)
-                eva::constant_id<2>(config_.acceptResidual ? 1u : 0u),   // hasResidual
-                eva::constant_id<3>(residualElems),                      // residual repeat (0: covers O)
-                eva::constant_id<4>((uint32_t) config_.residualOrder),   // residualOrder
-                eva::constant_id<5>(bDtype),                             // typeB (bias)
-                eva::constant_id<6>(r.gluBlock),                         // gluBlock
+                eva::constant_id<0>(r.wgM),                              // wgM (= local_size_x)
+                eva::constant_id<1>(hasBias() ? 1u : 0u),                 // hasBias
+                eva::constant_id<2>(biasElems),                          // bias repeat (0: covers O)
+                eva::constant_id<3>(config_.acceptResidual ? 1u : 0u),    // hasResidual
+                eva::constant_id<4>(residualElems),                      // residual repeat (0: covers O)
+                eva::constant_id<5>((uint32_t) config_.residualOrder),    // residualOrder
+                eva::constant_id<6>(bDtype),                             // typeB (bias)
+                eva::constant_id<7>(r.gluBlock),                         // gluBlock
                 eva::constant_id<SPEC_ID_TYPE_O>(oDtype),        // typeO (O, P & residual)
                 eva::constant_id<SPEC_ID_ACT_TYPE>((uint32_t) config_.actType)   // actType
             });
@@ -3430,7 +3707,6 @@ inline void Linear::run(eva::CommandBuffer cmdBuff)
 
     auto bBuf = hasBias() ? (*this)["bias"].buffer() : eva::Buffer();
     descSetReduce.write({ outBuf, dst, bBuf, rBuf });
-    constexpr uint32_t reduceWgSize = 256;   // = local_size_x of linear-reduce
     constexpr uint32_t reduceBatch  = 4;     // elements folded per invocation
     const uint32_t outputs = config_.glu ? M * (N / 2u) : M * N;   // the GLU halves the output
     struct
@@ -3442,7 +3718,7 @@ inline void Linear::run(eva::CommandBuffer cmdBuff)
     cmdBuff.bindPipeline(pipeReduce)
         .bindDescSets({ descSetReduce })
         .setPushConstants(0, sizeof(reduceConstants), &reduceConstants)
-        .dispatch(CEIL_DIV(outputs, reduceWgSize * reduceBatch), 1, 1)
+        .dispatch(CEIL_DIV(outputs, pipeParamsReduce.wgM * reduceBatch), 1, 1)
         .barrier(eva::SYNC_SCOPE::COMPUTE_WRITE / outBuf / eva::SYNC_SCOPE::COMPUTE_READ);
 }
 
