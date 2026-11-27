@@ -15,8 +15,8 @@
 
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
-layout(set = 0, binding = 0) writeonly buffer D_BUF { uint bufferD[]; };      // fp16 pairs
-layout(set = 0, binding = 1) readonly buffer W_BUF { uint16_t bufferW[]; };   // fp16 bits
+layout(set = 0, binding = 0) writeonly buffer D_BUF { uint bD[]; };      // fp16 pairs
+layout(set = 0, binding = 1) readonly buffer W_BUF { uint16_t bW[]; };   // fp16 bits
 
 layout(push_constant) uniform PushConstants {
     uint N;
@@ -31,7 +31,7 @@ void main()
     if (e >= K * rowPairs) return;
 
     const uint k = e / rowPairs, n = (e % rowPairs) * 2u;
-    const uint lo = (n < N) ? uint(bufferW[n * K + k]) : 0u;
-    const uint hi = (n + 1u < N) ? uint(bufferW[(n + 1u) * K + k]) : 0u;
-    bufferD[e] = lo | (hi << 16);
+    const uint lo = (n < N) ? uint(bW[n * K + k]) : 0u;
+    const uint hi = (n + 1u < N) ? uint(bW[(n + 1u) * K + k]) : 0u;
+    bD[e] = lo | (hi << 16);
 }

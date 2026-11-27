@@ -41,25 +41,25 @@ layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0;  // O, P and residual
 layout(constant_id = 5) const uint typeB = 0;          // bias dtype
 layout(constant_id = 6) const uint gluBlock = 0;       // > 0: GLU over gate / up blocks of this many columns
 
-layout(set = 0, binding = 0) writeonly buffer O_BUF_F32  { float bufferO_f32[]; };
-layout(set = 0, binding = 0) writeonly buffer O_BUF_F16  { float16_t bufferO_f16[]; };
-layout(set = 0, binding = 0) writeonly buffer O_BUF_4F32 { vec4 bufferO_4f32[]; };
-layout(set = 0, binding = 0) writeonly buffer O_BUF_4F16 { f16vec4 bufferO_4f16[]; };
+layout(set = 0, binding = 0) writeonly buffer O_BUF_F32  { float bO_f32[]; };
+layout(set = 0, binding = 0) writeonly buffer O_BUF_F16  { float16_t bO_f16[]; };
+layout(set = 0, binding = 0) writeonly buffer O_BUF_4F32 { vec4 bO_4f32[]; };
+layout(set = 0, binding = 0) writeonly buffer O_BUF_4F16 { f16vec4 bO_4f16[]; };
 //////////////////////////////////////////////////////////////////////////////
-layout(set = 0, binding = 1) readonly buffer P_BUF_F32  { float bufferP_f32[]; };
-layout(set = 0, binding = 1) readonly buffer P_BUF_F16  { float16_t bufferP_f16[]; };
-layout(set = 0, binding = 1) readonly buffer P_BUF_4F32 { vec4 bufferP_4f32[]; };
-layout(set = 0, binding = 1) readonly buffer P_BUF_4F16 { f16vec4 bufferP_4f16[]; };
+layout(set = 0, binding = 1) readonly buffer P_BUF_F32  { float bP_f32[]; };
+layout(set = 0, binding = 1) readonly buffer P_BUF_F16  { float16_t bP_f16[]; };
+layout(set = 0, binding = 1) readonly buffer P_BUF_4F32 { vec4 bP_4f32[]; };
+layout(set = 0, binding = 1) readonly buffer P_BUF_4F16 { f16vec4 bP_4f16[]; };
 //////////////////////////////////////////////////////////////////////////////
-layout(set = 0, binding = 2) readonly buffer BIAS_BUF_F32  { float bufferBias_f32[]; };
-layout(set = 0, binding = 2) readonly buffer BIAS_BUF_F16  { float16_t bufferBias_f16[]; };
-layout(set = 0, binding = 2) readonly buffer BIAS_BUF_4F32 { vec4 bufferBias_4f32[]; };
-layout(set = 0, binding = 2) readonly buffer BIAS_BUF_4F16 { f16vec4 bufferBias_4f16[]; };
+layout(set = 0, binding = 2) readonly buffer BIAS_BUF_F32  { float bBias_f32[]; };
+layout(set = 0, binding = 2) readonly buffer BIAS_BUF_F16  { float16_t bBias_f16[]; };
+layout(set = 0, binding = 2) readonly buffer BIAS_BUF_4F32 { vec4 bBias_4f32[]; };
+layout(set = 0, binding = 2) readonly buffer BIAS_BUF_4F16 { f16vec4 bBias_4f16[]; };
 //////////////////////////////////////////////////////////////////////////////
-layout(set = 0, binding = 3) readonly buffer R_BUF_F32  { float bufferR_f32[]; };
-layout(set = 0, binding = 3) readonly buffer R_BUF_F16  { float16_t bufferR_f16[]; };
-layout(set = 0, binding = 3) readonly buffer R_BUF_4F32 { vec4 bufferR_4f32[]; };
-layout(set = 0, binding = 3) readonly buffer R_BUF_4F16 { f16vec4 bufferR_4f16[]; };
+layout(set = 0, binding = 3) readonly buffer R_BUF_F32  { float bR_f32[]; };
+layout(set = 0, binding = 3) readonly buffer R_BUF_F16  { float16_t bR_f16[]; };
+layout(set = 0, binding = 3) readonly buffer R_BUF_4F32 { vec4 bR_4f32[]; };
+layout(set = 0, binding = 3) readonly buffer R_BUF_4F16 { f16vec4 bR_4f16[]; };
 
 layout(push_constant) uniform PushConstants {
     uint MN;             // M * N (the outputs: M * N / 2 under gluBlock)
@@ -68,18 +68,18 @@ layout(push_constant) uniform PushConstants {
     float scalarScale;   // s
 };
 
-float readP(uint i)      { return (typeO == DTYPE_F32) ? bufferP_f32[i] : float(bufferP_f16[i]); }
-vec4  readP4(uint i4)    { return (typeO == DTYPE_F32) ? bufferP_4f32[i4] : vec4(bufferP_4f16[i4]); }
+float readP(uint i)      { return (typeO == DTYPE_F32) ? bP_f32[i] : float(bP_f16[i]); }
+vec4  readP4(uint i4)    { return (typeO == DTYPE_F32) ? bP_4f32[i4] : vec4(bP_4f16[i4]); }
 // Each operand's element for output index i (row-major over [M, N]).
 uint biasIdx(uint i)     { return (biasElems == 0u) ? i : i % biasElems; }
 uint residualIdx(uint i) { return (residualElems == 0u) ? i : i % residualElems; }
 
-float readBias(uint i)   { return (hasBias == 0u) ? 0.0 : ((typeB == DTYPE_F32) ? bufferBias_f32[biasIdx(i)] : float(bufferBias_f16[biasIdx(i)])); }
-vec4  readBias4(uint i)  { return (hasBias == 0u) ? vec4(0.0) : ((typeB == DTYPE_F32) ? bufferBias_4f32[biasIdx(i) / 4] : vec4(bufferBias_4f16[biasIdx(i) / 4])); }
-float readR(uint i)      { return (hasResidual == 0u) ? 0.0 : ((typeO == DTYPE_F32) ? bufferR_f32[residualIdx(i)] : float(bufferR_f16[residualIdx(i)])); }
-vec4  readR4(uint i)     { return (hasResidual == 0u) ? vec4(0.0) : ((typeO == DTYPE_F32) ? bufferR_4f32[residualIdx(i) / 4] : vec4(bufferR_4f16[residualIdx(i) / 4])); }
-void writeO(uint i, float v)   { if (typeO == DTYPE_F32) bufferO_f32[i] = v; else bufferO_f16[i] = float16_t(v); }
-void writeO4(uint i4, vec4 v)  { if (typeO == DTYPE_F32) bufferO_4f32[i4] = v; else bufferO_4f16[i4] = f16vec4(v); }
+float readBias(uint i)   { return (hasBias == 0u) ? 0.0 : ((typeB == DTYPE_F32) ? bBias_f32[biasIdx(i)] : float(bBias_f16[biasIdx(i)])); }
+vec4  readBias4(uint i)  { return (hasBias == 0u) ? vec4(0.0) : ((typeB == DTYPE_F32) ? bBias_4f32[biasIdx(i) / 4] : vec4(bBias_4f16[biasIdx(i) / 4])); }
+float readR(uint i)      { return (hasResidual == 0u) ? 0.0 : ((typeO == DTYPE_F32) ? bR_f32[residualIdx(i)] : float(bR_f16[residualIdx(i)])); }
+vec4  readR4(uint i)     { return (hasResidual == 0u) ? vec4(0.0) : ((typeO == DTYPE_F32) ? bR_4f32[residualIdx(i) / 4] : vec4(bR_4f16[residualIdx(i) / 4])); }
+void writeO(uint i, float v)   { if (typeO == DTYPE_F32) bO_f32[i] = v; else bO_f16[i] = float16_t(v); }
+void writeO4(uint i4, vec4 v)  { if (typeO == DTYPE_F32) bO_4f32[i4] = v; else bO_4f16[i4] = f16vec4(v); }
 
 uint M2N() { return MN * 2u; }   // gluBlock: P's elements per split (M * 2H)
 

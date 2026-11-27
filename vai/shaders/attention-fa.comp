@@ -93,24 +93,24 @@ layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0;    // O (output) dtyp
 // Aliases carry the tightest memory qualifier: read-write aliases would block
 // load batching across the append stores. The caches get a readonly alias for
 // the sweep plus a writeonly alias for the append (same binding, disjoint).
-layout(set = 0, binding = 0) writeonly buffer O_BUF_F32 { vec4 bufferO_f32[]; };   // attention O [B, Tq, Hq, Dh]
-layout(set = 0, binding = 0) writeonly buffer O_BUF_F16 { f16vec4 bufferO_f16[]; };
+layout(set = 0, binding = 0) writeonly buffer O_BUF_F32 { vec4 bO_f32[]; };   // attention O [B, Tq, Hq, Dh]
+layout(set = 0, binding = 0) writeonly buffer O_BUF_F16 { f16vec4 bO_f16[]; };
 //////////////////////////////////////////////////////////////////////////////
-layout(set = 0, binding = 1) readonly buffer Q_BUF_F32 { vec4 bufferQ_f32[]; };   // query Q [B, Hq, Tq, Dh]
-layout(set = 0, binding = 1) readonly buffer Q_BUF_F16 { f16vec4 bufferQ_f16[]; };
-layout(set = 0, binding = 2) readonly buffer K_BUF_F32 { vec4 bufferK_f32[]; };   // key   K [B, Hkv, Tkv, Dh] (new tokens)
-layout(set = 0, binding = 2) readonly buffer K_BUF_F16 { f16vec4 bufferK_f16[]; };
-layout(set = 0, binding = 3) readonly buffer V_BUF_F32 { vec4 bufferV_f32[]; };   // value V [B, Hkv, Tkv, Dh] (new tokens)
-layout(set = 0, binding = 3) readonly buffer V_BUF_F16 { f16vec4 bufferV_f16[]; };
+layout(set = 0, binding = 1) readonly buffer Q_BUF_F32 { vec4 bQ_f32[]; };   // query Q [B, Hq, Tq, Dh]
+layout(set = 0, binding = 1) readonly buffer Q_BUF_F16 { f16vec4 bQ_f16[]; };
+layout(set = 0, binding = 2) readonly buffer K_BUF_F32 { vec4 bK_f32[]; };   // key   K [B, Hkv, Tkv, Dh] (new tokens)
+layout(set = 0, binding = 2) readonly buffer K_BUF_F16 { f16vec4 bK_f16[]; };
+layout(set = 0, binding = 3) readonly buffer V_BUF_F32 { vec4 bV_f32[]; };   // value V [B, Hkv, Tkv, Dh] (new tokens)
+layout(set = 0, binding = 3) readonly buffer V_BUF_F16 { f16vec4 bV_f16[]; };
 //////////////////////////////////////////////////////////////////////////////
-layout(set = 0, binding = 4) readonly buffer KCACHE_BUF_F32 { vec4 bufferKCache_f32[]; };   // K cache [B, Hkv, Tmax, Dh]
-layout(set = 0, binding = 4) readonly buffer KCACHE_BUF_F16 { f16vec4 bufferKCache_f16[]; };
-layout(set = 0, binding = 4) writeonly buffer KCACHE_W_F32  { vec4 bufferKCacheW_f32[]; };
-layout(set = 0, binding = 4) writeonly buffer KCACHE_W_F16  { f16vec4 bufferKCacheW_f16[]; };
-layout(set = 0, binding = 5) readonly buffer VCACHE_BUF_F32 { vec4 bufferVCache_f32[]; };   // V cache [B, Hkv, Tmax, Dh]
-layout(set = 0, binding = 5) readonly buffer VCACHE_BUF_F16 { f16vec4 bufferVCache_f16[]; };
-layout(set = 0, binding = 5) writeonly buffer VCACHE_W_F32  { vec4 bufferVCacheW_f32[]; };
-layout(set = 0, binding = 5) writeonly buffer VCACHE_W_F16  { f16vec4 bufferVCacheW_f16[]; };
+layout(set = 0, binding = 4) readonly buffer KCACHE_BUF_F32 { vec4 bKCache_f32[]; };   // K cache [B, Hkv, Tmax, Dh]
+layout(set = 0, binding = 4) readonly buffer KCACHE_BUF_F16 { f16vec4 bKCache_f16[]; };
+layout(set = 0, binding = 4) writeonly buffer KCACHE_W_F32  { vec4 bKCacheW_f32[]; };
+layout(set = 0, binding = 4) writeonly buffer KCACHE_W_F16  { f16vec4 bKCacheW_f16[]; };
+layout(set = 0, binding = 5) readonly buffer VCACHE_BUF_F32 { vec4 bVCache_f32[]; };   // V cache [B, Hkv, Tmax, Dh]
+layout(set = 0, binding = 5) readonly buffer VCACHE_BUF_F16 { f16vec4 bVCache_f16[]; };
+layout(set = 0, binding = 5) writeonly buffer VCACHE_W_F32  { vec4 bVCacheW_f32[]; };
+layout(set = 0, binding = 5) writeonly buffer VCACHE_W_F16  { f16vec4 bVCacheW_f16[]; };
 //////////////////////////////////////////////////////////////////////////////
 layout(set = 0, binding = 6) uniform UB { uint kvCacheCount; };
 //////////////////////////////////////////////////////////////////////////////
@@ -162,29 +162,29 @@ uint spanOrigin(uint t)
     return keyStart(keyPos(t)) & ~(wgKv - 1u);
 }
 
-vec4 readQ4(uint i) { return (typeI == DTYPE_F32) ? bufferQ_f32[i] : vec4(bufferQ_f16[i]); }
+vec4 readQ4(uint i) { return (typeI == DTYPE_F32) ? bQ_f32[i] : vec4(bQ_f16[i]); }
 // Direct-to-f16 staging readers: f16 sources copy without a f32 roundtrip.
-f16vec4 readQ4h(uint i) { return (typeI == DTYPE_F32) ? f16vec4(bufferQ_f32[i]) : bufferQ_f16[i]; }
-f16vec4 readK4h(uint i) { return (typeKV == DTYPE_F32) ? f16vec4(bufferK_f32[i]) : bufferK_f16[i]; }
-f16vec4 readV4h(uint i) { return (typeKV == DTYPE_F32) ? f16vec4(bufferV_f32[i]) : bufferV_f16[i]; }
-f16vec4 readKCache4h(uint i) { return (typeCache == DTYPE_F32) ? f16vec4(bufferKCache_f32[i]) : bufferKCache_f16[i]; }
-f16vec4 readVCache4h(uint i) { return (typeCache == DTYPE_F32) ? f16vec4(bufferVCache_f32[i]) : bufferVCache_f16[i]; }
-vec4 readK4(uint i) { return (typeKV == DTYPE_F32) ? bufferK_f32[i] : vec4(bufferK_f16[i]); }
-vec4 readV4(uint i) { return (typeKV == DTYPE_F32) ? bufferV_f32[i] : vec4(bufferV_f16[i]); }
-vec4 readKCache4(uint i) { return (typeCache == DTYPE_F32) ? bufferKCache_f32[i] : vec4(bufferKCache_f16[i]); }
-vec4 readVCache4(uint i) { return (typeCache == DTYPE_F32) ? bufferVCache_f32[i] : vec4(bufferVCache_f16[i]); }
-void writeO4(uint i, vec4 v) { if (typeO == DTYPE_F32) bufferO_f32[i] = v; else bufferO_f16[i] = f16vec4(v); }
-void writeKCache4(uint i, vec4 v) { if (typeCache == DTYPE_F32) bufferKCacheW_f32[i] = v; else bufferKCacheW_f16[i] = f16vec4(v); }
-void writeVCache4(uint i, vec4 v) { if (typeCache == DTYPE_F32) bufferVCacheW_f32[i] = v; else bufferVCacheW_f16[i] = f16vec4(v); }
+f16vec4 readQ4h(uint i) { return (typeI == DTYPE_F32) ? f16vec4(bQ_f32[i]) : bQ_f16[i]; }
+f16vec4 readK4h(uint i) { return (typeKV == DTYPE_F32) ? f16vec4(bK_f32[i]) : bK_f16[i]; }
+f16vec4 readV4h(uint i) { return (typeKV == DTYPE_F32) ? f16vec4(bV_f32[i]) : bV_f16[i]; }
+f16vec4 readKCache4h(uint i) { return (typeCache == DTYPE_F32) ? f16vec4(bKCache_f32[i]) : bKCache_f16[i]; }
+f16vec4 readVCache4h(uint i) { return (typeCache == DTYPE_F32) ? f16vec4(bVCache_f32[i]) : bVCache_f16[i]; }
+vec4 readK4(uint i) { return (typeKV == DTYPE_F32) ? bK_f32[i] : vec4(bK_f16[i]); }
+vec4 readV4(uint i) { return (typeKV == DTYPE_F32) ? bV_f32[i] : vec4(bV_f16[i]); }
+vec4 readKCache4(uint i) { return (typeCache == DTYPE_F32) ? bKCache_f32[i] : vec4(bKCache_f16[i]); }
+vec4 readVCache4(uint i) { return (typeCache == DTYPE_F32) ? bVCache_f32[i] : vec4(bVCache_f16[i]); }
+void writeO4(uint i, vec4 v) { if (typeO == DTYPE_F32) bO_f32[i] = v; else bO_f16[i] = f16vec4(v); }
+void writeKCache4(uint i, vec4 v) { if (typeCache == DTYPE_F32) bKCacheW_f32[i] = v; else bKCacheW_f16[i] = f16vec4(v); }
+void writeVCache4(uint i, vec4 v) { if (typeCache == DTYPE_F32) bVCacheW_f32[i] = v; else bVCacheW_f16[i] = f16vec4(v); }
 // Append copies without the f32 roundtrip when both ends are f16 (spec-folded).
 void copyKToCache(uint dst, uint src)
 {
-    if (typeKV != DTYPE_F32 && typeCache != DTYPE_F32) bufferKCacheW_f16[dst] = bufferK_f16[src];
+    if (typeKV != DTYPE_F32 && typeCache != DTYPE_F32) bKCacheW_f16[dst] = bK_f16[src];
     else writeKCache4(dst, readK4(src));
 }
 void copyVToCache(uint dst, uint src)
 {
-    if (typeKV != DTYPE_F32 && typeCache != DTYPE_F32) bufferVCacheW_f16[dst] = bufferV_f16[src];
+    if (typeKV != DTYPE_F32 && typeCache != DTYPE_F32) bVCacheW_f16[dst] = bV_f16[src];
     else writeVCache4(dst, readV4(src));
 }
 

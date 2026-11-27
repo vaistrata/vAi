@@ -58,11 +58,11 @@ layout(constant_id = 3) const uint kvCaching = 1;    // 0: the counter binding i
 layout(constant_id = 4) const uint kSpans = 1;       // > 1: the workgroup's subgroups split one tile's keys (wgSize = 16 * kSpans)
 layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0;
 
-layout(set = 0, binding = 0) writeonly buffer O_BUF_F32 { float bufferO_f32[]; };
-layout(set = 0, binding = 0) writeonly buffer O_BUF_F16 { float16_t bufferO_f16[]; };
-layout(set = 0, binding = 1) readonly buffer Q_BUF { float16_t bufferQ[]; };
-layout(set = 0, binding = 2) readonly buffer K_BUF { float16_t bufferK[]; };
-layout(set = 0, binding = 3) readonly buffer V_BUF { float16_t bufferV[]; };
+layout(set = 0, binding = 0) writeonly buffer O_BUF_F32 { float bO_f32[]; };
+layout(set = 0, binding = 0) writeonly buffer O_BUF_F16 { float16_t bO_f16[]; };
+layout(set = 0, binding = 1) readonly buffer Q_BUF { float16_t bQ[]; };
+layout(set = 0, binding = 2) readonly buffer K_BUF { float16_t bK[]; };
+layout(set = 0, binding = 3) readonly buffer V_BUF { float16_t bV[]; };
 layout(set = 0, binding = 4) uniform UB { uint kvCacheCount; };
 
 layout(push_constant) uniform PushConstants {
@@ -80,7 +80,7 @@ layout(push_constant) uniform PushConstants {
 #define CAUSAL_MASK_BINDING 5
 #include "common/causal_mask.h"
 
-void writeO(uint i, float v) { if (typeO == DTYPE_F32) bufferO_f32[i] = v; else bufferO_f16[i] = float16_t(v); }
+void writeO(uint i, float v) { if (typeO == DTYPE_F32) bO_f32[i] = v; else bO_f16[i] = float16_t(v); }
 
 const uint TM = 8, TN = 16, TK = 16;
 const float SLACK = 8.0;   // exp(8) = 2981, well inside fp16
@@ -146,14 +146,14 @@ void main()
         [[unroll]] for (uint d = 0; d < DT; d++)
         {
             MAT_A q;
-            coopMatLoad(q, bufferQ, m0 * Dh + d * TK, Dh, gl_CooperativeMatrixLayoutRowMajor);
+            coopMatLoad(q, bQ, m0 * Dh + d * TK, Dh, gl_CooperativeMatrixLayoutRowMajor);
             if (d == DT - 1u && dhTail)
                 [[unroll]] for (uint i = 0; i < TM; i++)
                     q[i] = float16_t(0.0);
             [[unroll]] for (uint j = 0; j < BKT; j++)
             {
                 MAT_B k;
-                coopMatLoad(k, bufferK, (key0 + kb + j * TN) * Dh + d * TK, Dh, gl_CooperativeMatrixLayoutColumnMajor);
+                coopMatLoad(k, bK, (key0 + kb + j * TN) * Dh + d * TK, Dh, gl_CooperativeMatrixLayoutColumnMajor);
                 s[j] = coopMatMulAdd(q, k, s[j]);
             }
         }
@@ -215,7 +215,7 @@ void main()
             [[unroll]] for (uint t = 0; t < DT; t++)
             {
                 MAT_B vb;
-                coopMatLoad(vb, bufferV, (key0 + kb + j * TK) * Dh + t * TN, Dh, gl_CooperativeMatrixLayoutRowMajor);
+                coopMatLoad(vb, bV, (key0 + kb + j * TK) * Dh + t * TN, Dh, gl_CooperativeMatrixLayoutRowMajor);
                 acc[t] = coopMatMulAdd(pa, vb, acc[t]);
             }
         }

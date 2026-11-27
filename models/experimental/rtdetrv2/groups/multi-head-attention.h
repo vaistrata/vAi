@@ -99,8 +99,8 @@ struct MultiHeadAttention<QkvLayout::Separate> : public vai::NodeGroup
     , Hkv(config.numKVHeads ? config.numKVHeads : Hq)
     , toQK({ .inDim = D, .outDim = (Hq + Hkv) * Dh })
     , toV({ .inDim = D, .outDim = Hkv * Dh })
-    , splitQK({ 0, -1, Hq + Hkv, Dh })
-    , splitV({ 0, -1, Hkv, Dh })
+    , splitQK({ Hq + Hkv, Dh }, 1)
+    , splitV({ Hkv, Dh }, 1)
     , perQK({ 0, 2, 1, 3 })
     , perV({ 0, 2, 1, 3 })
     , splitQ({ .axis = 1, .start = 0, .count = Hq })
@@ -111,7 +111,7 @@ struct MultiHeadAttention<QkvLayout::Separate> : public vai::NodeGroup
              .kvCacheSize = config.kvCacheSize,
              .kvCacheDtype = config.kvCacheDtype,
              .kvCacheRing = config.kvCacheRing })
-    , mergeOut({ 0, -1, int64_t(Hq * Dh) })
+    , mergeOut({ Hq * Dh }, 2)
     , toOut({ .inDim = Hq * Dh, .outDim = D, .acceptResidual = config.acceptResidual })
     {
         // Built in place: a node's slots point back at it, so it cannot be moved in.
@@ -146,9 +146,9 @@ struct MultiHeadAttention<QkvLayout::Separate> : public vai::NodeGroup
     {
         attn.setKvCacheCounter(buffer);
         if (ropeQ)
-            ropeQ->setKvCacheCounter(buffer);
+            ropeQ->setPosParam(buffer);
         if (ropeK)
-            ropeK->setKvCacheCounter(buffer);
+            ropeK->setPosParam(buffer);
     }
 };
 
@@ -193,7 +193,7 @@ struct MultiHeadAttention<QkvLayout::Fused> : public vai::NodeGroup
     , Hq(config.numQHeads ? config.numQHeads : config.embedDim / config.headDim)
     , Hkv(config.numKVHeads ? config.numKVHeads : Hq)
     , toQKV({ .inDim = D, .outDim = (Hq + 2 * Hkv) * Dh })
-    , splitHeads({ 0, -1, Hq + 2 * Hkv, Dh })
+    , splitHeads({ Hq + 2 * Hkv, Dh }, 1)
     , perQKV({ 0, 2, 1, 3 })
     , sliceQ({ .axis = 1, .start = 0, .count = Hq })
     , sliceK({ .axis = 1, .start = Hq, .count = Hkv })
@@ -204,7 +204,7 @@ struct MultiHeadAttention<QkvLayout::Fused> : public vai::NodeGroup
              .kvCacheSize = config.kvCacheSize,
              .kvCacheDtype = config.kvCacheDtype,
              .kvCacheRing = config.kvCacheRing })
-    , mergeOut({ 0, -1, int64_t(Hq * Dh) })
+    , mergeOut({ Hq * Dh }, 2)
     , toOut({ .inDim = Hq * Dh, .outDim = D, .acceptResidual = config.acceptResidual })
     {
         // Built in place: a node's slots point back at it, so it cannot be moved in.
@@ -234,9 +234,9 @@ struct MultiHeadAttention<QkvLayout::Fused> : public vai::NodeGroup
     {
         attn.setKvCacheCounter(buffer);
         if (ropeQ)
-            ropeQ->setKvCacheCounter(buffer);
+            ropeQ->setPosParam(buffer);
         if (ropeK)
-            ropeK->setKvCacheCounter(buffer);
+            ropeK->setPosParam(buffer);
     }
 };
 }   // namespace model::experimental::rtdetrv2::group

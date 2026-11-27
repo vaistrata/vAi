@@ -1,7 +1,7 @@
 """The built-in graph nodes, re-exported from the extension module.
 
 Base classes (`Node`, `NodeGroup`, ...), `KVCacheCounter` and the config types
-(`ActType`, `ResidualOrder`, `RopeType`, `RopeConfig`) stay at the top level of
+(`ActType`, `ResidualOrder`, `RopePosType`, `RopeConfig`) stay at the top level of
 `pyvai`.
 
 A new node is bound in bindings/nodes/<node>.cpp, through bindNode() and one
@@ -15,6 +15,7 @@ from ._pyvai import (
     GateNode,
     ReshapeNode,
     FlattenNode,
+    UnflattenNode,
     ConcatNode,
     PermuteNode,
     SliceNode,
@@ -53,6 +54,7 @@ __all__ = [
     "GateNode",
     "ReshapeNode",
     "FlattenNode",
+    "UnflattenNode",
     "ConcatNode",
     "PermuteNode",
     "SliceNode",

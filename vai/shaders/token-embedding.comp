@@ -24,16 +24,16 @@ layout(constant_id = 1) const uint batched = 0;       // 0: one sequence, so n i
 layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0;  // O (output) dtype
 layout(constant_id = SPEC_ID_TYPE_W) const uint typeW = 0;  // W / posW dtype
 
-layout(set = 0, binding = 0) buffer O_BUF_F32    { float bufferO_f32[]; };      // embedding [..., T, D]
-layout(set = 0, binding = 0) buffer O_BUF_F16    { float16_t bufferO_f16[]; };
+layout(set = 0, binding = 0) buffer O_BUF_F32    { float bO_f32[]; };      // embedding [..., T, D]
+layout(set = 0, binding = 0) buffer O_BUF_F16    { float16_t bO_f16[]; };
 //////////////////////////////////////////////////////////////////////////////
-layout(set = 0, binding = 1) buffer I_BUF        { uint bufferI[]; };           // token ids [..., T]
+layout(set = 0, binding = 1) buffer I_BUF        { uint bI[]; };           // token ids [..., T]
 //////////////////////////////////////////////////////////////////////////////
-layout(set = 0, binding = 2) buffer W_BUF_F32    { float bufferW_f32[]; };      // token weight [V, D]
-layout(set = 0, binding = 2) buffer W_BUF_F16    { float16_t bufferW_f16[]; };
+layout(set = 0, binding = 2) buffer W_BUF_F32    { float bW_f32[]; };      // token weight [V, D]
+layout(set = 0, binding = 2) buffer W_BUF_F16    { float16_t bW_f16[]; };
 //////////////////////////////////////////////////////////////////////////////
-layout(set = 0, binding = 3) buffer POSW_BUF_F32 { float bufferPosW_f32[]; };   // positional weight [M, D]
-layout(set = 0, binding = 3) buffer POSW_BUF_F16 { float16_t bufferPosW_f16[]; };
+layout(set = 0, binding = 3) buffer POSW_BUF_F32 { float bPosW_f32[]; };   // positional weight [M, D]
+layout(set = 0, binding = 3) buffer POSW_BUF_F16 { float16_t bPosW_f16[]; };
 //////////////////////////////////////////////////////////////////////////////
 layout(set = 0, binding = 4) uniform UB          { uint kvCacheCount; };    // unused if hasPosEmbed = 0
 
@@ -44,9 +44,9 @@ layout(push_constant) uniform PushConstants {
     float scale;
 };
 
-float readW(uint i) { return (typeW == DTYPE_F32) ? bufferW_f32[i] : float(bufferW_f16[i]); }
-float readPosW(uint i) { return (typeW == DTYPE_F32) ? bufferPosW_f32[i] : float(bufferPosW_f16[i]); }
-void writeO(uint i, float v) { if (typeO == DTYPE_F32) bufferO_f32[i] = v; else bufferO_f16[i] = float16_t(v); }
+float readW(uint i) { return (typeW == DTYPE_F32) ? bW_f32[i] : float(bW_f16[i]); }
+float readPosW(uint i) { return (typeW == DTYPE_F32) ? bPosW_f32[i] : float(bPosW_f16[i]); }
+void writeO(uint i, float v) { if (typeO == DTYPE_F32) bO_f32[i] = v; else bO_f16[i] = float16_t(v); }
 
 void main()
 {
@@ -54,7 +54,7 @@ void main()
     uint n = gl_GlobalInvocationID.y;
     if (n >= rows || d >= D) return;
 
-    float v = readW(bufferI[n] * D + d) * scale;
+    float v = readW(bI[n] * D + d) * scale;
     if (hasPosEmbed != 0u)
     {
         // One sequence leaves n as the position; past that each one starts over.

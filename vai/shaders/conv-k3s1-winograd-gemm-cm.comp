@@ -34,12 +34,12 @@ layout(constant_id = 12) const uint sgN = 16u; // N tile dimension computed by e
 layout(constant_id = 13) const bool inputReorder = false;
 layout(constant_id = SPEC_ID_TYPE_ACC) const uint typeAcc = 0u;
 
-layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_F32 { float bufferO_f32[]; };
-layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_F16 { float16_t bufferO_f16[]; };
-layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_4F16 { f16vec4 bufferO_4f16[]; };
-layout(set = 0, binding = 1) restrict readonly  buffer I_BUF_F16 { float16_t bufferI_f16[]; };  // transformed input
-layout(set = 0, binding = 2) restrict readonly  buffer W_BUF_F16 { float16_t bufferW_f16[]; };  // transformed weights
-layout(set = 0, binding = 2) restrict readonly  buffer W_BUF_4F16 { f16vec4 bufferW_4f16[]; };
+layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_F32 { float bO_f32[]; };
+layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_F16 { float16_t bO_f16[]; };
+layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_4F16 { f16vec4 bO_4f16[]; };
+layout(set = 0, binding = 1) restrict readonly  buffer I_BUF_F16 { float16_t bI_f16[]; };  // transformed input
+layout(set = 0, binding = 2) restrict readonly  buffer W_BUF_F16 { float16_t bW_f16[]; };  // transformed weights
+layout(set = 0, binding = 2) restrict readonly  buffer W_BUF_4F16 { f16vec4 bW_4f16[]; };
 
 layout(push_constant) uniform PushConstants {
     uint hi;
@@ -94,22 +94,22 @@ uint imageInputBase = 0u;
 
 void writeO(uint i, float16_t value)
 {
-    bufferO_f16[i] = value;
+    bO_f16[i] = value;
 }
 
 void writeO4(uint i, f16vec4 value)
 {
-    bufferO_4f16[i >> 2u] = value;
+    bO_4f16[i >> 2u] = value;
 }
 
 void writeO(uint i, float value)
 {
-    bufferO_f16[i] = float16_t(value);
+    bO_f16[i] = float16_t(value);
 }
 
 void writeO4(uint i, vec4 value)
 {
-    bufferO_4f16[i >> 2u] = f16vec4(value);
+    bO_4f16[i >> 2u] = f16vec4(value);
 }
 
 void readIPanel(
@@ -141,7 +141,7 @@ void readIPanel(
             uint k = (kTileBase + panelTile) * tK + kk;
             uint n = n0 + tile * tN + col;
             SharedH[sharedBase + index] = (!guardTileN || n < N)
-                ? bufferI_f16[batchOffsetI + k * N + n]
+                ? bI_f16[batchOffsetI + k * N + n]
                 : float16_t(0.0);
         }
     }
@@ -175,7 +175,7 @@ void readITiles(
             uint k = k0 + kk;
             uint n = n0 + tile * tN + col;
             SharedH[sharedBase + index] = (!guardTileN || n < N)
-                ? bufferI_f16[batchOffsetI + k * N + n]
+                ? bI_f16[batchOffsetI + k * N + n]
                 : float16_t(0.0);
         }
     }
@@ -201,7 +201,7 @@ void writePartialTile(
         uint col = index % tN;
         uint n = n0 + col;
         if (n < N)
-            bufferO_f16[offsetM + (m0 + row) * N + n] = SharedH[base + index];
+            bO_f16[offsetM + (m0 + row) * N + n] = SharedH[base + index];
     }
 }
 
@@ -290,14 +290,14 @@ void main()
                 {
                     if (reorder)
                     {
-                        coopMatLoad(a[mt], bufferW_4f16,
+                        coopMatLoad(a[mt], bW_4f16,
                                     (A4Row0 + mt * kTiles + kt) << 6u, 4u,
                                     gl_CooperativeMatrixLayoutRowMajor);
                     }
                     else
                     {
                         coopMatLoad(
-                            a[mt], bufferW_f16,
+                            a[mt], bW_f16,
                             batchOffsetU + (m0 + mt * tM) * K + k0,
                             K, gl_CooperativeMatrixLayoutRowMajor);
                     }
@@ -309,7 +309,7 @@ void main()
                     if (inputReorder)
                     {
                         coopMatLoad(
-                            b, bufferI_f16,
+                            b, bI_f16,
                             inputTileBase(
                                 batch, kt, n0 / tN + nt, K, N),
                             tN, gl_CooperativeMatrixLayoutRowMajor);
@@ -317,7 +317,7 @@ void main()
                     else
                     {
                         coopMatLoad(
-                            b, bufferI_f16,
+                            b, bI_f16,
                             batchOffsetV + k0 * N + n0 + nt * tN,
                             N, gl_CooperativeMatrixLayoutRowMajor);
                     }
@@ -348,10 +348,10 @@ void main()
                  panelTileStart < kTileEnd;
                  panelTileStart += panelKTiles)
             {
-                const uint bufferIndex =
+                const uint bIndex =
                     (panelTileStart / panelKTiles) & 1u;
                 const uint sharedBase =
-                    bufferIndex * panelKTiles *
+                    bIndex * panelKTiles *
                         sgpNIter * B_TILE_ELEMS;
                 const uint panelTileEnd =
                     min(panelTileStart + panelKTiles, kTileEnd);
@@ -363,7 +363,7 @@ void main()
                 // while one workgroup barrier now covers the whole panel.
                 if (hasNext)
                 {
-                    uint nextBufferIndex = 1u - bufferIndex;
+                    uint nextBufferIndex = 1u - bIndex;
                     const uint nextPanelTiles =
                         min(panelKTiles, kTileEnd - nextPanel);
                     readIPanel(
@@ -391,14 +391,14 @@ void main()
                         if (reorder)
                         {
                             coopMatLoad(
-                                a[mt], bufferW_4f16,
+                                a[mt], bW_4f16,
                                 (A4Row0 + mt * kTiles + kt) << 6u,
                                 4u, gl_CooperativeMatrixLayoutRowMajor);
                         }
                         else
                         {
                             coopMatLoad(
-                                a[mt], bufferW_f16,
+                                a[mt], bW_f16,
                                 batchOffsetU +
                                     (m0 + mt * tM) * K + k0,
                                 K, gl_CooperativeMatrixLayoutRowMajor);
@@ -483,14 +483,14 @@ void main()
                 {
                     if (reorder)
                     {
-                        coopMatLoad(a[mt], bufferW_4f16,
+                        coopMatLoad(a[mt], bW_4f16,
                                     (A4Row0 + mt * kTiles + kt) << 6u, 4u,
                                     gl_CooperativeMatrixLayoutRowMajor);
                     }
                     else
                     {
                         coopMatLoad(
-                            a[mt], bufferW_f16,
+                            a[mt], bW_f16,
                             batchOffsetU + (m0 + mt * tM) * K + k0,
                             K, gl_CooperativeMatrixLayoutRowMajor);
                     }
@@ -501,7 +501,7 @@ void main()
                     if (inputReorder)
                     {
                         coopMatLoad(
-                            b, bufferI_f16,
+                            b, bI_f16,
                             inputTileBase(
                                 batch, kt, n0 / tN + nt, K, N),
                             tN, gl_CooperativeMatrixLayoutRowMajor);
@@ -509,7 +509,7 @@ void main()
                     else
                     {
                         coopMatLoad(
-                            b, bufferI_f16,
+                            b, bI_f16,
                             batchOffsetV + k0 * N + n0 + nt * tN,
                             N, gl_CooperativeMatrixLayoutRowMajor);
                     }
@@ -540,9 +540,9 @@ void main()
                 for (uint kt = kTileStart; kt < kTileEnd; ++kt)
                 {
                     const uint k0 = kt * tK;
-                    const uint bufferIndex = kt & 1u;
+                    const uint bIndex = kt & 1u;
                     const uint sharedBase =
-                        bufferIndex * sgpNIter * B_TILE_ELEMS;
+                        bIndex * sgpNIter * B_TILE_ELEMS;
                     const uint nextK = k0 + tK;
                     const bool hasNext = kt + 1u < kTileEnd;
                     matA a[sgpMIter];
@@ -552,7 +552,7 @@ void main()
                     {
                         if (reorder)
                         {
-                            coopMatLoad(a[mt], bufferW_4f16,
+                            coopMatLoad(a[mt], bW_4f16,
                                         (A4Row0 + mt * kTiles + kt) << 6u,
                                         4u,
                                         gl_CooperativeMatrixLayoutRowMajor);
@@ -560,7 +560,7 @@ void main()
                         else
                         {
                             coopMatLoad(
-                                a[mt], bufferW_f16,
+                                a[mt], bW_f16,
                                 batchOffsetU + (m0 + mt * tM) * K + k0,
                                 K, gl_CooperativeMatrixLayoutRowMajor);
                         }
@@ -577,7 +577,7 @@ void main()
 
                     if (hasNext)
                     {
-                        uint nextBufferIndex = 1u - bufferIndex;
+                        uint nextBufferIndex = 1u - bIndex;
                         readITiles(
                             nextBufferIndex * sgpNIter * B_TILE_ELEMS,
                             batchOffsetV, nextK, n0, N, guardTileN);
@@ -616,10 +616,10 @@ void main()
                      panelTileStart < kTileEnd;
                      panelTileStart += panelKTiles)
                 {
-                    const uint bufferIndex =
+                    const uint bIndex =
                         (panelTileStart / panelKTiles) & 1u;
                     const uint sharedBase =
-                        bufferIndex * panelKTiles *
+                        bIndex * panelKTiles *
                             sgpNIter * B_TILE_ELEMS;
                     const uint panelTileEnd =
                         min(panelTileStart + panelKTiles, kTileEnd);
@@ -628,7 +628,7 @@ void main()
 
                     if (hasNext)
                     {
-                        uint nextBufferIndex = 1u - bufferIndex;
+                        uint nextBufferIndex = 1u - bIndex;
                         const uint nextPanelTiles =
                             min(panelKTiles, kTileEnd - nextPanel);
                         readIPanel(
@@ -656,7 +656,7 @@ void main()
                             if (reorder)
                             {
                                 coopMatLoad(
-                                    a[mt], bufferW_4f16,
+                                    a[mt], bW_4f16,
                                     (A4Row0 + mt * kTiles + kt) << 6u,
                                     4u,
                                     gl_CooperativeMatrixLayoutRowMajor);
@@ -664,7 +664,7 @@ void main()
                             else
                             {
                                 coopMatLoad(
-                                    a[mt], bufferW_f16,
+                                    a[mt], bW_f16,
                                     batchOffsetU +
                                         (m0 + mt * tM) * K + k0,
                                     K, gl_CooperativeMatrixLayoutRowMajor);
@@ -710,7 +710,7 @@ void main()
                     if (tileN0 + tN <= N)
                     {
                         coopMatStore(
-                            acc[index], bufferO_f16,
+                            acc[index], bO_f16,
                             batchOffsetM + tileM0 * N + tileN0,
                             N, gl_CooperativeMatrixLayoutRowMajor);
                     }
@@ -764,7 +764,7 @@ void main()
             uint dst = batchOffsetM + m * N + col;
             if (col + 3u < N && (dst & 3u) == 0u)
             {
-                bufferO_4f16[dst >> 2u] = f16vec4(SharedH[src], SharedH[src + 1u],
+                bO_4f16[dst >> 2u] = f16vec4(SharedH[src], SharedH[src + 1u],
                                                     SharedH[src + 2u], SharedH[src + 3u]);
             }
             else
@@ -789,6 +789,6 @@ void main()
         uint m = m0 + e / wgN;
         uint col = n0 + e % wgN;
         if (col < N)
-            bufferO_f32[batchOffsetM + m * N + col] = float(SharedH[sharedBase + e]);
+            bO_f32[batchOffsetM + m * N + col] = float(SharedH[sharedBase + e]);
     }
 }

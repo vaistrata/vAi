@@ -201,10 +201,10 @@ layout(constant_id = 0) const uint inPlace = 0;
 layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0;
 layout(constant_id = SPEC_ID_TYPE_I) const uint typeI = 0;
 
-layout(set = 0, binding = 0) buffer O_BUF_F32 { float bufferO_f32[]; };
-layout(set = 0, binding = 0) buffer O_BUF_F16 { float16_t bufferO_f16[]; };
-layout(set = 0, binding = 1) buffer I_BUF_F32 { float bufferI_f32[]; };
-layout(set = 0, binding = 1) buffer I_BUF_F16 { float16_t bufferI_f16[]; };
+layout(set = 0, binding = 0) buffer O_BUF_F32 { float bO_f32[]; };
+layout(set = 0, binding = 0) buffer O_BUF_F16 { float16_t bO_f16[]; };
+layout(set = 0, binding = 1) buffer I_BUF_F32 { float bI_f32[]; };
+layout(set = 0, binding = 1) buffer I_BUF_F16 { float16_t bI_f16[]; };
 ```
 
 `Node`에서 전달한 값은 다음 위치로 연결됩니다. 번호와 타입을 함께 확인합니다.

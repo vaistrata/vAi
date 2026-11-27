@@ -65,28 +65,28 @@ layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0;  // O (output) dtype
 
 // The S pass reads K in head-dim pairs, the PV pass reads V and the append
 // copies in vec4s.
-layout(set = 0, binding = 0) writeonly buffer O_BUF_F32 { vec4 bufferO_f32[]; };   // attention O [B, Tq, Hq, Dh]
-layout(set = 0, binding = 0) writeonly buffer O_BUF_F16 { f16vec4 bufferO_f16[]; };
+layout(set = 0, binding = 0) writeonly buffer O_BUF_F32 { vec4 bO_f32[]; };   // attention O [B, Tq, Hq, Dh]
+layout(set = 0, binding = 0) writeonly buffer O_BUF_F16 { f16vec4 bO_f16[]; };
 //////////////////////////////////////////////////////////////////////////////
-layout(set = 0, binding = 1) readonly buffer Q_BUF_F32 { vec4 bufferQ_f32[]; };   // query Q [B, Hq, Tq, Dh]
-layout(set = 0, binding = 1) readonly buffer Q_BUF_F16 { f16vec4 bufferQ_f16[]; };
-layout(set = 0, binding = 2) readonly buffer K_BUF_F32 { vec4 bufferK_f32[]; };   // key   K [B, Hkv, Tkv, Dh] (new tokens)
-layout(set = 0, binding = 2) readonly buffer K_BUF_F16 { f16vec4 bufferK_f16[]; };
-layout(set = 0, binding = 2) readonly buffer K2_BUF_F32 { vec2 bufferK2_f32[]; };
-layout(set = 0, binding = 2) readonly buffer K2_BUF_F16 { f16vec2 bufferK2_f16[]; };
-layout(set = 0, binding = 3) readonly buffer V_BUF_F32 { vec4 bufferV_f32[]; };   // value V [B, Hkv, Tkv, Dh] (new tokens)
-layout(set = 0, binding = 3) readonly buffer V_BUF_F16 { f16vec4 bufferV_f16[]; };
+layout(set = 0, binding = 1) readonly buffer Q_BUF_F32 { vec4 bQ_f32[]; };   // query Q [B, Hq, Tq, Dh]
+layout(set = 0, binding = 1) readonly buffer Q_BUF_F16 { f16vec4 bQ_f16[]; };
+layout(set = 0, binding = 2) readonly buffer K_BUF_F32 { vec4 bK_f32[]; };   // key   K [B, Hkv, Tkv, Dh] (new tokens)
+layout(set = 0, binding = 2) readonly buffer K_BUF_F16 { f16vec4 bK_f16[]; };
+layout(set = 0, binding = 2) readonly buffer K2_BUF_F32 { vec2 bK2_f32[]; };
+layout(set = 0, binding = 2) readonly buffer K2_BUF_F16 { f16vec2 bK2_f16[]; };
+layout(set = 0, binding = 3) readonly buffer V_BUF_F32 { vec4 bV_f32[]; };   // value V [B, Hkv, Tkv, Dh] (new tokens)
+layout(set = 0, binding = 3) readonly buffer V_BUF_F16 { f16vec4 bV_f16[]; };
 //////////////////////////////////////////////////////////////////////////////
-layout(set = 0, binding = 4) readonly buffer KCACHE_BUF_F32 { vec4 bufferKCache_f32[]; };   // K cache [B, Hkv, Tmax, Dh]
-layout(set = 0, binding = 4) readonly buffer KCACHE_BUF_F16 { f16vec4 bufferKCache_f16[]; };
-layout(set = 0, binding = 4) readonly buffer KCACHE2_BUF_F32 { vec2 bufferKCache2_f32[]; };
-layout(set = 0, binding = 4) readonly buffer KCACHE2_BUF_F16 { f16vec2 bufferKCache2_f16[]; };
-layout(set = 0, binding = 4) writeonly buffer KCACHE_W_F32  { vec4 bufferKCacheW_f32[]; };
-layout(set = 0, binding = 4) writeonly buffer KCACHE_W_F16  { f16vec4 bufferKCacheW_f16[]; };
-layout(set = 0, binding = 5) readonly buffer VCACHE_BUF_F32 { vec4 bufferVCache_f32[]; };   // V cache [B, Hkv, Tmax, Dh]
-layout(set = 0, binding = 5) readonly buffer VCACHE_BUF_F16 { f16vec4 bufferVCache_f16[]; };
-layout(set = 0, binding = 5) writeonly buffer VCACHE_W_F32  { vec4 bufferVCacheW_f32[]; };
-layout(set = 0, binding = 5) writeonly buffer VCACHE_W_F16  { f16vec4 bufferVCacheW_f16[]; };
+layout(set = 0, binding = 4) readonly buffer KCACHE_BUF_F32 { vec4 bKCache_f32[]; };   // K cache [B, Hkv, Tmax, Dh]
+layout(set = 0, binding = 4) readonly buffer KCACHE_BUF_F16 { f16vec4 bKCache_f16[]; };
+layout(set = 0, binding = 4) readonly buffer KCACHE2_BUF_F32 { vec2 bKCache2_f32[]; };
+layout(set = 0, binding = 4) readonly buffer KCACHE2_BUF_F16 { f16vec2 bKCache2_f16[]; };
+layout(set = 0, binding = 4) writeonly buffer KCACHE_W_F32  { vec4 bKCacheW_f32[]; };
+layout(set = 0, binding = 4) writeonly buffer KCACHE_W_F16  { f16vec4 bKCacheW_f16[]; };
+layout(set = 0, binding = 5) readonly buffer VCACHE_BUF_F32 { vec4 bVCache_f32[]; };   // V cache [B, Hkv, Tmax, Dh]
+layout(set = 0, binding = 5) readonly buffer VCACHE_BUF_F16 { f16vec4 bVCache_f16[]; };
+layout(set = 0, binding = 5) writeonly buffer VCACHE_W_F32  { vec4 bVCacheW_f32[]; };
+layout(set = 0, binding = 5) writeonly buffer VCACHE_W_F16  { f16vec4 bVCacheW_f16[]; };
 //////////////////////////////////////////////////////////////////////////////
 layout(set = 0, binding = 6) uniform UB { uint kvCacheCount; };
 //////////////////////////////////////////////////////////////////////////////
@@ -139,20 +139,20 @@ shared float16_t sP[SG * PST];                            // [row][key]
 shared float     sMax[NSG * SG];                          // block maxima per key group, then the partial sums
 shared float     sAlpha[SG];                              // rescale factor of this block, then the row max
 
-vec4 readQ4(uint i) { return (typeI == DTYPE_F32) ? bufferQ_f32[i] : vec4(bufferQ_f16[i]); }
-void writeO4(uint i, vec4 v) { if (typeO == DTYPE_F32) bufferO_f32[i] = v; else bufferO_f16[i] = f16vec4(v); }
-void writeKCache4(uint i, vec4 v) { if (typeCache == DTYPE_F32) bufferKCacheW_f32[i] = v; else bufferKCacheW_f16[i] = f16vec4(v); }
-void writeVCache4(uint i, vec4 v) { if (typeCache == DTYPE_F32) bufferVCacheW_f32[i] = v; else bufferVCacheW_f16[i] = f16vec4(v); }
+vec4 readQ4(uint i) { return (typeI == DTYPE_F32) ? bQ_f32[i] : vec4(bQ_f16[i]); }
+void writeO4(uint i, vec4 v) { if (typeO == DTYPE_F32) bO_f32[i] = v; else bO_f16[i] = f16vec4(v); }
+void writeKCache4(uint i, vec4 v) { if (typeCache == DTYPE_F32) bKCacheW_f32[i] = v; else bKCacheW_f16[i] = f16vec4(v); }
+void writeVCache4(uint i, vec4 v) { if (typeCache == DTYPE_F32) bVCacheW_f32[i] = v; else bVCacheW_f16[i] = f16vec4(v); }
 // Append copies without the f32 roundtrip when both ends are f16 (spec-folded).
 void copyKToCache(uint dst, uint src)
 {
-    if (typeI != DTYPE_F32 && typeCache != DTYPE_F32) bufferKCacheW_f16[dst] = bufferK_f16[src];
-    else writeKCache4(dst, (typeI == DTYPE_F32) ? bufferK_f32[src] : vec4(bufferK_f16[src]));
+    if (typeI != DTYPE_F32 && typeCache != DTYPE_F32) bKCacheW_f16[dst] = bK_f16[src];
+    else writeKCache4(dst, (typeI == DTYPE_F32) ? bK_f32[src] : vec4(bK_f16[src]));
 }
 void copyVToCache(uint dst, uint src)
 {
-    if (typeI != DTYPE_F32 && typeCache != DTYPE_F32) bufferVCacheW_f16[dst] = bufferV_f16[src];
-    else writeVCache4(dst, (typeI == DTYPE_F32) ? bufferV_f32[src] : vec4(bufferV_f16[src]));
+    if (typeI != DTYPE_F32 && typeCache != DTYPE_F32) bVCacheW_f16[dst] = bV_f16[src];
+    else writeVCache4(dst, (typeI == DTYPE_F32) ? bV_f32[src] : vec4(bV_f16[src]));
 }
 
 // Per-invocation state the block passes share.
@@ -174,26 +174,26 @@ uint cacheRow(uint j) { return kvCacheBase + min(j, cached - 1u) - blockShift; }
 uint inputRow(uint j) { return kvInputBase + min(j, inputEnd - 1u) - cached; }
 f16vec2 kPairH(const uint src, uint j, uint p)
 {
-    const f16vec2 c = (src == 1u) ? f16vec2(0.0) : (typeCache == DTYPE_F32) ? f16vec2(bufferKCache2_f32[cacheRow(j) * DH2 + p]) : bufferKCache2_f16[cacheRow(j) * DH2 + p];
-    const f16vec2 i = (src == 0u) ? f16vec2(0.0) : (typeI == DTYPE_F32) ? f16vec2(bufferK2_f32[inputRow(j) * DH2 + p]) : bufferK2_f16[inputRow(j) * DH2 + p];
+    const f16vec2 c = (src == 1u) ? f16vec2(0.0) : (typeCache == DTYPE_F32) ? f16vec2(bKCache2_f32[cacheRow(j) * DH2 + p]) : bKCache2_f16[cacheRow(j) * DH2 + p];
+    const f16vec2 i = (src == 0u) ? f16vec2(0.0) : (typeI == DTYPE_F32) ? f16vec2(bK2_f32[inputRow(j) * DH2 + p]) : bK2_f16[inputRow(j) * DH2 + p];
     return (src == 0u || (src == 2u && j < cached)) ? c : i;
 }
 vec2 kPairF(const uint src, uint j, uint p)
 {
-    const vec2 c = (src == 1u) ? vec2(0.0) : (typeCache == DTYPE_F32) ? bufferKCache2_f32[cacheRow(j) * DH2 + p] : vec2(bufferKCache2_f16[cacheRow(j) * DH2 + p]);
-    const vec2 i = (src == 0u) ? vec2(0.0) : (typeI == DTYPE_F32) ? bufferK2_f32[inputRow(j) * DH2 + p] : vec2(bufferK2_f16[inputRow(j) * DH2 + p]);
+    const vec2 c = (src == 1u) ? vec2(0.0) : (typeCache == DTYPE_F32) ? bKCache2_f32[cacheRow(j) * DH2 + p] : vec2(bKCache2_f16[cacheRow(j) * DH2 + p]);
+    const vec2 i = (src == 0u) ? vec2(0.0) : (typeI == DTYPE_F32) ? bK2_f32[inputRow(j) * DH2 + p] : vec2(bK2_f16[inputRow(j) * DH2 + p]);
     return (src == 0u || (src == 2u && j < cached)) ? c : i;
 }
 f16vec4 v4H(const uint src, uint j, uint d)
 {
-    const f16vec4 c = (src == 1u) ? f16vec4(0.0) : (typeCache == DTYPE_F32) ? f16vec4(bufferVCache_f32[cacheRow(j) * DH4 + d]) : bufferVCache_f16[cacheRow(j) * DH4 + d];
-    const f16vec4 i = (src == 0u) ? f16vec4(0.0) : (typeI == DTYPE_F32) ? f16vec4(bufferV_f32[inputRow(j) * DH4 + d]) : bufferV_f16[inputRow(j) * DH4 + d];
+    const f16vec4 c = (src == 1u) ? f16vec4(0.0) : (typeCache == DTYPE_F32) ? f16vec4(bVCache_f32[cacheRow(j) * DH4 + d]) : bVCache_f16[cacheRow(j) * DH4 + d];
+    const f16vec4 i = (src == 0u) ? f16vec4(0.0) : (typeI == DTYPE_F32) ? f16vec4(bV_f32[inputRow(j) * DH4 + d]) : bV_f16[inputRow(j) * DH4 + d];
     return (src == 0u || (src == 2u && j < cached)) ? c : i;
 }
 vec4 v4F(const uint src, uint j, uint d)
 {
-    const vec4 c = (src == 1u) ? vec4(0.0) : (typeCache == DTYPE_F32) ? bufferVCache_f32[cacheRow(j) * DH4 + d] : vec4(bufferVCache_f16[cacheRow(j) * DH4 + d]);
-    const vec4 i = (src == 0u) ? vec4(0.0) : (typeI == DTYPE_F32) ? bufferV_f32[inputRow(j) * DH4 + d] : vec4(bufferV_f16[inputRow(j) * DH4 + d]);
+    const vec4 c = (src == 1u) ? vec4(0.0) : (typeCache == DTYPE_F32) ? bVCache_f32[cacheRow(j) * DH4 + d] : vec4(bVCache_f16[cacheRow(j) * DH4 + d]);
+    const vec4 i = (src == 0u) ? vec4(0.0) : (typeI == DTYPE_F32) ? bV_f32[inputRow(j) * DH4 + d] : vec4(bV_f16[inputRow(j) * DH4 + d]);
     return (src == 0u || (src == 2u && j < cached)) ? c : i;
 }
 

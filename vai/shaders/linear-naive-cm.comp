@@ -43,10 +43,10 @@ layout(local_size_x_id = 10) in;   // workgroup x = WG_SIZE (one subgroup)
 const uint N_TILES = 4;             // N-tiles (accumulators) per workgroup
 const uint STRIDE  = N_TILES * tN;  // columns per workgroup / Cs & Ws row stride
 
-layout(set = 0, binding = 0) writeonly buffer O_BUF    { float bufferO[];   };
-layout(set = 0, binding = 1) readonly  buffer I_BUF    { float bufferI[];   };
-layout(set = 0, binding = 2) readonly  buffer W_BUF    { uint bufferW[];    };
-layout(set = 0, binding = 3) readonly  buffer BIAS_BUF { uint bufferBias[]; };
+layout(set = 0, binding = 0) writeonly buffer O_BUF    { float bO[];   };
+layout(set = 0, binding = 1) readonly  buffer I_BUF    { float bI[];   };
+layout(set = 0, binding = 2) readonly  buffer W_BUF    { uint bW[];    };
+layout(set = 0, binding = 3) readonly  buffer BIAS_BUF { uint bBias[]; };
 
 layout(push_constant) uniform PushConstants {
     uint M;
@@ -64,8 +64,8 @@ shared float16_t Cs_f16[tM * STRIDE];  // accumulator store, accType == DTYPE_F1
 #define accMatF32 coopmat<float,     gl_ScopeSubgroup, tM, tN, gl_MatrixUseAccumulator>
 #define accMatF16 coopmat<float16_t, gl_ScopeSubgroup, tM, tN, gl_MatrixUseAccumulator>
 
-float readW(uint i)    { return READ_F(bufferW, i, typeW); }
-float readBias(uint n) { return (hasBias == 0u) ? 0.0 : READ_F(bufferBias, n, typeW); }
+float readW(uint i)    { return READ_F(bW, i, typeW); }
+float readBias(uint n) { return (hasBias == 0u) ? 0.0 : READ_F(bBias, n, typeW); }
 
 // Stage A and W tiles into shared fp16. Out-of-range rows (>= M) / columns
 // (>= N) are zeroed. Caller issues the barrier.
@@ -80,7 +80,7 @@ void stageInputs(uint k0, uint mBase, uint colBase)
         uint r = idx / tK;
         uint k = idx % tK;
         uint m = mBase + r;
-        As[idx] = (m < M) ? float16_t(bufferI[m * K + k0 + k]) : float16_t(0.0);
+        As[idx] = (m < M) ? float16_t(bI[m * K + k0 + k]) : float16_t(0.0);
     }
 
     // Ws[r*STRIDE + c] = W[colBase + c][k0 + r]   (transpose view of a W row-block)
@@ -124,7 +124,7 @@ void storeOut(uint mBase, uint colBase)
             uint m = mBase + r;
             if (m >= M) break;
             float acc = (accType == DTYPE_F32) ? Cs_f32[r * STRIDE + c] : float(Cs_f16[r * STRIDE + c]);
-            bufferO[m * N + col] = applyActivation(acc + b);
+            bO[m * N + col] = applyActivation(acc + b);
         }
     }
 }

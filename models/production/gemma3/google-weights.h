@@ -18,31 +18,24 @@
 #ifndef PRODUCTION_GEMMA3_GOOGLE_WEIGHTS_H
 #define PRODUCTION_GEMMA3_GOOGLE_WEIGHTS_H
 
-#include <filesystem>
-#include <memory>
-#include <stdexcept>
-#include <string>
-#include <string_view>
-#include <unordered_map>
-#include <vector>
-
 #include "net.h"
 #include "vai/engine/weights.h"
+#include <string>
+#include <vector>
 
 
 namespace model::production::gemma3::google {
 
-// -----------------------------------------------------------------------------
-// Weight loader
-// -----------------------------------------------------------------------------
-
-inline void loadWeights(Net& net, const vai::Checkpoint& parser)
+/////////////////////////////////////////////////////////////////////////////////////////
+// Weight loading - maps HuggingFace safetensors key names to model members
+/////////////////////////////////////////////////////////////////////////////////////////
+inline void loadWeights(Net& net, const vai::Checkpoint& ckpt)
 {
     // Weights load at the net's wDefaultDtype, norm coefficients at Fp32.
     const vai::Dtype wDt = net.config().wDefaultDtype;
     const vai::Dtype normDt = vai::Dtype::Fp32;
 
-    const bool hasVision = net.modelCfg.vision;
+    const bool hasVision = net.modelCfg.hasVision();
 
     // Text-only checkpoints use:
     //   model.*
@@ -52,47 +45,36 @@ inline void loadWeights(Net& net, const vai::Checkpoint& parser)
     const std::string textRoot = hasVision ? "language_model.model." : "model.";
 
     // Each tensor is loaded at the dtype declared by its owning node.
-    auto loadLin = [&](auto& lin, const std::string& wKey) {
-        // Gemma3 text linear layers carry no bias: the "bias" slot stays empty.
-        lin["weight"] = vai::Tensor(parser[wKey], wDt);
+    auto loadLin = [&](auto& lin, const std::string& prefix) {
+        lin["weight"] = vai::Tensor(ckpt[prefix + ".weight"], wDt);
+        lin["bias"] = vai::Tensor(ckpt[prefix + ".bias"], wDt);
     };
-
+    // Gemma's projections carry no bias: the "bias" slot stays empty.
+    auto loadLinNoBias = [&](auto& lin, const std::string& prefix) {
+        lin["weight"] = vai::Tensor(ckpt[prefix + ".weight"], wDt);
+    };
+    auto loadLayerNorm = [&](auto& ln, const std::string& prefix) {
+        ln["scale"] = vai::Tensor(ckpt[prefix + ".weight"], normDt);
+        ln["shift"] = vai::Tensor(ckpt[prefix + ".bias"], normDt);
+    };
     // Gemma stores the RMS scale centered on zero. The kernel scales by scale as
     // it is, so the +1 is folded in here — once, at load.
     auto loadRMSNorm = [&](auto& rn, const std::string& wKey) {
-        vai::Tensor centered(parser[wKey], vai::Dtype::Fp32);
-
+        vai::Tensor centered(ckpt[wKey], vai::Dtype::Fp32);
         const float* src = static_cast<const float*>(centered.hostData());
 
         std::vector<float> scale(src, src + centered.numElements());
-
         for (float& value : scale)
             value += 1.0f;
 
         rn["scale"] = vai::Tensor(centered.shape(), normDt).setFloats(std::move(scale));
     };
 
-
-    // -------------------------------------------------------------------------
-    // Vision encoder + multimodal projector
-    //
-    // Only Gemma 3 VLM checkpoints have these tensors.
-    // -------------------------------------------------------------------------
-
+    // Vision encoder and multimodal projector, only in the VLM checkpoints
     if (hasVision)
     {
-        const VisionTransformerConfig& cfg = group::VisionEncoder::config;
+        const VisionTransformerConfig& cfg = VisionConfig::trf;
         auto& vision = net.visionEncoder.value();
-
-        auto loadLayerNorm = [&](auto& ln, const std::string& prefix) {
-            ln["scale"] = vai::Tensor(parser[prefix + ".weight"], normDt);
-            ln["shift"] = vai::Tensor(parser[prefix + ".bias"], normDt);
-        };
-
-        auto loadBiasedLin = [&](auto& lin, const std::string& prefix) {
-            lin["weight"] = vai::Tensor(parser[prefix + ".weight"], wDt);
-            lin["bias"] = vai::Tensor(parser[prefix + ".bias"], wDt);
-        };
 
         const std::string visionRoot = "vision_tower.vision_model.";
 
@@ -101,12 +83,13 @@ inline void loadWeights(Net& net, const vai::Checkpoint& parser)
             auto& patch = vision.patchEmbed;
 
             patch.project["weight"] =
-                vai::Tensor(parser[visionRoot + "embeddings.patch_embedding.weight"], wDt)
+                vai::Tensor(ckpt[visionRoot + "embeddings.patch_embedding.weight"], wDt)
                     .reshape({ cfg.embedDim, cfg.imageChannels * cfg.patchSize * cfg.patchSize });
 
-            patch.project["bias"] = vai::sum(parser[visionRoot + "embeddings.position_embedding.weight"],
-                                             parser[visionRoot + "embeddings.patch_embedding.bias"],
-                                             wDt);
+            patch.project["bias"] = vai::sum(
+                ckpt[visionRoot + "embeddings.position_embedding.weight"],
+                ckpt[visionRoot + "embeddings.patch_embedding.bias"],
+                wDt);
         }
 
         // Vision encoder blocks
@@ -118,39 +101,29 @@ inline void loadWeights(Net& net, const vai::Checkpoint& parser)
 
             loadLayerNorm(block.norm1, prefix + "layer_norm1");
             loadLayerNorm(block.norm2, prefix + "layer_norm2");
-            loadBiasedLin(block.mhAttn.projQ, prefix + "self_attn.q_proj");
-            loadBiasedLin(block.mhAttn.projK, prefix + "self_attn.k_proj");
-            loadBiasedLin(block.mhAttn.projV, prefix + "self_attn.v_proj");
-            loadBiasedLin(block.mhAttn.projOut, prefix + "self_attn.out_proj");
-            loadBiasedLin(block.ffn.fc1, prefix + "mlp.fc1");
-            loadBiasedLin(block.ffn.fc2, prefix + "mlp.fc2");
+            loadLin(block.mhAttn.projQ, prefix + "self_attn.q_proj");
+            loadLin(block.mhAttn.projK, prefix + "self_attn.k_proj");
+            loadLin(block.mhAttn.projV, prefix + "self_attn.v_proj");
+            loadLin(block.mhAttn.projOut, prefix + "self_attn.out_proj");
+            loadLin(block.ffn.fc1, prefix + "mlp.fc1");
+            loadLin(block.ffn.fc2, prefix + "mlp.fc2");
         }
 
         // Final vision LayerNorm
         loadLayerNorm(vision.encoder.finalNorm, visionRoot + "post_layernorm");
 
         // Multimodal projector input norm
-        loadRMSNorm(vision.imageNorm, "multi_modal_projector.mm_soft_emb_norm.weight");
+        loadRMSNorm(vision.connector.tokenNorm, "multi_modal_projector.mm_soft_emb_norm.weight");
         // Multimodal projector
         {
-            (*net.projector)["weight"] = vai::Tensor(parser["multi_modal_projector."
-                                                            "mm_input_projection_weight"],
-                                                     wDt)
-                                             .permute(1, 0);
+            vision.connector.projector["weight"] =
+                vai::Tensor(ckpt["multi_modal_projector.mm_input_projection_weight"], wDt).permute(1, 0);
         }
     }
 
-
-    // -------------------------------------------------------------------------
-    // Language model
-    //
-    // Shared by text-only and VLM Gemma 3 checkpoints.
-    // Only the checkpoint prefix differs.
-    // -------------------------------------------------------------------------
-
     // Token embedding
     {
-        net.embedding["weight"] = vai::Tensor(parser[textRoot + "embed_tokens.weight"], wDt);
+        net.embedding["weight"] = vai::Tensor(ckpt[textRoot + "embed_tokens.weight"], wDt);
     }
 
     // Decoder blocks
@@ -166,10 +139,10 @@ inline void loadWeights(Net& net, const vai::Checkpoint& parser)
         loadRMSNorm(block.norm4, prefix + "post_feedforward_layernorm.weight");
 
         // Self attention projections
-        loadLin(block.mhAttn.projQ, prefix + "self_attn.q_proj.weight");
-        loadLin(block.mhAttn.projK, prefix + "self_attn.k_proj.weight");
-        loadLin(block.mhAttn.projV, prefix + "self_attn.v_proj.weight");
-        loadLin(block.mhAttn.projOut, prefix + "self_attn.o_proj.weight");
+        loadLinNoBias(block.mhAttn.projQ, prefix + "self_attn.q_proj");
+        loadLinNoBias(block.mhAttn.projK, prefix + "self_attn.k_proj");
+        loadLinNoBias(block.mhAttn.projV, prefix + "self_attn.v_proj");
+        loadLinNoBias(block.mhAttn.projOut, prefix + "self_attn.o_proj");
 
         // Per-head Q/K norms
         loadRMSNorm(*block.mhAttn.normQ, prefix + "self_attn.q_norm.weight");
@@ -180,12 +153,10 @@ inline void loadWeights(Net& net, const vai::Checkpoint& parser)
         // gate and value are represented as one projection internally, so the
         // checkpoint tensors are stacked row-wise: gate first, then up/value.
         {
-
-            block.ffn.gateValue["weight"] = vai::Tensor(parser[prefix + "mlp.gate_proj.weight"], wDt)
-                                                .concat(vai::Tensor(parser[prefix + "mlp.up_proj.weight"], wDt));
+            block.ffn.gateValue["weight"] =
+                vai::concat({ ckpt[prefix + "mlp.gate_proj.weight"], ckpt[prefix + "mlp.up_proj.weight"] }, wDt);
         }
-
-        loadLin(block.ffn.out, prefix + "mlp.down_proj.weight");
+        loadLinNoBias(block.ffn.out, prefix + "mlp.down_proj");
     }
 
     // Final RMSNorm

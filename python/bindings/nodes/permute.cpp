@@ -33,9 +33,10 @@ static void bindPermute(nb::module_& m)
                 new (self) vai::node::Permute(std::move(perms));
             },
             nb::arg("perms"),
-            "out0 dimension i is in0 dimension perms[i], so perms lists each axis of "
-            "in0 once. out0 aliases in0's buffer when the permutation keeps memory "
-            "order and in0 is at the net's o_default_dtype.");
+            "perms reorders the last len(perms) axes of in0 and the axes ahead of them "
+            "pass through. Among those, out0 dimension i is in0 dimension perms[i]. "
+            "out0 aliases in0's buffer when the permutation keeps memory order and in0 "
+            "is at the net's o_default_dtype.");
 }
 PYVAI_NODE_BINDING(bindPermute);
 

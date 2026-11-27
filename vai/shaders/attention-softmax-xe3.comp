@@ -29,10 +29,10 @@ layout(constant_id = 0) const uint kvCaching = 1;   // 0: the counter binding is
 layout(constant_id = 1) const uint held = 0;        // > 0: ceil(ld / 64), a lane keeps its row's quads in registers
                                                     // between the two sweeps instead of reading S twice
 
-layout(set = 0, binding = 0) writeonly buffer P_BUF { f16vec4 bufferP[]; };
-layout(set = 0, binding = 1) readonly buffer S_BUF { vec4 bufferS[]; };
+layout(set = 0, binding = 0) writeonly buffer P_BUF { f16vec4 bP[]; };
+layout(set = 0, binding = 1) readonly buffer S_BUF { vec4 bS[]; };
 layout(set = 0, binding = 2) uniform UB { uint kvCacheCount; };
-layout(set = 0, binding = 4) writeonly buffer L_BUF { float bufferL[]; };
+layout(set = 0, binding = 4) writeonly buffer L_BUF { float bL[]; };
 
 layout(push_constant) uniform PushConstants {
     uint M;       // rows of this chunk
@@ -77,7 +77,7 @@ void main()
             sv[i] = vec4(-3.0e38);
             if (q < quads && c.w >= first && c.x < last)
             {
-                sv[i] = mix(vec4(-3.0e38), bufferS[q0 + q], inRange(c, first, last));
+                sv[i] = mix(vec4(-3.0e38), bS[q0 + q], inRange(c, first, last));
                 mxh = max(mxh, max(max(sv[i].x, sv[i].y), max(sv[i].z, sv[i].w)));
             }
         }
@@ -92,11 +92,11 @@ void main()
             const f16vec4 e = f16vec4(exp((sv[i] - mxh) * scale));
             const vec4 ef = vec4(e);
             sumh += (ef.x + ef.y) + (ef.z + ef.w);
-            bufferP[q0 + q] = e;
+            bP[q0 + q] = e;
         }
         sumh = subgroupAdd(sumh);
         if (lane == 0u)
-            bufferL[row] = (sumh > 0.0 && mxh > -1.0e38) ? 1.0 / sumh : 0.0;
+            bL[row] = (sumh > 0.0 && mxh > -1.0e38) ? 1.0 / sumh : 0.0;
         return;
     }
 
@@ -105,7 +105,7 @@ void main()
     {
         const uvec4 c = uvec4(q * 4u) + off;
         if (c.w < first || c.x >= last) continue;
-        const vec4 s = mix(vec4(-3.0e38), bufferS[q0 + q], inRange(c, first, last));
+        const vec4 s = mix(vec4(-3.0e38), bS[q0 + q], inRange(c, first, last));
         mx = max(mx, max(max(s.x, s.y), max(s.z, s.w)));
     }
     mx = subgroupMax(mx);
@@ -119,13 +119,13 @@ void main()
         if (c.w >= first && c.x < last)
         {
             const bvec4 in4 = inRange(c, first, last);
-            e = f16vec4(mix(vec4(0.0), exp((bufferS[q0 + q] - mx) * scale), in4));
+            e = f16vec4(mix(vec4(0.0), exp((bS[q0 + q] - mx) * scale), in4));
             const vec4 ef = vec4(e);
             sum += (ef.x + ef.y) + (ef.z + ef.w);
         }
-        bufferP[q0 + q] = e;
+        bP[q0 + q] = e;
     }
     sum = subgroupAdd(sum);
     if (lane == 0u)
-        bufferL[row] = (sum > 0.0) ? 1.0 / sum : 0.0;
+        bL[row] = (sum > 0.0) ? 1.0 / sum : 0.0;
 }

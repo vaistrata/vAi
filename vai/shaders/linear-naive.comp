@@ -23,21 +23,21 @@ layout(constant_id = SPEC_ID_TYPE_I) const uint typeI    = 0;  // I (input) dtyp
 layout(constant_id = SPEC_ID_TYPE_W) const uint typeW    = 0;  // W (weight) and bias dtype
 layout(constant_id = SPEC_ID_ALIGNED) const uint aligned = 1;  // 0: no alignment, 1: K is multiple of 4
 
-layout(set = 0, binding = 0) buffer O_BUF_F32   { float bufferO_f32[]; };
-layout(set = 0, binding = 0) buffer O_BUF_F16   { float16_t bufferO_f16[]; };
+layout(set = 0, binding = 0) buffer O_BUF_F32   { float bO_f32[]; };
+layout(set = 0, binding = 0) buffer O_BUF_F16   { float16_t bO_f16[]; };
 //////////////////////////////////////////////////////////////////////////////
-layout(set = 0, binding = 1) buffer I_BUF_F32   { float bufferI_f32[]; };
-layout(set = 0, binding = 1) buffer I_BUF_4F32  { vec4 bufferI_4f32[]; };
-layout(set = 0, binding = 1) buffer I_BUF_F16   { float16_t bufferI_f16[]; };
-layout(set = 0, binding = 1) buffer I_BUF_4F16  { f16vec4 bufferI_4f16[]; };
+layout(set = 0, binding = 1) buffer I_BUF_F32   { float bI_f32[]; };
+layout(set = 0, binding = 1) buffer I_BUF_4F32  { vec4 bI_4f32[]; };
+layout(set = 0, binding = 1) buffer I_BUF_F16   { float16_t bI_f16[]; };
+layout(set = 0, binding = 1) buffer I_BUF_4F16  { f16vec4 bI_4f16[]; };
 //////////////////////////////////////////////////////////////////////////////
-layout(set = 0, binding = 2) buffer W_BUF_F32   { float bufferW_f32[]; };
-layout(set = 0, binding = 2) buffer W_BUF_4F32  { vec4 bufferW_4f32[]; };
-layout(set = 0, binding = 2) buffer W_BUF_F16   { float16_t bufferW_f16[]; };
-layout(set = 0, binding = 2) buffer W_BUF_4F16  { f16vec4 bufferW_4f16[]; };
+layout(set = 0, binding = 2) buffer W_BUF_F32   { float bW_f32[]; };
+layout(set = 0, binding = 2) buffer W_BUF_4F32  { vec4 bW_4f32[]; };
+layout(set = 0, binding = 2) buffer W_BUF_F16   { float16_t bW_f16[]; };
+layout(set = 0, binding = 2) buffer W_BUF_4F16  { f16vec4 bW_4f16[]; };
 //////////////////////////////////////////////////////////////////////////////
-layout(set = 0, binding = 3) buffer BIAS_BUF_32 { float bufferBias_f32[]; };
-layout(set = 0, binding = 3) buffer BIAS_BUF_16 { float16_t bufferBias_f16[]; };
+layout(set = 0, binding = 3) buffer BIAS_BUF_32 { float bBias_f32[]; };
+layout(set = 0, binding = 3) buffer BIAS_BUF_16 { float16_t bBias_f16[]; };
 
 layout(push_constant) uniform PushConstants {
     uint M;
@@ -45,12 +45,12 @@ layout(push_constant) uniform PushConstants {
     uint N;
 };
 
-float readI(uint i)    { return (typeI == DTYPE_F32) ? bufferI_f32[i] : float(bufferI_f16[i]); }
-vec4  readI4(uint i4)  { return (typeI == DTYPE_F32) ? bufferI_4f32[i4] : vec4(bufferI_4f16[i4]); }
-float readW(uint i)    { return (typeW == DTYPE_F32) ? bufferW_f32[i] : float(bufferW_f16[i]); }
-vec4  readW4(uint i4)  { return (typeW == DTYPE_F32) ? bufferW_4f32[i4] : vec4(bufferW_4f16[i4]); }
-float readBias(uint n) { return (hasBias == 0u) ? 0.0 : ((typeW == DTYPE_F32) ? bufferBias_f32[n] : float(bufferBias_f16[n])); }
-void writeO(uint i, float v) { if (typeO == DTYPE_F32) bufferO_f32[i] = v; else bufferO_f16[i] = float16_t(v); }
+float readI(uint i)    { return (typeI == DTYPE_F32) ? bI_f32[i] : float(bI_f16[i]); }
+vec4  readI4(uint i4)  { return (typeI == DTYPE_F32) ? bI_4f32[i4] : vec4(bI_4f16[i4]); }
+float readW(uint i)    { return (typeW == DTYPE_F32) ? bW_f32[i] : float(bW_f16[i]); }
+vec4  readW4(uint i4)  { return (typeW == DTYPE_F32) ? bW_4f32[i4] : vec4(bW_4f16[i4]); }
+float readBias(uint n) { return (hasBias == 0u) ? 0.0 : ((typeW == DTYPE_F32) ? bBias_f32[n] : float(bBias_f16[n])); }
+void writeO(uint i, float v) { if (typeO == DTYPE_F32) bO_f32[i] = v; else bO_f16[i] = float16_t(v); }
 
 void main()
 {

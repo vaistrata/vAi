@@ -48,20 +48,20 @@ layout(constant_id = 3) const uint kvCaching  = 1;    // 0: skip the append; the
 layout(constant_id = 4) const uint typeKV     = 0;    // K / V input dtype
 layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0;  // O (output) dtype
 
-layout(set = 0, binding = 0) buffer O_BUF_F32      { float bufferO_f32[]; };   // attention O [B, Tq, Hq, Dh]
-layout(set = 0, binding = 0) buffer O_BUF_F16      { float16_t bufferO_f16[]; };
+layout(set = 0, binding = 0) buffer O_BUF_F32      { float bO_f32[]; };   // attention O [B, Tq, Hq, Dh]
+layout(set = 0, binding = 0) buffer O_BUF_F16      { float16_t bO_f16[]; };
 //////////////////////////////////////////////////////////////////////////////
-layout(set = 0, binding = 1) buffer Q_BUF_F32      { float bufferQ_f32[]; };   // query Q [B, Hq, Tq, Dh]
-layout(set = 0, binding = 1) buffer Q_BUF_F16      { float16_t bufferQ_f16[]; };
-layout(set = 0, binding = 2) buffer K_BUF_F32      { float bufferK_f32[]; };   // key   K [B, Hkv, Tkv, Dh] (new tokens)
-layout(set = 0, binding = 2) buffer K_BUF_F16      { float16_t bufferK_f16[]; };
-layout(set = 0, binding = 3) buffer V_BUF_F32      { float bufferV_f32[]; };   // value V [B, Hkv, Tkv, Dh] (new tokens)
-layout(set = 0, binding = 3) buffer V_BUF_F16      { float16_t bufferV_f16[]; };
+layout(set = 0, binding = 1) buffer Q_BUF_F32      { float bQ_f32[]; };   // query Q [B, Hq, Tq, Dh]
+layout(set = 0, binding = 1) buffer Q_BUF_F16      { float16_t bQ_f16[]; };
+layout(set = 0, binding = 2) buffer K_BUF_F32      { float bK_f32[]; };   // key   K [B, Hkv, Tkv, Dh] (new tokens)
+layout(set = 0, binding = 2) buffer K_BUF_F16      { float16_t bK_f16[]; };
+layout(set = 0, binding = 3) buffer V_BUF_F32      { float bV_f32[]; };   // value V [B, Hkv, Tkv, Dh] (new tokens)
+layout(set = 0, binding = 3) buffer V_BUF_F16      { float16_t bV_f16[]; };
 //////////////////////////////////////////////////////////////////////////////
-layout(set = 0, binding = 4) buffer KCACHE_BUF_F32 { float bufferKCache_f32[]; };   // K cache [B, Hkv, Tmax, Dh]
-layout(set = 0, binding = 4) buffer KCACHE_BUF_F16 { float16_t bufferKCache_f16[]; };
-layout(set = 0, binding = 5) buffer VCACHE_BUF_F32 { float bufferVCache_f32[]; };   // V cache [B, Hkv, Tmax, Dh]
-layout(set = 0, binding = 5) buffer VCACHE_BUF_F16 { float16_t bufferVCache_f16[]; };
+layout(set = 0, binding = 4) buffer KCACHE_BUF_F32 { float bKCache_f32[]; };   // K cache [B, Hkv, Tmax, Dh]
+layout(set = 0, binding = 4) buffer KCACHE_BUF_F16 { float16_t bKCache_f16[]; };
+layout(set = 0, binding = 5) buffer VCACHE_BUF_F32 { float bVCache_f32[]; };   // V cache [B, Hkv, Tmax, Dh]
+layout(set = 0, binding = 5) buffer VCACHE_BUF_F16 { float16_t bVCache_f16[]; };
 //////////////////////////////////////////////////////////////////////////////
 layout(set = 0, binding = 6) uniform UB            { uint kvCacheCount; };
 
@@ -97,14 +97,14 @@ uint cacheRow(uint p)
     return (kvCacheRing != 0u) ? p % Tmax : p;
 }
 
-float readQ(uint i)      { return (typeI == DTYPE_F32) ? bufferQ_f32[i] : float(bufferQ_f16[i]); }
-float readK(uint i)      { return (typeKV == DTYPE_F32) ? bufferK_f32[i] : float(bufferK_f16[i]); }
-float readV(uint i)      { return (typeKV == DTYPE_F32) ? bufferV_f32[i] : float(bufferV_f16[i]); }
-float readKCache(uint i) { return (typeCache == DTYPE_F32) ? bufferKCache_f32[i] : float(bufferKCache_f16[i]); }
-float readVCache(uint i) { return (typeCache == DTYPE_F32) ? bufferVCache_f32[i] : float(bufferVCache_f16[i]); }
-void writeO(uint i, float v)      { if (typeO == DTYPE_F32) bufferO_f32[i] = v; else bufferO_f16[i] = float16_t(v); }
-void writeKCache(uint i, float v) { if (typeCache == DTYPE_F32) bufferKCache_f32[i] = v; else bufferKCache_f16[i] = float16_t(v); }
-void writeVCache(uint i, float v) { if (typeCache == DTYPE_F32) bufferVCache_f32[i] = v; else bufferVCache_f16[i] = float16_t(v); }
+float readQ(uint i)      { return (typeI == DTYPE_F32) ? bQ_f32[i] : float(bQ_f16[i]); }
+float readK(uint i)      { return (typeKV == DTYPE_F32) ? bK_f32[i] : float(bK_f16[i]); }
+float readV(uint i)      { return (typeKV == DTYPE_F32) ? bV_f32[i] : float(bV_f16[i]); }
+float readKCache(uint i) { return (typeCache == DTYPE_F32) ? bKCache_f32[i] : float(bKCache_f16[i]); }
+float readVCache(uint i) { return (typeCache == DTYPE_F32) ? bVCache_f32[i] : float(bVCache_f16[i]); }
+void writeO(uint i, float v)      { if (typeO == DTYPE_F32) bO_f32[i] = v; else bO_f16[i] = float16_t(v); }
+void writeKCache(uint i, float v) { if (typeCache == DTYPE_F32) bKCache_f32[i] = v; else bKCache_f16[i] = float16_t(v); }
+void writeVCache(uint i, float v) { if (typeCache == DTYPE_F32) bVCache_f32[i] = v; else bVCache_f16[i] = float16_t(v); }
 
 
 // One online-softmax accumulation step (first iteration lPrev = 0 -> acc*0 = 0;

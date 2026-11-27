@@ -41,20 +41,20 @@ layout(constant_id = SPEC_ID_TYPE_P) const uint typeP = 0u;
 layout(constant_id = SPEC_ID_HAS_SCALE) const uint hasScale = 0u;
 layout(constant_id = SPEC_ID_HAS_BIAS) const uint hasBias = 1u;
 
-layout(set = 0, binding = 0) writeonly buffer O_BUF_F32 { float bufferO_f32[]; };
-layout(set = 0, binding = 0) writeonly buffer O_BUF_F16 { float16_t bufferO_f16[]; };
-layout(set = 0, binding = 0) writeonly buffer O_BUF_4F32 { vec4 bufferO_4f32[]; };
-layout(set = 0, binding = 0) writeonly buffer O_BUF_4F16 { f16vec4 bufferO_4f16[]; };
-layout(set = 0, binding = 1) readonly buffer I_BUF_F32 { float bufferI_f32[]; };
-layout(set = 0, binding = 1) readonly buffer I_BUF_F16 { float16_t bufferI_f16[]; };
-layout(set = 0, binding = 2) restrict readonly buffer W_BUF_F32 { float bufferW_f32[]; };
-layout(set = 0, binding = 2) restrict readonly buffer W_BUF_F16 { float16_t bufferW_f16[]; };
-layout(set = 0, binding = 3) restrict readonly buffer BIAS_BUF_F32 { float bufferBias_f32[]; };
-layout(set = 0, binding = 3) restrict readonly buffer BIAS_BUF_F16 { float16_t bufferBias_f16[]; };
-layout(set = 0, binding = 4) restrict readonly buffer SCALE_BUF_F32 { float bufferScale_f32[]; };
-layout(set = 0, binding = 4) restrict readonly buffer SCALE_BUF_F16 { float16_t bufferScale_f16[]; };
-layout(set = 0, binding = 5) restrict readonly buffer RES_BUF_F32 { float bufferRes_f32[]; };
-layout(set = 0, binding = 5) restrict readonly buffer RES_BUF_F16 { float16_t bufferRes_f16[]; };
+layout(set = 0, binding = 0) writeonly buffer O_BUF_F32 { float bO_f32[]; };
+layout(set = 0, binding = 0) writeonly buffer O_BUF_F16 { float16_t bO_f16[]; };
+layout(set = 0, binding = 0) writeonly buffer O_BUF_4F32 { vec4 bO_4f32[]; };
+layout(set = 0, binding = 0) writeonly buffer O_BUF_4F16 { f16vec4 bO_4f16[]; };
+layout(set = 0, binding = 1) readonly buffer I_BUF_F32 { float bI_f32[]; };
+layout(set = 0, binding = 1) readonly buffer I_BUF_F16 { float16_t bI_f16[]; };
+layout(set = 0, binding = 2) restrict readonly buffer W_BUF_F32 { float bW_f32[]; };
+layout(set = 0, binding = 2) restrict readonly buffer W_BUF_F16 { float16_t bW_f16[]; };
+layout(set = 0, binding = 3) restrict readonly buffer BIAS_BUF_F32 { float bBias_f32[]; };
+layout(set = 0, binding = 3) restrict readonly buffer BIAS_BUF_F16 { float16_t bBias_f16[]; };
+layout(set = 0, binding = 4) restrict readonly buffer SCALE_BUF_F32 { float bScale_f32[]; };
+layout(set = 0, binding = 4) restrict readonly buffer SCALE_BUF_F16 { float16_t bScale_f16[]; };
+layout(set = 0, binding = 5) restrict readonly buffer RES_BUF_F32 { float bRes_f32[]; };
+layout(set = 0, binding = 5) restrict readonly buffer RES_BUF_F16 { float16_t bRes_f16[]; };
 
 layout(push_constant) uniform PushConstants {
     uint hi;
@@ -105,16 +105,16 @@ shared float16_t SharedSplit16[SPLIT_SHARED16_ALLOC];
 uint imageInputBase = 0u;
 uint imageOutputBase = 0u;
 
-float readI(uint i) { i += imageInputBase; return typeI == DTYPE_F32 ? bufferI_f32[i] : float(bufferI_f16[i]); }
-float16_t readI16(uint i) { i += imageInputBase; return typeI == DTYPE_F32 ? float16_t(bufferI_f32[i]) : bufferI_f16[i]; }
+float readI(uint i) { i += imageInputBase; return typeI == DTYPE_F32 ? bI_f32[i] : float(bI_f16[i]); }
+float16_t readI16(uint i) { i += imageInputBase; return typeI == DTYPE_F32 ? float16_t(bI_f32[i]) : bI_f16[i]; }
 float readBias(uint m)
 {
     if (hasBias == 0u) return 0.0;
-    return typeP == DTYPE_F32 ? bufferBias_f32[m] : float(bufferBias_f16[m]);
+    return typeP == DTYPE_F32 ? bBias_f32[m] : float(bBias_f16[m]);
 }
-float readScale(uint m) { return typeP == DTYPE_F32 ? bufferScale_f32[m] : float(bufferScale_f16[m]); }
-float readW(uint i) { return typeW == DTYPE_F32 ? bufferW_f32[i] : float(bufferW_f16[i]); }
-float readResidual(uint i) { i += imageOutputBase; return typeI == DTYPE_F32 ? bufferRes_f32[i] : float(bufferRes_f16[i]); }
+float readScale(uint m) { return typeP == DTYPE_F32 ? bScale_f32[m] : float(bScale_f16[m]); }
+float readW(uint i) { return typeW == DTYPE_F32 ? bW_f32[i] : float(bW_f16[i]); }
+float readResidual(uint i) { i += imageOutputBase; return typeI == DTYPE_F32 ? bRes_f32[i] : float(bRes_f16[i]); }
 
 // The residual's first `count` elements from i; the rest read as 0.
 vec4 readResidual4(uint i, uint count)
@@ -128,13 +128,13 @@ vec4 readResidual4(uint i, uint count)
 // O's four elements from element i, a multiple of 4 with the image's base.
 void writeO4(uint i, vec4 v) {
     i = (imageOutputBase + i) >> 2u;
-    if (typeO == DTYPE_F32) bufferO_4f32[i] = v;
-    else bufferO_4f16[i] = f16vec4(v);
+    if (typeO == DTYPE_F32) bO_4f32[i] = v;
+    else bO_4f16[i] = f16vec4(v);
 }
 void writeO(uint i, float v) {
     i += imageOutputBase;
-    if (typeO == DTYPE_F32) bufferO_f32[i] = v;
-    else bufferO_f16[i] = float16_t(v);
+    if (typeO == DTYPE_F32) bO_f32[i] = v;
+    else bO_f16[i] = float16_t(v);
 }
 
 uint splitAsIndex(uint buf, uint k, uint m)
@@ -396,7 +396,7 @@ void main()
         {
             uint k = index / wgM;
             uint m = index % wgM;
-            As16[0][k * A_STRIDE + m] = bufferW_f16[m * wgK + k];
+            As16[0][k * A_STRIDE + m] = bW_f16[m * wgK + k];
         }
 
         for (uint index = t; index < wgK * wgN; index += gl_WorkGroupSize.x)
@@ -675,14 +675,14 @@ void main()
                     uint base = partialOffset + m * N + n0;
                     if (n0 + 3u < N && (base & 3u) == 0u)
                     {
-                        bufferO_4f32[base >> 2u] = acc[tm];
+                        bO_4f32[base >> 2u] = acc[tm];
                     }
                     else
                     {
-                        if (n0 < N) bufferO_f32[base] = acc[tm].x;
-                        if (n0 + 1u < N) bufferO_f32[base + 1u] = acc[tm].y;
-                        if (n0 + 2u < N) bufferO_f32[base + 2u] = acc[tm].z;
-                        if (n0 + 3u < N) bufferO_f32[base + 3u] = acc[tm].w;
+                        if (n0 < N) bO_f32[base] = acc[tm].x;
+                        if (n0 + 1u < N) bO_f32[base + 1u] = acc[tm].y;
+                        if (n0 + 2u < N) bO_f32[base + 2u] = acc[tm].z;
+                        if (n0 + 3u < N) bO_f32[base + 3u] = acc[tm].w;
                     }
                 }
             }

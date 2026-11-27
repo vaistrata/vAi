@@ -306,7 +306,7 @@ public:
         uint32_t inDim;
         uint32_t outDim;
 
-        bool acceptResidual = false;  // input "residual"
+        bool acceptResidual = false;   // input "residual"
         vai::ResidualOrder residualOrder = vai::ResidualOrder::AfterActivation;
         // The activation on the output, or under glu on the gate.
         vai::ActType actType = vai::ActType::None;

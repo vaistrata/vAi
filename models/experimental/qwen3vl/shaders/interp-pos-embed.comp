@@ -1,0 +1,80 @@
+/*=============================================================================
+ interp-pos-embed.comp:
+     O[b, n, d] += bilinear(T, row(n), col(n))[d]   (in place)
+
+ - T [S * S, D] is a learned S x S position table. Patch n samples it at its
+   (row, col) of the Gh x Gw grid with corners aligned: row * (S - 1) / (Gh - 1),
+   likewise col, the four nearest entries weighted bilinearly (HF's
+   fast_pos_embed_interpolate).
+ - n runs in tileSize x tileSize tiles, raster within a tile and across tiles,
+   as Rope's POS_GRID2D reads it; tileSize 1 is plain raster order.
+ - gridW (Gw) is a uniform the model writes, read at dispatch time; Gh = N / Gw.
+ - O (typeO) and T (typeW) are fp32 or fp16 through same-binding buffer
+   aliases; the sample is fp32.
+ - Dispatch (host): dispatch2(D, rows), x one element of a row, y one patch row.
+=============================================================================*/
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_shader_16bit_storage : require
+#include "common/spec_constants.h"
+
+layout(local_size_x = 64) in;
+
+layout(constant_id = 0) const uint tileSize = 1u;            // patch order; 1 = raster
+layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0;   // O (in place) dtype
+layout(constant_id = SPEC_ID_TYPE_W) const uint typeW = 0;   // T (table) dtype
+
+layout(set = 0, binding = 0) buffer O_BUF_F32 { float bO_f32[]; };   // O [rows, D], rows = B * N
+layout(set = 0, binding = 0) buffer O_BUF_F16 { float16_t bO_f16[]; };
+//////////////////////////////////////////////////////////////////////////////
+layout(set = 0, binding = 1) readonly buffer T_BUF_F32 { float bT_f32[]; };   // T [S * S, D]
+layout(set = 0, binding = 1) readonly buffer T_BUF_F16 { float16_t bT_f16[]; };
+//////////////////////////////////////////////////////////////////////////////
+layout(set = 0, binding = 2) uniform GridWidth { uint gridW; };
+
+layout(push_constant) uniform PushConstants {
+    uint D;      // embedding width
+    uint N;      // patches per image, Gh * Gw
+    uint rows;   // patch rows of O, B * N
+    uint S;      // table side
+};
+
+float readO(uint i)          { return (typeO == DTYPE_F32) ? bO_f32[i] : float(bO_f16[i]); }
+void writeO(uint i, float v) { if (typeO == DTYPE_F32) bO_f32[i] = v; else bO_f16[i] = float16_t(v); }
+float readT(uint i)          { return (typeW == DTYPE_F32) ? bT_f32[i] : float(bT_f16[i]); }
+
+// Grid index i of G along one axis -> the two table entries around it and the
+// weight of the upper one, corners aligned.
+void taps(uint i, uint G, out uint lo, out uint hi, out float frac)
+{
+    float src = (G > 1u) ? float(i) * float(S - 1u) / float(G - 1u) : 0.0;
+    lo = uint(src);
+    hi = min(lo + 1u, S - 1u);
+    frac = src - float(lo);
+}
+
+void main()
+{
+    uint d   = gl_GlobalInvocationID.x;   // element within the row
+    uint row = gl_GlobalInvocationID.y;   // patch row
+    if (d >= D || row >= rows) return;
+
+    uint n = row % N;
+    uint tile = n / (tileSize * tileSize), inTile = n % (tileSize * tileSize);
+    uint tilesW = gridW / tileSize;
+    uint r = (tile / tilesW) * tileSize + inTile / tileSize;
+    uint c = (tile % tilesW) * tileSize + inTile % tileSize;
+
+    uint r0, r1, c0, c1;
+    float fr, fc;
+    taps(r, N / gridW, r0, r1, fr);
+    taps(c, gridW, c0, c1, fc);
+
+    float v = (1.0 - fr) * (1.0 - fc) * readT((r0 * S + c0) * D + d)
+            + (1.0 - fr) * fc         * readT((r0 * S + c1) * D + d)
+            + fr * (1.0 - fc)         * readT((r1 * S + c0) * D + d)
+            + fr * fc                 * readT((r1 * S + c1) * D + d);
+
+    uint i = row * D + d;
+    writeO(i, readO(i) + v);
+}

@@ -20,14 +20,14 @@ layout(constant_id = 0) const uint scale = 2u;
 layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0u; // O (output) dtype
 layout(constant_id = SPEC_ID_TYPE_I) const uint typeI = 0u; // I (input) dtype
 
-layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_F32 { float bufferO_f32[]; };
-layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_2F32 { vec2 bufferO_2f32[]; };
-layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_4F32 { vec4 bufferO_4f32[]; };
-layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_F16 { float16_t bufferO_f16[]; };
-layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_2F16 { f16vec2 bufferO_2f16[]; };
-layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_4F16 { f16vec4 bufferO_4f16[]; };
-layout(set = 0, binding = 1) restrict readonly buffer I_BUF_F32 { float bufferI_f32[]; };
-layout(set = 0, binding = 1) restrict readonly buffer I_BUF_F16 { float16_t bufferI_f16[]; };
+layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_F32 { float bO_f32[]; };
+layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_2F32 { vec2 bO_2f32[]; };
+layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_4F32 { vec4 bO_4f32[]; };
+layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_F16 { float16_t bO_f16[]; };
+layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_2F16 { f16vec2 bO_2f16[]; };
+layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_4F16 { f16vec4 bO_4f16[]; };
+layout(set = 0, binding = 1) restrict readonly buffer I_BUF_F32 { float bI_f32[]; };
+layout(set = 0, binding = 1) restrict readonly buffer I_BUF_F16 { float16_t bI_f16[]; };
 
 layout(push_constant) uniform PushConstants {
     uint C;
@@ -37,20 +37,20 @@ layout(push_constant) uniform PushConstants {
 
 void writeO(uint i, float v)
 {
-    if (typeO == DTYPE_F32) bufferO_f32[i] = v;
-    else bufferO_f16[i] = float16_t(v);
+    if (typeO == DTYPE_F32) bO_f32[i] = v;
+    else bO_f16[i] = float16_t(v);
 }
 
 void writeO2(uint i, float v)
 {
-    if (typeO == DTYPE_F32) bufferO_2f32[i >> 1u] = vec2(v);
-    else bufferO_2f16[i >> 1u] = f16vec2(v);
+    if (typeO == DTYPE_F32) bO_2f32[i >> 1u] = vec2(v);
+    else bO_2f16[i >> 1u] = f16vec2(v);
 }
 
 void writeO4(uint i, float v)
 {
-    if (typeO == DTYPE_F32) bufferO_4f32[i >> 2u] = vec4(v);
-    else bufferO_4f16[i >> 2u] = f16vec4(v);
+    if (typeO == DTYPE_F32) bO_4f32[i >> 2u] = vec4(v);
+    else bO_4f16[i >> 2u] = f16vec4(v);
 }
 
 void main()
@@ -62,7 +62,7 @@ void main()
     if (w >= Wi || h >= Hi || c >= C) return;
 
     const uint idx = c * (Hi * Wi) + h * Wi + w;
-    const float v = (typeI == DTYPE_F32) ? bufferI_f32[idx] : float(bufferI_f16[idx]);
+    const float v = (typeI == DTYPE_F32) ? bI_f32[idx] : float(bI_f16[idx]);
 
     const uint Ho = Hi * scale;
     const uint Wo = Wi * scale;

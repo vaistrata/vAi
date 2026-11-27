@@ -17,11 +17,11 @@ layout(local_size_x = 512) in;
 layout(constant_id = 0) const uint K = 1;
 layout(constant_id = SPEC_ID_TYPE_I) const uint typeI = 0;
 
-layout(set = 0, binding = 0) writeonly buffer O_BUF_U32 { uint bufferO_u32[]; };
-layout(set = 0, binding = 0) writeonly buffer O_BUF_U16 { uint16_t bufferO_u16[]; };
-layout(set = 0, binding = 1) readonly buffer I_BUF_U32 { uint bufferI_u32[]; };
-layout(set = 0, binding = 1) readonly buffer I_BUF_U16 { uint16_t bufferI_u16[]; };
-layout(set = 0, binding = 2) writeonly buffer IDX_BUF_U32 { uint bufferIdx_u32[]; };
+layout(set = 0, binding = 0) writeonly buffer O_BUF_U32 { uint bO_u32[]; };
+layout(set = 0, binding = 0) writeonly buffer O_BUF_U16 { uint16_t bO_u16[]; };
+layout(set = 0, binding = 1) readonly buffer I_BUF_U32 { uint bI_u32[]; };
+layout(set = 0, binding = 1) readonly buffer I_BUF_U16 { uint16_t bI_u16[]; };
+layout(set = 0, binding = 2) writeonly buffer IDX_BUF_U32 { uint bIdx_u32[]; };
 
 layout(push_constant) uniform PushConstants {
     uint N;
@@ -59,7 +59,7 @@ void main()
     if (index < N)
     {
         uint offset = row * N + index;
-        uint bits = typeI == 0u ? bufferI_u32[offset] : uint(bufferI_u16[offset]);
+        uint bits = typeI == 0u ? bI_u32[offset] : uint(bI_u16[offset]);
         value = uvec2(bits, index);
     }
     uint keyBits = typeI == 1u ? 16u : 32u;
@@ -129,15 +129,15 @@ void main()
     {
         if (groups == 1)
         {
-            if (typeI == 0u) bufferO_u32[row * K + tid] = value.x;
-            else bufferO_u16[row * K + tid] = uint16_t(value.x);
-            bufferIdx_u32[row * K + tid] = value.y;
+            if (typeI == 0u) bO_u32[row * K + tid] = value.x;
+            else bO_u16[row * K + tid] = uint16_t(value.x);
+            bIdx_u32[row * K + tid] = value.y;
         }
         else
         {
             uint outIndex = ((row * groups + group) * K + tid) * 2;
-            bufferO_u32[outIndex] = value.x;
-            bufferO_u32[outIndex + 1] = value.y;
+            bO_u32[outIndex] = value.x;
+            bO_u32[outIndex + 1] = value.y;
         }
     }
 }

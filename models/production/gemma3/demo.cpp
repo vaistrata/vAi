@@ -21,6 +21,10 @@ using namespace vai;
 namespace gemma3 = model::production::gemma3;
 
 
+/////////////////////////////////////////////////////////////////////////////////////////
+// Tag nodes for profiling — group by kernel shape, so identical-shape ops across
+// a tower collapse to one row per distinct kernel.
+/////////////////////////////////////////////////////////////////////////////////////////
 void setProfileTags(gemma3::Net& net)
 {
     auto towerLin = [](const char* tower, uint32_t in, uint32_t out) {
@@ -39,7 +43,7 @@ void setProfileTags(gemma3::Net& net)
     // Vision encoder
     if (net.visionEncoder)
     {
-        const auto& v = gemma3::group::VisionEncoder::config;
+        const auto& v = gemma3::VisionConfig::trf;
         auto& vision = net.visionEncoder.value();
 
         for (auto& b : vision.encoder.blocks)
@@ -62,15 +66,11 @@ void setProfileTags(gemma3::Net& net)
 
         vision.encoder.finalNorm.setProfileTag("Vision.LayerNorm");
 
-        vision.pool.setProfileTag("Vision.Pool");
-        vision.imageNorm.setProfileTag("Vision.RmsNorm");
-        net.projector->setProfileTag(towerLin("Vision", v.embedDim, trf.embedDim));
+        vision.connector.pool.setProfileTag("Vision.Pool");
+        vision.connector.tokenNorm.setProfileTag("Vision.RmsNorm");
+        vision.connector.projector.setProfileTag(towerLin("Vision", v.embedDim, trf.embedDim));
 
-#ifdef TEST_INDEX_COPY
         net.imageCopy.setProfileTag("Vision.IndexCopy");
-#else
-        net.imageScatter.setProfileTag("Vision.RowSliceScatter");
-#endif
     }
 
     // Text decoder
@@ -146,8 +146,8 @@ int main()
         // VAI_DATA_DIR "/images/paper_captured3.jpg",
     };
     const uint32_t B = (uint32_t)std::size(imagePaths);
-    const uint32_t C = gemma3::group::VisionEncoder::config.imageChannels;
-    const uint32_t S = gemma3::group::VisionEncoder::config.imageSize;
+    const uint32_t C = gemma3::VisionConfig::trf.imageChannels;
+    const uint32_t S = gemma3::VisionConfig::trf.imageSize;
 
     // Preprocess the images and stack them into [B, C, S, S]
     for (uint32_t b = 0; b < B; ++b)
@@ -159,7 +159,7 @@ int main()
     for (uint32_t b = 0; b < B; ++b)
         prompt = "<start_of_image>" + prompt;
     printf("\nPrompt: \"%s\"\n", prompt.c_str());
-    prompt = gemma3::expandImagePlaceholders(prompt, gemma3::group::VisionEncoder::tokensPerImage);
+    prompt = gemma3::expandImagePlaceholders(prompt, net.visionEncoder->tokensPerImage);
     std::vector<int> ids = tokenizer.encode(prompt, true);
     const uint32_t promptLength = (uint32_t)ids.size();
 

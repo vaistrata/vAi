@@ -98,7 +98,7 @@ struct TransformerBlock : public vai::NodeGroup
     , norm4({ .eps = config.base.normEps, .acceptResidual = true })
     {
         if (config.sliceLastRow)
-            lastRow.emplace(vai::node::Slice::Config{ .axis = 0, .start = -1 });
+            lastRow.emplace(vai::node::Slice::Config{ .axis = -2, .start = -1 });
         if (config.gatingLastOut)
             gate.emplace();
 

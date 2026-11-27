@@ -20,3 +20,13 @@ def test_slice_axis1_from_end():
         lambda in0: in0[:, 3:5],
         tol=EXACT,
     )
+
+
+def test_slice_negative_axis():
+    # A negative axis counts from the end.
+    check_node(
+        lambda: nodes.SliceNode(start=1, count=2, axis=-2),
+        {"in0": (3, 6, 2)},
+        lambda in0: in0[:, 1:3],
+        tol=EXACT,
+    )

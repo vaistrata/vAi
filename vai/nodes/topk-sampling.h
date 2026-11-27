@@ -9,7 +9,7 @@ namespace vai::node {
 
 /*=============================================================================
   TopKSampling - row-wise top-k sampling, one kernel run as two passes
-  Input : logits [.., N]
+  Input : logits [..., N]
   Output: out0   [..]   (one raw uint32 sampled index per row, in 4-byte slots)
 
   Every axis ahead of N is a row, the way a Linear takes its leading axes, and they

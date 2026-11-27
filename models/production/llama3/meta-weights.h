@@ -18,6 +18,9 @@
 
 namespace model::production::llama3::meta {
 
+/////////////////////////////////////////////////////////////////////////////////////////
+// Weight loading - maps HuggingFace safetensors key names to model members
+/////////////////////////////////////////////////////////////////////////////////////////
 inline void loadWeights(Net& net, const vai::Checkpoint& ckpt)
 {
     // Weights load at the net's wDefaultDtype, norm coefficients at Fp32.

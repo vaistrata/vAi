@@ -25,10 +25,10 @@ layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
 layout(constant_id = SPEC_ID_TYPE_W) const uint typeW = 1;  // W (weight) dtype
 
-layout(set = 0, binding = 0) writeonly buffer D_BUF_F32 { float bufferD_f32[]; };
-layout(set = 0, binding = 0) writeonly buffer D_BUF_F16 { float16_t bufferD_f16[]; };
-layout(set = 0, binding = 1) readonly buffer W_BUF_F32 { float bufferW_f32[]; };
-layout(set = 0, binding = 1) readonly buffer W_BUF_F16 { float16_t bufferW_f16[]; };
+layout(set = 0, binding = 0) writeonly buffer D_BUF_F32 { float bD_f32[]; };
+layout(set = 0, binding = 0) writeonly buffer D_BUF_F16 { float16_t bD_f16[]; };
+layout(set = 0, binding = 1) readonly buffer W_BUF_F32 { float bW_f32[]; };
+layout(set = 0, binding = 1) readonly buffer W_BUF_F16 { float16_t bW_f16[]; };
 
 layout(push_constant) uniform PushConstants {
     uint N;          // rows (2H)
@@ -45,6 +45,6 @@ void main()
     const uint b = n / (2u * G), w = n % (2u * G);
     const uint src = (w < G) ? G * b + w : H + G * b + w - G;
 
-    if (typeW == DTYPE_F32) bufferD_f32[e] = bufferW_f32[src * K + k];
-    else                    bufferD_f16[e] = bufferW_f16[src * K + k];
+    if (typeW == DTYPE_F32) bD_f32[e] = bW_f32[src * K + k];
+    else                    bD_f16[e] = bW_f16[src * K + k];
 }

@@ -16,14 +16,14 @@ layout(local_size_x = 64) in;
 layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0;  // O (output) dtype
 layout(constant_id = SPEC_ID_TYPE_I) const uint typeI = 0;  // I0 and I1 dtype (shared)
 
-layout(set = 0, binding = 0) buffer O_BUF_F32  { float bufferO_f32[];  };
-layout(set = 0, binding = 0) buffer O_BUF_F16  { float16_t bufferO_f16[];  };
+layout(set = 0, binding = 0) buffer O_BUF_F32  { float bO_f32[];  };
+layout(set = 0, binding = 0) buffer O_BUF_F16  { float16_t bO_f16[];  };
 //////////////////////////////////////////////////////////////////////////////
-layout(set = 0, binding = 1) buffer I0_BUF_F32 { float bufferI0_f32[]; };
-layout(set = 0, binding = 1) buffer I0_BUF_F16 { float16_t bufferI0_f16[]; };
+layout(set = 0, binding = 1) buffer I0_BUF_F32 { float bI0_f32[]; };
+layout(set = 0, binding = 1) buffer I0_BUF_F16 { float16_t bI0_f16[]; };
 //////////////////////////////////////////////////////////////////////////////
-layout(set = 0, binding = 2) buffer I1_BUF_F32 { float bufferI1_f32[]; };
-layout(set = 0, binding = 2) buffer I1_BUF_F16 { float16_t bufferI1_f16[]; };
+layout(set = 0, binding = 2) buffer I1_BUF_F32 { float bI1_f32[]; };
+layout(set = 0, binding = 2) buffer I1_BUF_F16 { float16_t bI1_f16[]; };
 
 // Packed triples per axis: output stride, I0 stride, I1 stride (in elements).
 // A broadcast input axis has stride 0. Scalar uint storage avoids vec3 padding.
@@ -31,9 +31,9 @@ layout(set = 0, binding = 3) readonly buffer META { uint strides[]; };
 
 layout(push_constant) uniform PushConstants { uint N; uint rank; };
 
-float readI0(uint i) { return (typeI == 0u) ? bufferI0_f32[i] : float(bufferI0_f16[i]); }
-float readI1(uint i) { return (typeI == 0u) ? bufferI1_f32[i] : float(bufferI1_f16[i]); }
-void writeO(uint i, float v) { if (typeO == 0u) bufferO_f32[i] = v; else bufferO_f16[i] = float16_t(v); }
+float readI0(uint i) { return (typeI == 0u) ? bI0_f32[i] : float(bI0_f16[i]); }
+float readI1(uint i) { return (typeI == 0u) ? bI1_f32[i] : float(bI1_f16[i]); }
+void writeO(uint i, float v) { if (typeO == 0u) bO_f32[i] = v; else bO_f16[i] = float16_t(v); }
 
 void main()
 {
