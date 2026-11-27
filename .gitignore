@@ -45,6 +45,9 @@ benchmarks/yolov8/
 !data/images/paper_captured0.jpg
 !data/images/dog.jpg
 
+!data/audio/
+!data/audio/jfk.wav
+
 !docs/
 !docs/**
 docs/internals/

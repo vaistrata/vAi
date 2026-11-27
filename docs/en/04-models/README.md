@@ -43,6 +43,12 @@ For new models, see [Writing custom models](../contributing/models.md).
 |---|---|
 | [YOLOX](yolox.md) | SMALL(s), MEDIUM(m), LARGE(l), XLARGE(x) |
 
+### Speech
+
+| Model | Supported model sizes |
+|---|---|
+| [Whisper](whisper.md) | tiny, base, small, medium, large-v3, large-v3-turbo |
+
 ### LLM / VLM
 
 | Model | Supported model sizes |

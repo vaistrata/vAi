@@ -79,6 +79,7 @@ Size presets and weight loaders are covered in the [model list](docs/en/04-model
 | PaliGemma | Text generation from image and text input | [demo.cpp](models/production/paligemma/demo.cpp) |
 | π0 | Action chunks from images, instructions and state | [demo.cpp](models/production/pi0/demo.cpp) |
 | π0.5 | Action chunks from images, instructions and state | [demo.cpp](models/production/pi05/demo.cpp) |
+| Whisper | Speech recognition (transcription) | [demo.cpp](models/experimental/whisper/demo.cpp) |
 
 ## Build
 
