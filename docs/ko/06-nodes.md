@@ -730,7 +730,8 @@ regardless of I/O dtypes. Two spec-selected variants share the kernel:
 - reduction: subgroupAdd two-level when the device has subgroup arithmetic
 (subgroup size pinned to max — Intel varies it otherwise), shared-memory
 tree fallback everywhere else.
-- loads: vec4 when I and O are fp32 and featSize % 4 == 0, scalar otherwise.
+- loads: four features at once (vec4 / f16vec4) when featSize % 4 == 0,
+scalar otherwise.
 
 Geometry / reduction / vec4 are selected per (featSize, device) in
 lnTuning(); the workgroup size depends on featSize, so the pipeline is
