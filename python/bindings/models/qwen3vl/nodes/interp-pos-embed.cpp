@@ -1,5 +1,6 @@
 #include "python/bindings/nodes/bind-node.h"
 #include "models/experimental/qwen3vl/nodes/interp-pos-embed.h"
+#include "vai/nodes/attention.h"   // createKvCacheCounter
 #include <cstdint>
 
 namespace pyvai {
