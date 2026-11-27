@@ -1076,9 +1076,9 @@ inline void normalizeNfc(std::string& text)
 /////////////////////////////////////////////////////////////////////////////////////////
 struct TextStep
 {
-    enum Kind { prepend, replace, nfc };
+    enum Kind { Prepend, Replace, Nfc };
 
-    Kind kind = replace;
+    Kind kind = Replace;
     std::string from;   // replace: the literal being matched
     std::string to;     // the text put in its place, or prepended
 };
@@ -1087,12 +1087,12 @@ inline void applyTextSteps(const std::vector<TextStep>& steps, std::string& text
 {
     for (const auto& step : steps)
     {
-        if (step.kind == TextStep::prepend)
+        if (step.kind == TextStep::Prepend)
         {
             text.insert(0, step.to);
             continue;
         }
-        if (step.kind == TextStep::nfc)
+        if (step.kind == TextStep::Nfc)
         {
             normalizeNfc(text);
             continue;
@@ -1655,7 +1655,7 @@ private:
     {
         std::vector<tokenizer_detail::TextStep> rewrites;
         for (const auto& step : normalizeSteps_)
-            if (step.kind != tokenizer_detail::TextStep::prepend)
+            if (step.kind != tokenizer_detail::TextStep::Prepend)
                 rewrites.push_back(step);
 
         for (const auto& [id, tok] : addedById_)
@@ -1784,11 +1784,11 @@ private:
         if (type == "Sequence")
             return;   // the children registered themselves
         if (type == "NFC")
-            step.kind = tokenizer_detail::TextStep::nfc;
+            step.kind = tokenizer_detail::TextStep::Nfc;
         else if (type == "Prepend" && haveTo)
-            step.kind = tokenizer_detail::TextStep::prepend;
+            step.kind = tokenizer_detail::TextStep::Prepend;
         else if (type == "Replace" && haveFrom && haveTo)
-            step.kind = tokenizer_detail::TextStep::replace;
+            step.kind = tokenizer_detail::TextStep::Replace;
         else
             throw std::runtime_error("tokenizer: normalizer \"" + type + "\" is not supported — " + path);
 
@@ -1867,7 +1867,7 @@ private:
             return;
         if (type == "Replace" && haveFrom && haveTo)
         {
-            step.kind = tokenizer_detail::TextStep::replace;
+            step.kind = tokenizer_detail::TextStep::Replace;
             decodeSteps_.push_back(std::move(step));
             return;
         }
