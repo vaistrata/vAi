@@ -13,7 +13,8 @@
    buffer aliases; accumulation is always fp32.
  - reduction: subgroupAdd two-level (sgReduce == 1, host pins the
    subgroup size) or shared-memory tree fallback.
- - aligned == 1 (typeO == typeI == fp32, F % 4 == 0): direct vec4 I/O loads.
+ - aligned == 1 (F % 4 == 0): four features a load and a store -- vec4 for fp32,
+   f16vec4 for fp16 -- for I, O, R and scale / shift alike.
  - Dispatch (host): one workgroup per row, rows folded over grid x/y as
    .dispatch(gridX, ceil(batchSize / gridX)) -- grid x alone caps at 65535
    on some devices (Intel), below a long prefill's row count.
@@ -39,19 +40,26 @@ layout(local_size_x_id = 0) in;
 layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_F32 { float bO_f32[]; };
 layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_F16 { float16_t bO_f16[]; };
 layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_4F32  { vec4 bO_4f32[]; };
+layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_4F16  { f16vec4 bO_4f16[]; };
 //////////////////////////////////////////////////////////////////////////////
 layout(set = 0, binding = 1) restrict readonly buffer I_BUF_F32 { float bI_f32[]; };
 layout(set = 0, binding = 1) restrict readonly buffer I_BUF_F16 { float16_t bI_f16[]; };
 layout(set = 0, binding = 1) restrict readonly buffer I_BUF_4F32  { vec4 bI_4f32[]; };
+layout(set = 0, binding = 1) restrict readonly buffer I_BUF_4F16  { f16vec4 bI_4f16[]; };
 //////////////////////////////////////////////////////////////////////////////
 layout(set = 0, binding = 2) restrict readonly buffer SCALE_BUF_F32 { float bScale_f32[]; };
 layout(set = 0, binding = 2) restrict readonly buffer SCALE_BUF_F16 { float16_t bScale_f16[]; };
+layout(set = 0, binding = 2) restrict readonly buffer SCALE_BUF_4F32 { vec4 bScale_4f32[]; };
+layout(set = 0, binding = 2) restrict readonly buffer SCALE_BUF_4F16 { f16vec4 bScale_4f16[]; };
 //////////////////////////////////////////////////////////////////////////////
 layout(set = 0, binding = 3) restrict readonly buffer SHIFT_BUF_F32 { float bShift_f32[]; };
 layout(set = 0, binding = 3) restrict readonly buffer SHIFT_BUF_F16 { float16_t bShift_f16[]; };
+layout(set = 0, binding = 3) restrict readonly buffer SHIFT_BUF_4F32 { vec4 bShift_4f32[]; };
+layout(set = 0, binding = 3) restrict readonly buffer SHIFT_BUF_4F16 { f16vec4 bShift_4f16[]; };
 layout(set = 0, binding = 4) restrict readonly buffer RES_BUF_F32 { float bRes_f32[]; };
 layout(set = 0, binding = 4) restrict readonly buffer RES_BUF_F16 { float16_t bRes_f16[]; };
 layout(set = 0, binding = 4) restrict readonly buffer RES_BUF_4F32 { vec4 bRes_4f32[]; };
+layout(set = 0, binding = 4) restrict readonly buffer RES_BUF_4F16 { f16vec4 bRes_4f16[]; };
 
 layout(push_constant) uniform PushConstants {
     uint batchSize;
@@ -64,7 +72,12 @@ float readI(uint i)     { return (typeI == DTYPE_F32) ? bI_f32[i] : float(bI_f16
 float readScale(uint j) { return (typeW == DTYPE_F32) ? bScale_f32[j] : float(bScale_f16[j]); }
 float readShift(uint j)  { return (hasShift == 0u) ? 0.0 : ((typeW == DTYPE_F32) ? bShift_f32[j] : float(bShift_f16[j])); }
 float readResidual(uint i) { return (hasResidual == 0u) ? 0.0 : ((typeI == DTYPE_F32) ? bRes_f32[i] : float(bRes_f16[i])); }
-vec4 readResidual4(uint i4) { return (hasResidual == 0u) ? vec4(0.0) : bRes_4f32[i4]; }   // aligned: fp32
+// aligned: four features at once, index i4 = element / 4
+vec4 readI4(uint i4)        { return (typeI == DTYPE_F32) ? bI_4f32[i4] : vec4(bI_4f16[i4]); }
+vec4 readScale4(uint j4)    { return (typeW == DTYPE_F32) ? bScale_4f32[j4] : vec4(bScale_4f16[j4]); }
+vec4 readShift4(uint j4)    { return (hasShift == 0u) ? vec4(0.0) : ((typeW == DTYPE_F32) ? bShift_4f32[j4] : vec4(bShift_4f16[j4])); }
+vec4 readResidual4(uint i4) { return (hasResidual == 0u) ? vec4(0.0) : ((typeI == DTYPE_F32) ? bRes_4f32[i4] : vec4(bRes_4f16[i4])); }
+void writeO4(uint i4, vec4 v) { if (typeO == DTYPE_F32) bO_4f32[i4] = v; else bO_4f16[i4] = f16vec4(v); }
 void writeO(uint i, float v) { if (typeO == DTYPE_F32) bO_f32[i] = v; else bO_f16[i] = float16_t(v); }
 
 // Per-thread partial sums (spec-constant-sized) — with sgReduce == 1 only
@@ -80,7 +93,7 @@ shared float gInvStd;
 // accumulators — ILP). Returns (Σ(x−s), Σ(x−s)²) of this thread's elements.
 vec2 accumAligned(uint base, uint F, float sh)
 {
-    // vec4 loads — typeI == fp32 && F % 4 == 0 (host-guaranteed)
+    // four features a load — F % 4 == 0 (host-guaranteed)
     uint F4    = F / 4u;
     uint base4 = base / 4u;
     vec4 sh4 = vec4(sh);
@@ -88,7 +101,7 @@ vec2 accumAligned(uint base, uint F, float sh)
     vec4 q4  = vec4(0.0);
     for (uint j = gl_LocalInvocationID.x; j < F4; j += wgSize)
     {
-        vec4 d = bI_4f32[base4 + j] - sh4;
+        vec4 d = readI4(base4 + j) - sh4;
         s4 += d;
         q4 += d * d;
     }
@@ -115,11 +128,8 @@ void normalizeAligned(uint base, uint F, float mean, float invStd)
     uint base4 = base / 4u;
     for (uint j = gl_LocalInvocationID.x; j < F4; j += wgSize)
     {
-        uint c = 4u * j;
-        vec4 x4 = bI_4f32[base4 + j];
-        vec4 scale4 = vec4(readScale(c), readScale(c + 1u), readScale(c + 2u), readScale(c + 3u));
-        vec4 shift4 = vec4(readShift(c), readShift(c + 1u), readShift(c + 2u), readShift(c + 3u));
-        bO_4f32[base4 + j] = (x4 - vec4(mean)) * invStd * scale4 + shift4 + readResidual4(base4 + j);
+        vec4 x4 = readI4(base4 + j);
+        writeO4(base4 + j, (x4 - vec4(mean)) * invStd * readScale4(j) + readShift4(j) + readResidual4(base4 + j));
     }
 }
 
@@ -142,7 +152,7 @@ void main()
     // (σ) scale instead of mean scale.
     float sh = readI(base);
 
-    // Phase 1: shifted 1-pass accumulation (aligned: vec4 loads)
+    // Phase 1: shifted 1-pass accumulation (aligned: four features a load)
     vec2 partial = (aligned != 0u) ? accumAligned(base, F, sh)
                                    : accumScalar(base, F, sh);
     float sum   = partial.x;

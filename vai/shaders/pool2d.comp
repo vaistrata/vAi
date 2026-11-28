@@ -11,8 +11,10 @@
  - O (typeO) and I (typeI) are fp32 or fp16, accessed through same-binding
    buffer aliases; the reduction runs in fp32.
  - aligned (HWC, C % 4 == 0): one thread owns 4 channels through vec4 aliases.
- - Dispatch (host): HWC (C or C/4, Wo, B*Ho), CHW (Ho*Wo, B*C). The fastest axis
-   is the contiguous one, so neighbouring threads read neighbouring addresses;
+ - Workgroup size is specialized by ID 7 (default 64). ID 8 enables the
+   bounds-check-free loop for windows wholly inside the input.
+ - Dispatch groups: HWC (ceil((C or C/4)/wgSize), Wo, B*Ho),
+   CHW (ceil(Ho*Wo/wgSize), B*C). The fastest axis is contiguous;
    CHW flattens (ho, wo) so a row narrower than a workgroup leaves no lanes idle.
 =============================================================================*/
 #version 450
@@ -22,7 +24,8 @@
 #extension GL_EXT_control_flow_attributes : require
 #include "common/spec_constants.h"
 
-layout(local_size_x = 64) in;
+layout(local_size_x = 64, local_size_x_id = 7) in;
+layout(constant_id = 8) const bool interior = false;
 
 layout(constant_id = 0) const uint channelsLast = 0;           // 1: HWC, 0: CHW
 layout(constant_id = 1) const uint K = 1;                      // kernel side
@@ -138,6 +141,17 @@ void poolCHW()
     uint rowStart = (c * Hi + uint(h0)) * Wi + uint(w0);
 
     float acc = initAcc();
+    if (interior && h0 >= 0 && w0 >= 0 && h0 + int(K) <= int(Hi) && w0 + int(K) <= int(Wi))
+    {
+        [[unroll]] for (uint kh = 0u; kh < K; ++kh, rowStart += Wi)
+        {
+            uint i = rowStart;
+            [[unroll]] for (uint kw = 0u; kw < K; ++kw, ++i)
+                acc = combine(acc, readI(i));
+        }
+        writeO(c * Ho * Wo + p, finish(acc, windowArea(h0, w0)));
+        return;
+    }
     [[unroll]] for (uint kh = 0u; kh < K; ++kh, rowStart += Wi)
     {
         if (!rowInside(h0 + int(kh))) continue;

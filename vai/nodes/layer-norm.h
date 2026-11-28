@@ -22,7 +22,8 @@ namespace vai::node {
   - reduction: subgroupAdd two-level when the device has subgroup arithmetic
     (subgroup size pinned to max — Intel varies it otherwise), shared-memory
     tree fallback everywhere else.
-  - loads: vec4 when I and O are fp32 and featSize % 4 == 0, scalar otherwise.
+  - loads: four features at once (vec4 / f16vec4) when featSize % 4 == 0,
+    scalar otherwise.
 
   Geometry / reduction / vec4 are selected per (featSize, device) in
   lnTuning(); the workgroup size depends on featSize, so the pipeline is
@@ -39,7 +40,7 @@ public:
         uint32_t   wgSize   = 0;      // threads per row, ~4 elements each
         uint32_t   sgSize   = 0;      // forced subgroup size (0 = don't force; Intel)
         bool       sgReduce = false;  // subgroupAdd two-level reduction instead of the shared tree
-        bool       aligned  = false;  // vec4 I/O loads (fp32, featSize % 4 == 0)
+        bool aligned = false;         // four-feature loads and stores (featSize % 4 == 0)
         vai::Dtype iDtype   = vai::Dtype::None;
         vai::Dtype wDtype = vai::Dtype::None;
         bool hasShift = false;
@@ -81,7 +82,7 @@ inline LayerNorm::PipeParams lnTuning(uint32_t featSize, Dtype iDtype, Dtype wDt
     LayerNorm::PipeParams t;
     t.wgSize   = wg;
     t.sgReduce = device.supportsSubgroupArithmetic();
-    t.aligned  = (iDtype == Dtype::Fp32 && oDtype == Dtype::Fp32 && featSize % 4u == 0u);
+    t.aligned = featSize % 4u == 0u;
     t.sgSize   = t.sgReduce ? sg : 0u;
     t.iDtype   = iDtype;
     t.wDtype = wDtype;
@@ -148,7 +149,7 @@ inline void LayerNorm::prepare()
             eva::constant_id<SPEC_ID_TYPE_O>(oDtype),   // typeO
             eva::constant_id<SPEC_ID_TYPE_I>(iDtype),           // typeI
             eva::constant_id<SPEC_ID_TYPE_W>(wDtype),           // typeW (scale & shift)
-            eva::constant_id<SPEC_ID_ALIGNED>(p.aligned ? 1u : 0u)  // aligned (vec4 loads)
+            eva::constant_id<SPEC_ID_ALIGNED>(p.aligned ? 1u : 0u)  // aligned (four-feature loads)
         }, { .requiredSubgroupSize = p.sgSize });
         // clang-format on
         if (!descSet)

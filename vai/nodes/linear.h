@@ -1517,6 +1517,52 @@ inline AmdHaloPick amdHaloPick(
     if (!accF16 && io16 && M == 666u && K == 16384u && N == 2048u)
         return AmdHaloPick{ 48, 128, 64, 48, 64, 128, 1, 0, 64, interleave };
 
+    // ACT (one 3x480x640 camera: 302 encoder tokens, 100-action chunk) on fp32 activations,
+    // measured in the full forward: unsplit tiles that fuse the epilogue, except the K 3200
+    // down projections, which keep a split.
+    if (!accF16 && !io16 && (M == 100u || M == 300u || M == 302u) && (K == 512u || K == 3200u))
+    {
+        if (M == 302u && K == 512u && N == 1536u)
+            return AmdHaloPick{ 48, 128, 128, 48, 16, 256, 1, 0, 32, stream };   // encoder q, k, v
+        if ((M == 302u || M == 300u) && K == 512u && N == 512u)
+            return AmdHaloPick{ 16, 128, 128, 16, 16, 256, 1, 0, 32, stream };   // encoder o, image projection
+        if (M == 302u && K == 512u && N == 3200u)
+            return AmdHaloPick{ 32, 64, 32, 32, 32, 64, 1, 0, 32, stream };   // encoder FFN up
+        if (M == 302u && K == 3200u && N == 512u)
+            return AmdHaloPick{ 16, 128, 128, 16, 32, 128, 2, 0, 32, stream };   // encoder FFN down
+        if (M == 302u && K == 512u && N == 1024u)
+            return AmdHaloPick{ 48, 32, 32, 48, 32, 64, 1, 0, 64, prefetch };   // decoder k, v
+        if (M == 100u && K == 512u && N == 512u)
+            return AmdHaloPick{ 16, 16, 128, 16, 16, 64, 1, 0, 64, prefetchVec };   // decoder o
+        if (M == 100u && K == 512u && N == 3200u)
+            return AmdHaloPick{ 64, 128, 64, 32, 32, 256, 1, 8, 32, prefetch };   // decoder FFN up
+        if (M == 100u && K == 3200u && N == 512u)
+            return AmdHaloPick{ 16, 64, 128, 16, 32, 64, 4, 0, 32, stream };   // decoder FFN down
+    }
+    // The same layers on fp16 activations, measured in the full forward: smaller tiles at
+    // wave32, mostly streaming the input. The Linear layers take 0.84 -> 0.60 ms.
+    if (!accF16 && io16 && (M == 100u || M == 300u || M == 302u) && (K == 512u || K == 3200u))
+    {
+        if (M == 302u && K == 512u && N == 1536u)
+            return AmdHaloPick{ 32, 64, 64, 32, 16, 128, 1, 0, 32, stream };   // encoder q, k, v
+        if (M == 302u && K == 512u && N == 512u)
+            return AmdHaloPick{ 16, 32, 64, 16, 32, 32, 1, 0, 32, stream };   // encoder o
+        if (M == 300u && K == 512u && N == 512u)
+            return AmdHaloPick{ 16, 32, 128, 16, 32, 64, 1, 0, 64, stream };   // image projection
+        if (M == 302u && K == 512u && N == 3200u)
+            return AmdHaloPick{ 32, 64, 32, 32, 32, 64, 1, 0, 32, stream };   // encoder FFN up
+        if (M == 302u && K == 3200u && N == 512u)
+            return AmdHaloPick{ 16, 64, 64, 16, 64, 32, 4, 0, 32, stream };   // encoder FFN down
+        if (M == 302u && K == 512u && N == 1024u)
+            return AmdHaloPick{ 16, 32, 64, 16, 32, 64, 1, 0, 64, stream };   // decoder k, v
+        if (M == 100u && K == 512u && N == 512u)
+            return AmdHaloPick{ 16, 16, 64, 16, 16, 32, 1, 8, 32, prefetch };   // decoder o
+        if (M == 100u && K == 512u && N == 3200u)
+            return AmdHaloPick{ 64, 32, 32, 16, 32, 128, 1, 8, 32, prefetchVec };   // decoder FFN up
+        if (M == 100u && K == 3200u && N == 512u)
+            return AmdHaloPick{ 16, 32, 128, 16, 16, 64, 1, 0, 32, prefetchVec2 };   // decoder FFN down
+    }
+
     if (M >= 32u && M <= 64u)
     {
         if (K == 1024u && N == 8192u)
@@ -1896,9 +1942,9 @@ inline std::optional<Linear::RadvPick> amdHaloPlainTile(
 
 // Strix Point's tile for one shape: amdRefinedTileParams's rule, then the measured
 // picks for linear-cm-amd's cooperative schedule, by the layers they were
-// measured on. A pick never splits and carries its weight layout and dispatch
-// order (t.strix). The picks need fp32 accumulation, the 16x16x16 coopmat at
-// wave64 and pipeline robustness.
+// measured on. A pick never splits and carries its weight layout, dispatch
+// order and schedule options (t.strix). The picks need fp32 accumulation, the
+// 16x16x16 coopmat at wave64 and pipeline robustness.
 inline Linear::PipeParamsTile amdPointLinearTile(
     uint32_t M, uint32_t N, uint32_t K, Dtype iDtype, Dtype wDtype, bool accF16, eva::Device device)
 {
@@ -1908,13 +1954,15 @@ inline Linear::PipeParamsTile amdPointLinearTile(
 
     struct PointTile
     {
-        // ( wgM, wgN, wgK, sgM, sgN, wgSize, groupM, fragments, sgSize )
+        // ( wgM, wgN, wgK, sgM, sgN, wgSize, groupM, fragments, sgSize, schedule )
         uint32_t wgM = 0, wgN = 0, wgK = 0, sgM = 0, sgN = 0, wgSize = 0, groupM = 0;
         bool fragments = false;   // W as Fragments; false: Rows
         uint32_t sgSize = 0;      // 0 keeps the device default
+        uint32_t schedule = 0;    // Linear::StrixSchedule bits (Fragments weights only)
     };
     const PointTile pick = [&]() -> PointTile {
         constexpr PointTile none{};
+        constexpr uint32_t streamCursor = Linear::ScheduleInputStream | Linear::ScheduleRowCursor;
         if (wDtype == Dtype::Fp32)   // ACT (fp32 weights, multiplied in fp16), at M 100, 300 and 302
         {
             if (M >= 256u && M <= 1024u)
@@ -1944,6 +1992,30 @@ inline Linear::PipeParamsTile amdPointLinearTile(
 
         if (M >= 256u && M <= 1024u)   // vision tower and prefix
         {
+            // ACT encoder ffn linear1 (bias + ReLU), measured at M 302 in the full forward;
+            // fp32 input keeps the fp32-weight pick, the fastest there too.
+            if (K == 512u && N == 3200u)
+                return iDtype == Dtype::Fp16
+                           ? PointTile{ 64, 64, 64, 64, 16, 128, 8, true, 32, streamCursor }
+                           : PointTile{ 64, 64, 32, 64, 32, 128, 8, true };
+            // ACT encoder self-attention in_proj (q, k, v stacked, bias), measured at M 302 in the
+            // full forward with fp16 and fp32 input. A tile with sgM 80 was 2% faster with fp16
+            // input and one with sgM 160 3% faster with fp32, but linear-cm-amd's prefetch and
+            // stream schedules give NaN at those sgM.
+            if (K == 512u && N == 1536u)
+                return { 32, 192, 64, 32, 48, 128, 8, true, 32 };
+            // ACT encoder self-attention out_proj (M 302) and image feature projection (M 300),
+            // measured in the full forward, the fastest with fp32 input too.
+            if (K == 512u && N == 512u)
+                return { 32, 64, 64, 32, 16, 128, 8, true, 32, streamCursor };
+            // ACT decoder cross-attention k, v from the encoder output, measured at M 302 in the
+            // full forward with fp16 and fp32 input.
+            if (K == 512u && N == 1024u)
+                return { 32, 128, 32, 32, 32, 128, 8, true, 32 };
+            // ACT encoder ffn linear2, measured at M 302 in the full forward, the fastest with
+            // fp32 input too.
+            if (K == 3200u && N == 512u)
+                return { 32, 64, 32, 32, 32, 64, 8, true, 32, Linear::SchedulePrefetch };
             const bool fullBands =
                 iDtype == Dtype::Fp16 ? M <= 576u : (M >= 312u && M <= 384u) || (M >= 520u && M <= 576u);
             if (K == 2048u && N == 32768u && iDtype == Dtype::Fp16 && M >= 768u && CEIL_DIV(M, 160u) * 160u - M <= 16u)
@@ -1985,6 +2057,16 @@ inline Linear::PipeParamsTile amdPointLinearTile(
         }
         else if (M >= 32u && M <= 128u)   // action expert
         {
+            // ACT decoder ffn linear1 (bias + ReLU), measured at M 100 in the full forward;
+            // fp32 input keeps the fp32-weight pick.
+            if (K == 512u && N == 3200u)
+                return iDtype == Dtype::Fp16
+                           ? PointTile{ 64, 128, 64, 64, 32, 256, 0, true }
+                           : PointTile{ 64, 128, 32, 64, 32, 256, 8, true };
+            // ACT decoder cross-attention out_proj, measured at M 100 in the full forward with
+            // fp16 and fp32 input.
+            if (K == 512u && N == 512u)
+                return { 32, 32, 64, 16, 16, 128, 4, true, 32, Linear::SchedulePrefetch | Linear::ScheduleVectorInput };
             if (K == 1024u && N == 1024u && iDtype == Dtype::Fp32)
                 return { 16, 64, 32, 16, 64, 64, 8, true };
             if (K == 1024u && N == 8192u)   // ex gate+up
@@ -2012,6 +2094,7 @@ inline Linear::PipeParamsTile amdPointLinearTile(
         plan.splits = 1;
         plan.groupM = pick.groupM;
         plan.weights = pick.fragments ? Linear::WeightLayout::Fragments : Linear::WeightLayout::Rows;
+        plan.schedule = pick.schedule;
         t.strix = plan;
     }
     return t;

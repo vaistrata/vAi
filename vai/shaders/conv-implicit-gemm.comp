@@ -2,6 +2,8 @@
  General shared-memory tiled implicit-GEMM convolution fallback.
  Bindings: O=0, I=1, W=2, BIAS=3, SCALE=4, RESIDUAL=5.
  Dispatch: x=pc.n tiles, y=pc.co tiles, z=pc.batch images.
+ directK1S2 (spec ID 9): x=ceil(ceil(Co/4)*Ho*Wo/wgSize), y=1; each lane
+ reuses one K1/S2 input for four output channels. z still selects the image.
  Push constants: PushConstants.
 =============================================================================*/
 #version 460
@@ -22,6 +24,7 @@ layout(constant_id = 5) const bool alignM = false;
 layout(constant_id = 6) const bool alignN = false;
 layout(constant_id = 7) const bool alignK = false;
 layout(constant_id = 8) const bool shortcut = false;
+layout(constant_id = 9) const bool directK1S2 = false;
 layout(constant_id = 12) const uint residualOrder = 0u;  // 0: after the activation, 1: before it
 layout(constant_id = SPEC_ID_TYPE_CI) const uint CI_SPEC = 0u;
 layout(constant_id = SPEC_ID_TYPE_CO) const uint CO_SPEC = 0u;
@@ -144,6 +147,30 @@ float finishOutput(uint channel, uint index, float value)
     return value;
 }
 
+// K1/S2: one input value feeds four output-channel accumulators.
+void runK1S2Direct(uint ci, uint co, uint hi, uint wi, uint wo, uint n)
+{
+    uint index = gl_GlobalInvocationID.x;
+    uint channel = index / n * 4u;
+    if (channel >= co) return;
+    uint pixel = index % n;
+    uint inputBase = 2u * (pixel / wo) * wi + 2u * (pixel % wo);
+    float acc[4];
+    for (uint t = 0u; t < 4u; ++t) acc[t] = 0.0;
+    for (uint c = 0u; c < ci; ++c)
+    {
+        float v = readI(inputBase + c * hi * wi);
+        for (uint t = 0u; t < 4u; ++t)
+            if (channel + t < co)
+                acc[t] = fma(v, readW((channel + t) * ci + c), acc[t]);
+    }
+    for (uint t = 0u; t < 4u && channel + t < co; ++t)
+    {
+        uint offset = (channel + t) * n + pixel;
+        writeO(offset, finishOutput(channel + t, offset, acc[t]));
+    }
+}
+
 void main()
 {
     const uint Hi = HI_SPEC != 0u ? HI_SPEC : pc.hi;
@@ -157,6 +184,11 @@ void main()
     const uint image = convImage(pc.batch);
     imageInputBase = image * Ci * Hi * Wi;
     imageOutputBase = image * Co * N;
+    if (directK1S2)
+    {
+        runK1S2Direct(Ci, Co, Hi, Wi, Wo, N);
+        return;
+    }
     const uint localId = gl_LocalInvocationID.x;
     const uint threadsN = wgN / tN;
     const uint threadN = localId % threadsN;

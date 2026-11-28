@@ -1,0 +1,150 @@
+/*=============================================================================
+ Direct stride-2 convolution for a few input channels and a large odd kernel
+ (a ResNet stem, 3 -> 64 at 7x7/2), without an implicit GEMM's im2col gather.
+ A workgroup computes TX x TY output pixels, one per thread, and keeps
+ CO_BLOCK output channels in registers per pass over the taps. It stages its
+ input patch, CI x (2*TY + KS - 2) x (2*TX + KS - 2) with the zero padding,
+ in shared memory once; the patch columns are split by parity, so the
+ stride-2 reads are unit-stride across lanes. W is the [CI*KS*KS][CO] fp32
+ copy conv-k7s2-direct-weight writes: every lane reads the same weights,
+ which the compiler loads once per subgroup as scalars.
+ out = activation(scale * conv + bias), fp32 input and arithmetic, fp32 or fp16 output (typeO).
+ Bindings: O=0, I=1, W=2 (transformed), BIAS=3, SCALE=4.
+ Dispatch: x=ceil(Wo / TX), y=ceil(Ho / TY), z=pc.batch images.
+ Push constants: PushConstants.
+=============================================================================*/
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_control_flow_attributes : require
+#extension GL_GOOGLE_include_directive : require
+#include "common/activation.h"
+
+layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z = 1) in;
+layout(constant_id = 0) const uint TX = 32u;         // output columns per workgroup
+layout(constant_id = 1) const uint TY = 16u;         // output rows per workgroup
+layout(constant_id = 2) const uint CO_BLOCK = 16u;   // output channels per pass over the taps
+layout(constant_id = 3) const uint KS = 7u;          // kernel size, odd; padding KS / 2
+layout(constant_id = SPEC_ID_TYPE_CI) const uint CI = 3u;
+layout(constant_id = SPEC_ID_TYPE_CO) const uint CO = 64u;
+layout(constant_id = SPEC_ID_TYPE_P) const uint typeP = 0u;
+layout(constant_id = SPEC_ID_HAS_SCALE) const uint hasScale = 0u;
+layout(constant_id = SPEC_ID_HAS_BIAS) const uint hasBias = 1u;
+layout(constant_id = SPEC_ID_TYPE_O) const uint typeO = 0u;   // O dtype: DTYPE_F32 or DTYPE_F16
+
+layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_F32 { float bO_f32[]; };
+layout(set = 0, binding = 0) restrict writeonly buffer O_BUF_F16 { float16_t bO_f16[]; };
+layout(set = 0, binding = 1) restrict readonly buffer I_BUF { float bI[]; };
+layout(set = 0, binding = 2) restrict readonly buffer W_BUF { float bW[]; };
+layout(set = 0, binding = 3) restrict readonly buffer BIAS_BUF_F32 { float bBias_f32[]; };
+layout(set = 0, binding = 3) restrict readonly buffer BIAS_BUF_F16 { float16_t bBias_f16[]; };
+layout(set = 0, binding = 4) restrict readonly buffer SCALE_BUF_F32 { float bScale_f32[]; };
+layout(set = 0, binding = 4) restrict readonly buffer SCALE_BUF_F16 { float16_t bScale_f16[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint hi;
+    uint wi;
+    uint ho;
+    uint wo;
+    uint ci;
+    uint co;
+    uint n;
+    uint splitCount;
+    uint kernel;
+    uint stride;
+    uint batch;             // images, stacked on the dispatch z axis
+} pc;
+
+const uint PAD = KS / 2u;
+const uint PATCH_ROWS = 2u * TY + KS - 2u;
+const uint PATCH_COLS = 2u * TX + KS - 2u;
+const uint PARITY_COLS = (PATCH_COLS + 1u) / 2u;
+shared float inputPatch[CI * PATCH_ROWS * 2u * PARITY_COLS];
+
+uint patchIndex(uint c, uint row, uint parity, uint column)
+{
+    return ((c * PATCH_ROWS + row) * 2u + parity) * PARITY_COLS + column;
+}
+
+float readBias(uint co)
+{
+    if (hasBias == 0u) return 0.0;
+    return typeP == DTYPE_F32 ? bBias_f32[co] : float(bBias_f16[co]);
+}
+
+float readScale(uint co)
+{
+    if (hasScale == 0u) return 1.0;
+    return typeP == DTYPE_F32 ? bScale_f32[co] : float(bScale_f16[co]);
+}
+
+void writeO(uint index, float value)
+{
+    if (typeO == DTYPE_F32) bO_f32[index] = value;
+    else bO_f16[index] = float16_t(value);
+}
+
+void main()
+{
+    const uint tx = gl_LocalInvocationID.x;
+    const uint ty = gl_LocalInvocationID.y;
+    const uint thread = ty * TX + tx;
+    const uint image = gl_WorkGroupID.z;
+    const uint inputBase = image * CI * pc.hi * pc.wi;
+    const uint outputBase = image * CO * pc.ho * pc.wo;
+    const uint ox0 = gl_WorkGroupID.x * TX;
+    const uint oy0 = gl_WorkGroupID.y * TY;
+    const int iy0 = int(oy0 * 2u) - int(PAD);
+    const int ix0 = int(ox0 * 2u) - int(PAD);
+
+    // Stage the patch, zero outside the image.
+    for (uint i = thread; i < CI * PATCH_ROWS * PATCH_COLS; i += TX * TY)
+    {
+        const uint c = i / (PATCH_ROWS * PATCH_COLS);
+        const uint rem = i - c * (PATCH_ROWS * PATCH_COLS);
+        const uint row = rem / PATCH_COLS;
+        const uint col = rem - row * PATCH_COLS;
+        const int iy = iy0 + int(row);
+        const int ix = ix0 + int(col);
+        float value = 0.0;
+        if (iy >= 0 && ix >= 0 && iy < int(pc.hi) && ix < int(pc.wi))
+            value = bI[inputBase + (c * pc.hi + uint(iy)) * pc.wi + uint(ix)];
+        inputPatch[patchIndex(c, row, col & 1u, col >> 1u)] = value;
+    }
+    barrier();
+
+    const uint oy = oy0 + ty;
+    const uint ox = ox0 + tx;
+
+    for (uint coBase = 0u; coBase < CO; coBase += CO_BLOCK)
+    {
+        float acc[CO_BLOCK];
+        [[unroll]] for (uint k = 0u; k < CO_BLOCK; ++k)
+            acc[k] = 0.0;
+
+        for (uint c = 0u; c < CI; ++c)
+        {
+            for (uint r = 0u; r < KS; ++r)
+            {
+                const uint row = ty * 2u + r;
+                [[unroll]] for (uint s = 0u; s < KS; ++s)
+                {
+                    const float value = inputPatch[patchIndex(c, row, s & 1u, tx + (s >> 1u))];
+                    const uint weightBase = ((c * KS + r) * KS + s) * CO + coBase;
+                    [[unroll]] for (uint k = 0u; k < CO_BLOCK; ++k)
+                        acc[k] = fma(value, bW[weightBase + k], acc[k]);
+                }
+            }
+        }
+
+        if (oy < pc.ho && ox < pc.wo)
+        {
+            [[unroll]] for (uint k = 0u; k < CO_BLOCK; ++k)
+            {
+                const uint co = coBase + k;
+                writeO(outputBase + (co * pc.ho + oy) * pc.wo + ox,
+                       applyActivation(fma(acc[k], readScale(co), readBias(co))));
+            }
+        }
+    }
+}

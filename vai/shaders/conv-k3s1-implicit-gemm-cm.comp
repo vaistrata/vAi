@@ -1,6 +1,14 @@
 /*=============================================================================
- FP16 implicit GEMM for K=3/S=1.
+ FP16 implicit GEMM for K=3, stride 1 or 2 (convStride).
  Bindings: O=0, I=1, W=2, BIAS=3, SCALE=4, RESIDUAL=5.
+ The workgroup gathers K in panels of panelK im2col rows (wgN pixels each)
+ into shared memory, and its subgroups multiply them by weight fragments
+ read from W. With prefetchPanel the next panel's global reads are issued
+ before the multiply and land in registers while it runs; they are written
+ to the shared panel after it.
+ With convStride 2, 8 output columns read 17 consecutive input columns,
+ fetched as four f16vec4 and one scalar and split by parity into the three
+ column taps.
  Dispatch: x=N tiles, y=M tiles, z=pc.batch images.
  Push constants: PushConstants.
 =============================================================================*/
@@ -28,6 +36,8 @@ layout(constant_id = 7) const bool flatSpatial = false;
 layout(constant_id = 8) const uint panelK = 64u;
 layout(constant_id = 9) const bool directOutput = false;
 layout(constant_id = 10) const uint residualOrder = 0u;  // 0: after the activation, 1: before it
+layout(constant_id = 11) const bool prefetchPanel = false;  // see the header
+layout(constant_id = 12) const uint convStride = 1u;        // 1 or 2
 layout(constant_id = SPEC_ID_TYPE_CI) const uint CI_SPEC = 0u;
 layout(constant_id = SPEC_ID_TYPE_CO) const uint CO_SPEC = 0u;
 layout(constant_id = SPEC_ID_TYPE_HI) const uint HI_SPEC = 0u;
@@ -398,6 +408,227 @@ uint transformedWeightIndex(uint m, uint k, uint kTiles)
            row * tK + column;
 }
 
+// ---------------------------------------------------------------------------
+// Panel fill: each fill slot is one channel, one kernel row (kh) and one
+// 8-column block of the tile; it reads 8 centre pixels and their left and
+// right neighbours, and writes the three column shifts (kw = 0, 1, 2).
+// ---------------------------------------------------------------------------
+const uint PANEL_CHANNELS = panelK / 9u;
+const uint PACKED_BLOCK_COLUMNS = 8u;
+const uint PACKED_BLOCKS = spatialTileW / PACKED_BLOCK_COLUMNS;
+const uint PACKED_INPUT_LOADS = PANEL_CHANNELS * 3u * PACKED_BLOCKS;
+const uint FILL_ITERS = (PACKED_INPUT_LOADS + wgSize - 1u) / wgSize;
+
+// The tile and shape, set once by main().
+uint gHi, gWi, gWo, gN, gTileN0, gTileRow, gTileW0;
+
+struct PanelSlot
+{
+    f16vec4 center0;   // stride 1: columns 0..7; stride 2: the even inputs (kw = 1)
+    f16vec4 center1;
+    float16_t left;
+    float16_t right;   // stride 1 only
+    f16vec4 odd0;      // stride 2: the odd inputs (kw = 2)
+    f16vec4 odd1;
+};
+
+bool channelMajorPackedLoad()
+{
+    return rowAlignedFlatSpatial && PACKED_BLOCKS == 2u &&
+        wgSize == 2u * PANEL_CHANNELS &&
+        PACKED_INPUT_LOADS == 3u * wgSize;
+}
+
+// The slot's channel within the panel, kernel row and block column.
+void panelSlotCoords(uint iter, out uint localChannel, out uint kh, out uint blockColumn)
+{
+    const uint fill = gl_LocalInvocationID.x + iter * gl_WorkGroupSize.x;
+    const uint channelStride = 3u * PACKED_BLOCKS;
+    const bool channelMajor = channelMajorPackedLoad();
+    localChannel = channelMajor
+        ? gl_LocalInvocationID.x % PANEL_CHANNELS
+        : fill / channelStride;
+    const uint rowSpatial = channelMajor
+        ? 0u
+        : fill % channelStride;
+    kh = channelMajor
+        ? iter
+        : rowSpatial / PACKED_BLOCKS;
+    const uint block = channelMajor
+        ? gl_LocalInvocationID.x / PANEL_CHANNELS
+        : rowSpatial % PACKED_BLOCKS;
+    blockColumn = block * PACKED_BLOCK_COLUMNS;
+}
+
+bool panelSlotActive(uint iter)
+{
+    return gl_LocalInvocationID.x + iter * gl_WorkGroupSize.x < PACKED_INPUT_LOADS;
+}
+
+PanelSlot loadPanelSlot(uint panelBase, uint iter)
+{
+    const uint Hi = gHi, Wi = gWi, Wo = gWo, N = gN;
+    const uint tileN0 = gTileN0, tileRow = gTileRow, tileW0 = gTileW0;
+    uint localChannel, kh, blockColumn;
+    panelSlotCoords(iter, localChannel, kh, blockColumn);
+    const uint channel =
+        panelBase / 9u + localChannel;
+    const uint blockN = flatSpatial
+        ? tileN0 + blockColumn
+        : tileRow * Wo + tileW0 + blockColumn;
+    const uint blockRow = rowAlignedFlatSpatial
+        ? tileRow
+        : flatSpatial
+            ? blockN / Wo
+            : tileRow;
+    const int hIn = int(blockRow * convStride) + (int(kh) - 1);
+    const bool validRow =
+        (rowAlignedFlatSpatial ||
+         !flatSpatial || blockN < N) &&
+        uint(hIn) < Hi;
+
+    PanelSlot slot;
+    slot.center0 = f16vec4(0.0);
+    slot.center1 = f16vec4(0.0);
+    slot.left = float16_t(0.0);
+    slot.right = float16_t(0.0);
+    slot.odd0 = f16vec4(0.0);
+    slot.odd1 = f16vec4(0.0);
+    const uint centerW = rowAlignedFlatSpatial
+        ? tileW0 + blockColumn
+        : flatSpatial
+            ? blockN % Wo
+            : tileW0 + blockColumn;
+    const uint rowBase = validRow
+        ? (channel * Hi + uint(hIn)) * Wi
+        : 0u;
+
+    if (convStride == 2u)
+    {
+        // Output columns centerW .. centerW + 7 read inputs inW - 1 .. inW + 15.
+        const uint inW = 2u * centerW;
+        f16vec4 q[4] = f16vec4[4](f16vec4(0.0), f16vec4(0.0), f16vec4(0.0), f16vec4(0.0));
+        if (validRow)
+        {
+            if (inW + 15u < Wi && ((imageInputBase + rowBase + inW) & 3u) == 0u)
+            {
+                [[unroll]]
+                for (uint v = 0u; v < 4u; ++v)
+                    q[v] = readI4(rowBase + inW + 4u * v);
+            }
+            else
+            {
+                [[unroll]]
+                for (uint j = 0u; j < 16u; ++j)
+                    if (inW + j < Wi)
+                        q[j >> 2u][j & 3u] = readI(rowBase + inW + j);
+            }
+            if (inW > 0u && inW - 1u < Wi)
+                slot.left = readI(rowBase + inW - 1u);
+        }
+        slot.center0 = f16vec4(q[0].x, q[0].z, q[1].x, q[1].z);
+        slot.center1 = f16vec4(q[2].x, q[2].z, q[3].x, q[3].z);
+        slot.odd0 = f16vec4(q[0].y, q[0].w, q[1].y, q[1].w);
+        slot.odd1 = f16vec4(q[2].y, q[2].w, q[3].y, q[3].w);
+        return slot;
+    }
+
+    const uint centerBase = rowBase + centerW;
+
+    if (rowAlignedFlatSpatial &&
+        WI_SPEC != 0u && WI_SPEC == WO_SPEC)
+    {
+        if (validRow)
+        {
+            slot.center0 = readI4(centerBase);
+            slot.center1 = readI4(centerBase + 4u);
+        }
+    }
+    else if (WI_SPEC != 0u && (WI_SPEC & 7u) == 0u)
+    {
+        if (validRow && centerW < Wi)
+        {
+            slot.center0 = readI4(centerBase);
+            slot.center1 = readI4(centerBase + 4u);
+        }
+    }
+    else if (validRow && centerW + 7u < Wi &&
+             ((imageInputBase + centerBase) & 3u) == 0u)
+    {
+        slot.center0 = readI4(centerBase);
+        slot.center1 = readI4(centerBase + 4u);
+    }
+    else if (validRow)
+    {
+        [[unroll]]
+        for (uint component = 0u;
+             component < 4u; ++component)
+        {
+            if (centerW + component < Wi)
+                slot.center0[component] =
+                    readI(rowBase + centerW + component);
+            if (centerW + 4u + component < Wi)
+                slot.center1[component] =
+                    readI(
+                        rowBase + centerW + 4u +
+                        component);
+        }
+    }
+
+    if (validRow && centerW > 0u)
+        slot.left = readI(rowBase + centerW - 1u);
+    if (validRow && centerW + 8u < Wi)
+        slot.right = readI(rowBase + centerW + 8u);
+    return slot;
+}
+
+// Writes the slot's three column shifts into the shared panel.
+void storePanelSlot(uint iter, PanelSlot slot)
+{
+    uint localChannel, kh, blockColumn;
+    panelSlotCoords(iter, localChannel, kh, blockColumn);
+    const uint kBase =
+        (localChannel * 9u + kh * 3u) * wgN +
+        blockColumn;
+    const uint leftBase4 = kBase >> 2u;
+    const uint centerBase4 =
+        (kBase + wgN) >> 2u;
+    const uint rightBase4 =
+        (kBase + 2u * wgN) >> 2u;
+    const f16vec4 center0 = slot.center0;
+    const f16vec4 center1 = slot.center1;
+    if (convStride == 2u)
+    {
+        // kw = 0 takes input 2w - 1: the odd inputs shifted by one column
+        const f16vec4 odd0 = slot.odd0;
+        const f16vec4 odd1 = slot.odd1;
+        BsPacked[leftBase4] = f16vec4(slot.left, odd0.x, odd0.y, odd0.z);
+        BsPacked[leftBase4 + 1u] = f16vec4(odd0.w, odd1.x, odd1.y, odd1.z);
+        BsPacked[centerBase4] = center0;
+        BsPacked[centerBase4 + 1u] = center1;
+        BsPacked[rightBase4] = odd0;
+        BsPacked[rightBase4 + 1u] = odd1;
+        return;
+    }
+    BsPacked[leftBase4] =
+        f16vec4(
+            slot.left, center0.x, center0.y, center0.z);
+    BsPacked[leftBase4 + 1u] =
+        f16vec4(
+            center0.w, center1.x,
+            center1.y, center1.z);
+    BsPacked[centerBase4] = center0;
+    BsPacked[centerBase4 + 1u] = center1;
+    BsPacked[rightBase4] =
+        f16vec4(
+            center0.y, center0.z,
+            center0.w, center1.x);
+    BsPacked[rightBase4 + 1u] =
+        f16vec4(
+            center1.y, center1.z,
+            center1.w, slot.right);
+}
+
 void main()
 {
     const uint Hi = HI_SPEC != 0u ? HI_SPEC : pc.hi;
@@ -426,6 +657,13 @@ void main()
     uint tileValidColumns = flatSpatial
         ? min(spatialTileW, N - tileN0)
         : min(spatialTileW, Wo - tileW0);
+    gHi = Hi;
+    gWi = Wi;
+    gWo = Wo;
+    gN = N;
+    gTileN0 = tileN0;
+    gTileRow = tileRow;
+    gTileW0 = tileW0;
     uint rawM = gl_WorkGroupID.y * wgM;
     uint subgroup = gl_SubgroupID;
     uint subgroupIdM = subgroup / sgNCount;
@@ -443,199 +681,96 @@ void main()
         if (index < accFrags)
             acc32[index] = accMat32(0.0);
 
+    PanelSlot staged[FILL_ITERS];
+    if (prefetchPanel)
     {
-        for (uint panelBase = 0u; panelBase < KK; panelBase += panelK)
+        // The first panel, before the loop.
+        [[unroll]]
+        for (uint iter = 0u; iter < FILL_ITERS; ++iter)
+            if (panelSlotActive(iter))
+                storePanelSlot(iter, loadPanelSlot(0u, iter));
+        barrier();
+    }
+
+    for (uint panelBase = 0u; panelBase < KK; panelBase += panelK)
+    {
+        const bool morePanels = panelBase + panelK < KK;
+        if (!prefetchPanel)
         {
-            const uint panelChannels = panelK / 9u;
-            const uint packedBlockColumns = 8u;
-            const uint packedBlocks =
-                spatialTileW / packedBlockColumns;
-            const uint packedInputLoads =
-                panelChannels * 3u * packedBlocks;
-            const uint iters = packedInputLoads / gl_WorkGroupSize.x +
-                (packedInputLoads % gl_WorkGroupSize.x != 0u ? 1u : 0u);
-            const bool channelMajorPackedLoad =
-                rowAlignedFlatSpatial && packedBlocks == 2u &&
-                wgSize == 2u * panelChannels &&
-                packedInputLoads == 3u * wgSize;
+            [[unroll]]
+            for (uint iter = 0u; iter < FILL_ITERS; ++iter)
+                if (panelSlotActive(iter))
+                    storePanelSlot(iter, loadPanelSlot(panelBase, iter));
+            barrier();
+        }
+        else if (morePanels)
+        {
+            // The next panel's reads go out now and land during the multiply.
+            [[unroll]]
+            for (uint iter = 0u; iter < FILL_ITERS; ++iter)
+                if (panelSlotActive(iter))
+                    staged[iter] = loadPanelSlot(panelBase + panelK, iter);
+        }
+
+        for (uint kOffset = 0u;
+             kOffset < panelK; kOffset += tK)
+        {
+            [[unroll]]
+            for (uint nTile = 0u; nTile < 4u; ++nTile)
+            {
+                if (nTile < sgpNIter)
+                {
+                    const uint bBase =
+                        kOffset * wgN +
+                        (bTileBase + nTile) * tN;
+                    coopMatLoad(
+                        b[nTile], BsPacked,
+                        bBase >> 2u,
+                        wgN >> 2u,
+                        gl_CooperativeMatrixLayoutRowMajor);
+                }
+            }
 
             [[unroll]]
-            for (uint iter = 0u; iter < iters; ++iter)
+            for (uint mTile = 0u; mTile < 4u; ++mTile)
             {
-                const uint fill = gl_LocalInvocationID.x +
-                    iter * gl_WorkGroupSize.x;
-                if (fill < packedInputLoads)
+                if (mTile < sgpMIter)
                 {
-                    const uint channelStride = 3u * packedBlocks;
-                    const uint localChannel = channelMajorPackedLoad
-                        ? gl_LocalInvocationID.x % panelChannels
-                        : fill / channelStride;
-                    const uint rowSpatial = channelMajorPackedLoad
-                        ? 0u
-                        : fill % channelStride;
-                    const uint kh = channelMajorPackedLoad
-                        ? iter
-                        : rowSpatial / packedBlocks;
-                    const uint block = channelMajorPackedLoad
-                        ? gl_LocalInvocationID.x / panelChannels
-                        : rowSpatial % packedBlocks;
-                    const uint blockColumn =
-                        block * packedBlockColumns;
-                    const uint channel =
-                        panelBase / 9u + localChannel;
-                    const uint blockN = flatSpatial
-                        ? tileN0 + blockColumn
-                        : tileRow * Wo + tileW0 + blockColumn;
-                    const uint blockRow = rowAlignedFlatSpatial
-                        ? tileRow
-                        : flatSpatial
-                            ? blockN / Wo
-                            : tileRow;
-                    const int hIn = int(blockRow) + (int(kh) - 1);
-                    const bool validRow =
-                        (rowAlignedFlatSpatial ||
-                         !flatSpatial || blockN < N) &&
-                        uint(hIn) < Hi;
-
-                    f16vec4 center0 = f16vec4(0.0);
-                    f16vec4 center1 = f16vec4(0.0);
-                    float16_t left = float16_t(0.0);
-                    float16_t right = float16_t(0.0);
-                    const uint centerW = rowAlignedFlatSpatial
-                        ? tileW0 + blockColumn
-                        : flatSpatial
-                            ? blockN % Wo
-                            : tileW0 + blockColumn;
-                    const uint rowBase = validRow
-                        ? (channel * Hi + uint(hIn)) * Wi
-                        : 0u;
-                    const uint centerBase = rowBase + centerW;
-
-                    if (rowAlignedFlatSpatial &&
-                        WI_SPEC != 0u && WI_SPEC == WO_SPEC)
+                    const uint m = m0 + mTile * tM;
+                    const uint k = panelBase + kOffset;
+                    coopMatLoad(
+                        a[mTile], bW_4f16,
+                        transformedWeightIndex(
+                            m, k, kTiles) >> 2u,
+                        tK >> 2u,
+                        gl_CooperativeMatrixLayoutRowMajor);
+                    [[unroll]]
+                    for (uint nTile = 0u;
+                         nTile < 4u; ++nTile)
                     {
-                        if (validRow)
+                        if (nTile < sgpNIter)
                         {
-                            center0 = readI4(centerBase);
-                            center1 = readI4(centerBase + 4u);
+                            const uint accIndex =
+                                mTile * sgpNIter + nTile;
+                            acc32[accIndex] = coopMatMulAdd(
+                                a[mTile], b[nTile],
+                                acc32[accIndex]);
                         }
                     }
-                    else if (WI_SPEC != 0u && (WI_SPEC & 7u) == 0u)
-                    {
-                        if (validRow && centerW < Wi)
-                        {
-                            center0 = readI4(centerBase);
-                            center1 = readI4(centerBase + 4u);
-                        }
-                    }
-                    else if (validRow && centerW + 7u < Wi &&
-                             ((imageInputBase + centerBase) & 3u) == 0u)
-                    {
-                        center0 = readI4(centerBase);
-                        center1 = readI4(centerBase + 4u);
-                    }
-                    else if (validRow)
-                    {
-                        [[unroll]]
-                        for (uint component = 0u;
-                             component < 4u; ++component)
-                        {
-                            if (centerW + component < Wi)
-                                center0[component] =
-                                    readI(rowBase + centerW + component);
-                            if (centerW + 4u + component < Wi)
-                                center1[component] =
-                                    readI(
-                                        rowBase + centerW + 4u +
-                                        component);
-                        }
-                    }
-
-                    if (validRow && centerW > 0u)
-                        left = readI(rowBase + centerW - 1u);
-                    if (validRow && centerW + 8u < Wi)
-                        right = readI(rowBase + centerW + 8u);
-
-                    const uint kBase =
-                        (localChannel * 9u + kh * 3u) * wgN +
-                        blockColumn;
-                    const uint leftBase4 = kBase >> 2u;
-                    const uint centerBase4 =
-                        (kBase + wgN) >> 2u;
-                    const uint rightBase4 =
-                        (kBase + 2u * wgN) >> 2u;
-                    BsPacked[leftBase4] =
-                        f16vec4(
-                            left, center0.x, center0.y, center0.z);
-                    BsPacked[leftBase4 + 1u] =
-                        f16vec4(
-                            center0.w, center1.x,
-                            center1.y, center1.z);
-                    BsPacked[centerBase4] = center0;
-                    BsPacked[centerBase4 + 1u] = center1;
-                    BsPacked[rightBase4] =
-                        f16vec4(
-                            center0.y, center0.z,
-                            center0.w, center1.x);
-                    BsPacked[rightBase4 + 1u] =
-                        f16vec4(
-                            center1.y, center1.z,
-                            center1.w, right);
                 }
             }
+        }
+
+        if (!morePanels)
+            continue;
+        barrier();   // everyone is done with the panel before it is overwritten
+        if (prefetchPanel)
+        {
+            [[unroll]]
+            for (uint iter = 0u; iter < FILL_ITERS; ++iter)
+                if (panelSlotActive(iter))
+                    storePanelSlot(iter, staged[iter]);
             barrier();
-
-            for (uint kOffset = 0u;
-                 kOffset < panelK; kOffset += tK)
-            {
-                [[unroll]]
-                for (uint nTile = 0u; nTile < 4u; ++nTile)
-                {
-                    if (nTile < sgpNIter)
-                    {
-                        const uint bBase =
-                            kOffset * wgN +
-                            (bTileBase + nTile) * tN;
-                        coopMatLoad(
-                            b[nTile], BsPacked,
-                            bBase >> 2u,
-                            wgN >> 2u,
-                            gl_CooperativeMatrixLayoutRowMajor);
-                    }
-                }
-
-                [[unroll]]
-                for (uint mTile = 0u; mTile < 4u; ++mTile)
-                {
-                    if (mTile < sgpMIter)
-                    {
-                        const uint m = m0 + mTile * tM;
-                        const uint k = panelBase + kOffset;
-                        coopMatLoad(
-                            a[mTile], bW_4f16,
-                            transformedWeightIndex(
-                                m, k, kTiles) >> 2u,
-                            tK >> 2u,
-                            gl_CooperativeMatrixLayoutRowMajor);
-                        [[unroll]]
-                        for (uint nTile = 0u;
-                             nTile < 4u; ++nTile)
-                        {
-                            if (nTile < sgpNIter)
-                            {
-                                const uint accIndex =
-                                    mTile * sgpNIter + nTile;
-                                acc32[accIndex] = coopMatMulAdd(
-                                    a[mTile], b[nTile],
-                                    acc32[accIndex]);
-                            }
-                        }
-                    }
-                }
-            }
-
-            if (panelBase + panelK < KK)
-                barrier();
         }
     }
 

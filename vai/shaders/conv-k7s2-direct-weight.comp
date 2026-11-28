@@ -1,0 +1,45 @@
+/*=============================================================================
+ Weight transform for conv-k7s2-direct: W [Co][Ci*K*K] (fp32 or fp16) ->
+ [Ci*K*K][Co] fp32, so one tap's Co weights sit next to each other.
+ Bindings: O=0, I=1. Dispatch covers pc.co*pc.ci*pc.kernel*pc.kernel.
+ Push constants: PushConstants.
+=============================================================================*/
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_GOOGLE_include_directive : require
+
+#include "common/spec_constants.h"
+
+layout(local_size_x = 256) in;
+
+layout(constant_id = SPEC_ID_TYPE_W) const uint typeW = 0u;
+
+layout(set = 0, binding = 0) restrict writeonly buffer O_BUF { float bO[]; };
+layout(set = 0, binding = 1) restrict readonly buffer I_BUF_F32 { float bI_f32[]; };
+layout(set = 0, binding = 1) restrict readonly buffer I_BUF_F16 { float16_t bI_f16[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint hi;
+    uint wi;
+    uint ho;
+    uint wo;
+    uint ci;
+    uint co;
+    uint n;
+    uint splitCount;
+    uint kernel;
+    uint stride;
+    uint batch;             // the convolution's images; a weight transform ignores it
+} pc;
+
+void main()
+{
+    const uint index = gl_GlobalInvocationID.x;
+    const uint taps = pc.ci * pc.kernel * pc.kernel;
+    if (index >= pc.co * taps)
+        return;
+    const uint co = index / taps;
+    const uint tap = index - co * taps;
+    bO[tap * pc.co + co] = typeW == DTYPE_F32 ? bI_f32[index] : float(bI_f16[index]);
+}
